@@ -1,8 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
+
 import functions as fn
 
 small_scalar = 0.15
+_learning_rate = 0.001
+
 
 def generate_data():
     N = 100  # number of points per class
@@ -21,23 +24,52 @@ def generate_data():
     return X, y
 
 
+@np.vectorize
+def list_to_num(list):
+    result = 0
+    for index, number in enumerate(list):
+        result += index * number
+    return result
+
+
+@np.vectorize
+def num_to_list_padded(integer, padding):
+    result = [0 for _ in range(padding)]
+    small_form = num_to_list(integer)
+    result[0:len(small_form)] = small_form
+    return result
+
+
+def num_to_binary(integer):
+    result = []
+    while integer > 0:
+        remainder = integer % 2
+        result.append(remainder)
+        integer -= remainder
+        integer /= 2
+    return result
+
+
+@np.vectorize
+def num_to_list(integer):
+    result = [0 for _ in range(3)]
+    result[integer] = 1
+    return result
+
+
 def visualise(X, y):
     plt.scatter(X[:, 0], X[:, 1], c=y, s=40, cmap=plt.cm.Spectral)
     plt.show()
 
+
 class NeuralNet:
-    def __init__(self):
+    def __init__(self, input_size):
         self.layers = []
-        self.input_size = 2
-        self.output_size = 3
+        self.input_size = input_size
 
-
-        self.W1 = self.initialize(2, 1)
-        self.W2 = self.initialize(2, 6)
-        self.W3 = self.initialize(6, 3)
-        self.b1 = self.initialize(1, 1)
-        self.b2 = self.initialize(1, 1)
-        #self.h1 = self.relu(np.dot(x, W2) + b1)
+    @staticmethod
+    def xavier_initialization(self):
+        pass
 
     def forward_pass(self, inputs):
         x = inputs
@@ -45,10 +77,24 @@ class NeuralNet:
             x = layer.compute(x)
         return x
 
+    def back_prop(self, actual):
+        up_grads = np.array([[2], [2], [2]]) * (self.layers[-1].outputs - actual) #todo remove hardcode
+        for layer in self.layers[::-1]:
+            up_grads = layer.back_compute(up_grads)
+            layer.update_parameters()
+
+    @staticmethod
+    def loss_squares(outputs, actual):
+        def grad():
+            return 2 * outputs
+
+        return np.sum(np.abs(outputs - actual) ** 2)
+
     class Layer:
         def __init__(self, input_size, output_size):
             self.input_size = input_size
             self.output_size = output_size
+            self.outputs = None
 
         def initialize(self, n, inputs=1):
             factor = small_scalar
@@ -57,20 +103,53 @@ class NeuralNet:
     class ReLu(Layer):
         def __init__(self, input_size, output_size):
             super().__init__(input_size, output_size)
-            self.weights = self.initialize(self.input_size, self.output_size)
-            self.bias = self.initialize(1, 1)
+            self.weights = 0.01 * np.random.randn(output_size, input_size)
+            self.bias = np.zeros((output_size, 1))
+            self.outputs = None
+            self.local_grad = None
+            self.inputs = None
+            self.scalar = None
+            self.grad_scalar = None
+            self.sum = None
+            self.grad_bias_local = None
+            self.total_grad_bias = None
+
+        def get_local_grad_matrix(self, inputs, outputs):
+            self.local_grad = self.weights
 
         def compute(self, inputs):
-            return fn.relu(np.dot(inputs, self.weights) + self.bias)
+            self.sum = np.dot(self.weights, inputs) + self.bias
+            self.grad_scalar = np.ones((self.output_size, 1))
+            self.grad_scalar[
+                self.sum <= 0] = 0  # the gradient for each output neuron wrt the function
+
+            self.grad_x_local = self.weights * self.grad_scalar  # needs to be also multiplied by upstream
+
+            self.grad_w_local = np.repeat(np.transpose(inputs), self.output_size, axis=0)
+
+            self.outputs = fn.relu(np.dot(self.weights, inputs) + self.bias)
+            return self.outputs
+
+        def back_compute(self, upstream):
+            self.total_w_grad = self.grad_w_local * upstream
+            self.total_x_grad = np.dot(np.transpose(self.grad_x_local), upstream)
+            self.total_grad_bias = self.grad_scalar * upstream
+            return self.total_x_grad
+
+        def update_parameters(self):
+            self.weights -= _learning_rate * self.total_w_grad
+            self.bias -= _learning_rate * self.total_grad_bias
 
     class SoftMax(Layer):
         def __init__(self, input_size, output_size):
             super().__init__(input_size, output_size)
-            self.weights = self.initialize(self.input_size, self.output_size)
-            self.bias = self.initialize(1, 1)
+            self.weights = self.initialize(self.output_size, self.input_size)
+            self.bias = self.initialize(output_size, 1)
+            self.outputs = None
 
         def compute(self, inputs):
-            return fn.softmax(np.dot(inputs, self.weights) + self.bias)
+            self.outputs = fn.softmax(np.dot(self.weights, inputs) + self.bias)
+            return self.outputs
 
     def add_layer(self, kind='relu'):
         if kind == 'relu':
@@ -81,28 +160,27 @@ class NeuralNet:
 
         self.layers.append(self.ReLu(_input_size, hidden_size))
 
-
-
     @staticmethod
     def initialize(n, inputs=1):
         factor = small_scalar
         return factor * (np.random.randn(n, inputs) - 0.5)
 
 
-
-
-
-
 inputs = 100 * np.array([[100, 200]])
 
-nn = NeuralNet()
-nn.add_relu(6)
-nn.add_relu(4)
-
-
-#out = softmax(np.dot(h1, W3) + b2)
-
 X, y = generate_data()
+
+X_train = X[:300]
+X_train = [np.reshape(x, (2, 1)) for x in X_train]
+X_test = X[200:]
+X_test = [np.reshape(x, (2, 1)) for x in X_test]
+
+Y_train = y[:300]
+Y_train = [np.reshape(num_to_list(z), (3, 1)) for z in Y_train]
+Y_test = y[200:]
+Y_test = [np.reshape(num_to_list(z), (3,1)) for z in Y_test]
+train_data = list(zip(X_train, Y_train))
+test_data = list(zip(X_test, Y_test))
 visualise(X, y)
 
 
