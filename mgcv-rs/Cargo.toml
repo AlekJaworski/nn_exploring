@@ -1,0 +1,9 @@
+[package]
+name = "mgcv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Using minimal dependencies that might be pre-cached
+
+[dev-dependencies]
