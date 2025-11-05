@@ -7,7 +7,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("=== Testing REML Optimization ===\n");
 
     // Generate data
-    let n = 30;
+    let n = 300;  // Increased from 30 to 300
     let x_data: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
     let y_data: Vec<f64> = x_data
         .iter()

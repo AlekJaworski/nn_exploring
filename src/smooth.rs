@@ -22,7 +22,7 @@ impl SmoothingParameter {
     /// Create new smoothing parameters with initial values
     pub fn new(num_smooths: usize, method: OptimizationMethod) -> Self {
         Self {
-            lambda: vec![1.0; num_smooths],
+            lambda: vec![0.1; num_smooths],  // Better starting point than 1.0
             method,
         }
     }
@@ -60,87 +60,32 @@ impl SmoothingParameter {
         x: &Array2<f64>,
         w: &Array1<f64>,
         penalties: &[Array2<f64>],
-        max_iter: usize,
-        tolerance: f64,
+        _max_iter: usize,
+        _tolerance: f64,
     ) -> Result<()> {
-        // Simple grid search followed by Newton-Raphson refinement
-        // For production, would use more sophisticated optimization
+        // For single smooth case
+        if penalties.len() != 1 {
+            panic!("Multiple smooths not yet properly implemented for REML");
+        }
 
-        // Work in log space for numerical stability
-        let mut log_lambda: Vec<f64> = self.lambda.iter()
-            .map(|l| l.ln())
-            .collect();
+        // Use grid search to find optimal lambda
+        // (Gradient descent has convergence issues with REML)
+        let mut best_lambda = self.lambda[0];
+        let mut best_reml = f64::INFINITY;
 
-        for iter in 0..max_iter {
-            let mut converged = true;
+        // Fine grid search
+        for i in 0..50 {
+            let log_lambda = -4.0 + i as f64 * 0.12;  // -4 to 2 (0.0001 to 100)
+            let lambda = 10.0_f64.powf(log_lambda);
+            let reml = reml_criterion(y, x, w, lambda, &penalties[0], None)?;
 
-            // Optimize each lambda separately (coordinate descent)
-            for i in 0..log_lambda.len() {
-                let old_log_lambda = log_lambda[i];
-
-                // Compute current lambdas
-                let current_lambda: Vec<f64> = log_lambda.iter()
-                    .map(|l| l.exp())
-                    .collect();
-
-                // Compute total penalty
-                let mut total_penalty = Array2::zeros(penalties[0].dim());
-                for (j, penalty) in penalties.iter().enumerate() {
-                    total_penalty = total_penalty + &(penalty * current_lambda[j]);
-                }
-
-                // Evaluate REML at current point
-                let reml_current = reml_criterion(
-                    y, x, w,
-                    1.0, // lambda is incorporated in total_penalty
-                    &total_penalty,
-                    None
-                )?;
-
-                // Numerical gradient using finite differences
-                let delta = 0.01;
-                log_lambda[i] += delta;
-
-                let lambda_plus: Vec<f64> = log_lambda.iter()
-                    .map(|l| l.exp())
-                    .collect();
-
-                let mut total_penalty_plus = Array2::zeros(penalties[0].dim());
-                for (j, penalty) in penalties.iter().enumerate() {
-                    total_penalty_plus = total_penalty_plus + &(penalty * lambda_plus[j]);
-                }
-
-                let reml_plus = reml_criterion(
-                    y, x, w,
-                    1.0,
-                    &total_penalty_plus,
-                    None
-                )?;
-
-                let gradient = (reml_plus - reml_current) / delta;
-
-                // Simple gradient descent step
-                let step_size = 0.1;
-                let new_log_lambda = old_log_lambda - step_size * gradient;
-
-                log_lambda[i] = new_log_lambda;
-
-                // Check convergence for this parameter
-                if (new_log_lambda - old_log_lambda).abs() > tolerance {
-                    converged = false;
-                }
-            }
-
-            if converged {
-                break;
+            if reml < best_reml {
+                best_reml = reml;
+                best_lambda = lambda;
             }
         }
 
-        // Update lambda values
-        self.lambda = log_lambda.iter()
-            .map(|l| l.exp())
-            .collect();
-
+        self.lambda[0] = best_lambda;
         Ok(())
     }
 
@@ -159,49 +104,42 @@ impl SmoothingParameter {
             .map(|l| l.ln())
             .collect();
 
-        for iter in 0..max_iter {
+        for _iter in 0..max_iter {
             let mut converged = true;
 
             for i in 0..log_lambda.len() {
                 let old_log_lambda = log_lambda[i];
 
-                let current_lambda: Vec<f64> = log_lambda.iter()
-                    .map(|l| l.exp())
-                    .collect();
-
-                let mut total_penalty = Array2::zeros(penalties[0].dim());
-                for (j, penalty) in penalties.iter().enumerate() {
-                    total_penalty = total_penalty + &(penalty * current_lambda[j]);
+                // For single smooth case
+                if penalties.len() != 1 {
+                    panic!("Multiple smooths not yet properly implemented for GCV");
                 }
+
+                let lambda_current = log_lambda[i].exp();
 
                 let gcv_current = gcv_criterion(
                     y, x, w,
-                    1.0,
-                    &total_penalty,
+                    lambda_current,
+                    &penalties[0],
                 )?;
 
                 // Numerical gradient
                 let delta = 0.01;
                 log_lambda[i] += delta;
-
-                let lambda_plus: Vec<f64> = log_lambda.iter()
-                    .map(|l| l.exp())
-                    .collect();
-
-                let mut total_penalty_plus = Array2::zeros(penalties[0].dim());
-                for (j, penalty) in penalties.iter().enumerate() {
-                    total_penalty_plus = total_penalty_plus + &(penalty * lambda_plus[j]);
-                }
+                let lambda_plus = log_lambda[i].exp();
 
                 let gcv_plus = gcv_criterion(
                     y, x, w,
-                    1.0,
-                    &total_penalty_plus,
+                    lambda_plus,
+                    &penalties[0],
                 )?;
+
+                // Reset
+                log_lambda[i] = old_log_lambda;
 
                 let gradient = (gcv_plus - gcv_current) / delta;
 
-                let step_size = 0.1;
+                let step_size = 0.5;
                 let new_log_lambda = old_log_lambda - step_size * gradient;
 
                 log_lambda[i] = new_log_lambda;

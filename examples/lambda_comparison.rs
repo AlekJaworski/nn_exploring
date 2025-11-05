@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Effect of Smoothing Parameter λ ===\n");
 
     // Generate noisy data
-    let n = 30;
+    let n = 300;  // Increased from 30 to 300 for better n/p ratio
     let noise_level = 0.6;
 
     let x_data: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();

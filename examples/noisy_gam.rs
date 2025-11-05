@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== GAM Smoothing Example: Noisy Data ===\n");
 
     // Generate data with substantial noise
-    let n = 50; // Fewer points to make smoothing more apparent
+    let n = 300; // Sufficient points for good smoothing parameter selection
     let noise_level = 0.5; // Significant noise
 
     // True function: y = sin(2πx)
