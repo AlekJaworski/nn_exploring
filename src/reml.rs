@@ -1,8 +1,36 @@
 //! REML (Restricted Maximum Likelihood) criterion for smoothing parameter selection
 
 use ndarray::{Array1, Array2};
-use crate::{Result, GAMError};
+use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
+
+/// Estimate the rank of a matrix by counting diagonal elements above threshold
+/// This is a rough approximation - proper implementation would use SVD
+fn estimate_rank(matrix: &Array2<f64>) -> usize {
+    let n = matrix.nrows().min(matrix.ncols());
+    let mut rank = 0;
+
+    // Count non-zero diagonal elements (rough estimate)
+    for i in 0..n {
+        if matrix[[i, i]].abs() > 1e-8 {
+            rank += 1;
+        }
+    }
+
+    // If all diagonal elements are zero, count non-zero off-diagonal elements
+    if rank == 0 {
+        for i in 0..matrix.nrows() {
+            for j in 0..matrix.ncols() {
+                if matrix[[i, j]].abs() > 1e-8 {
+                    rank += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    rank
+}
 
 /// Compute the REML criterion for smoothing parameter selection
 ///
@@ -76,25 +104,26 @@ pub fn reml_criterion(
     // Compute log determinants
     let log_det_a = determinant(&a)?.ln();
 
-    // For penalty matrix determinant, handle potential singularity
-    // In practice, S often has null space (unpenalized functions)
-    // We use the generalized determinant (product of non-zero eigenvalues)
-    let log_det_s = if lambda > 1e-10 {
-        // Simplified: assume penalty has some null space
-        // A proper implementation would compute eigendecomposition
-        let s_det = determinant(penalty)?;
+    // For penalty matrix with rank r, the correct term is log|λS| = r*log(λ) + log|S_+|
+    // where S_+ is the pseudo-determinant (product of non-zero eigenvalues)
+    //
+    // For simplicity, we estimate the rank by counting eigenvalues > threshold
+    // A proper implementation would use SVD or eigendecomposition
+    let rank_s = estimate_rank(penalty);
 
-        if s_det.abs() < 1e-10 {
-            0.0 // Null space exists
-        } else {
-            s_det.ln()
-        }
+    // The REML criterion is:
+    // REML = n*log(RSS/n) + log|X'WX + λS| - log|λS| - ...
+    //      = n*log(RSS/n) + log|X'WX + λS| - rank(S)*log(λ) - log|S_+|
+    //
+    // For now, ignore the constant log|S_+| term and use:
+    let log_lambda_s = if lambda > 1e-10 && rank_s > 0 {
+        (rank_s as f64) * lambda.ln()
     } else {
         0.0
     };
 
-    // REML = n*log(RSS) + log|X'WX + λS| - log|S|
-    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_det_s;
+    // REML = n*log(RSS/n) + log|X'WX + λS| - rank(S)*log(λ)
+    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_lambda_s;
 
     Ok(reml)
 }
@@ -147,13 +176,24 @@ pub fn gcv_criterion(
         .sum();
 
     // Compute effective degrees of freedom (trace of influence matrix)
-    // tr(A) = tr(X(X'WX + λS)^(-1)X'W)
+    // EDF = tr(H) where H = X(X'WX + λS)^(-1)X'W
     let a_inv = inverse(&a)?;
 
-    let influence = &x_weighted.dot(&a_inv).dot(&xtw);
+    // Compute X'W (not sqrt(W))
+    let mut xtw_full = Array2::zeros((p, n));
+    for i in 0..n {
+        for j in 0..p {
+            xtw_full[[j, i]] = x[[i, j]] * w[i];
+        }
+    }
 
+    // H = X * (X'WX + λS)^(-1) * X'W
+    let h_temp = x.dot(&a_inv);
+    let influence = h_temp.dot(&xtw_full);
+
+    // Trace of H
     let mut edf = 0.0;
-    for i in 0..n.min(p) {
+    for i in 0..n {
         edf += influence[[i, i]];
     }
 
