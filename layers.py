@@ -90,8 +90,30 @@ class SoftMax(Layer):
 
 
 class SquareLoss(Layer):
-    def __init__(self):
-        raise NotImplementedError("Method SquareLoss not implemented")
+    """Mean Squared Error loss layer for regression tasks."""
+    def __init__(self, input_size):
+        self.output_size = input_size
+        super().__init__(input_size, self.output_size)
+        self.outputs = None
+        self.inputs = None
+        self.grad_x_local = None
+        self.total_x_grad = None
+
+    def compute(self, inputs, actual):
+        """Compute the squared loss: 0.5 * sum((inputs - actual)^2)"""
+        self.inputs = inputs
+        self.actual = actual
+        differences = inputs - actual
+        self.outputs = 0.5 * np.sum(differences ** 2)
+        return self.outputs
+
+    def back_compute(self, actual):
+        """Compute gradient: inputs - actual"""
+        self.total_x_grad = self.inputs - actual
+        return self.total_x_grad
+
+    def update_parameters(self, learning_rate=0.0001):
+        pass  # no parameters to update
 
 
 class CrossEntropyLoss(Layer):

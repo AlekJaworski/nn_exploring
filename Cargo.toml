@@ -1,0 +1,12 @@
+[package]
+name = "mgcv_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ndarray = "0.16"
+approx = "0.5"
+thiserror = "2.0"
+
+[dev-dependencies]
+approx = "0.5"
