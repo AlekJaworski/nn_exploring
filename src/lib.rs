@@ -54,6 +54,66 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 
+/// Parse formula string like "s(0, k=10) + s(1, k=15)"
+/// Returns Vec of (column_index, num_basis)
+#[cfg(feature = "python")]
+fn parse_formula(formula: &str) -> PyResult<Vec<(usize, usize)>> {
+    let mut smooths = Vec::new();
+
+    // Split by '+' to get individual smooth terms
+    for term in formula.split('+') {
+        let term = term.trim();
+
+        // Check if it starts with 's(' and ends with ')'
+        if !term.starts_with("s(") || !term.ends_with(")") {
+            return Err(PyValueError::new_err(format!(
+                "Invalid smooth term: '{}'. Expected format: s(col, k=value)",
+                term
+            )));
+        }
+
+        // Extract content between s( and )
+        let content = &term[2..term.len()-1];
+        let parts: Vec<&str> = content.split(',').map(|s| s.trim()).collect();
+
+        if parts.len() != 2 {
+            return Err(PyValueError::new_err(format!(
+                "Invalid smooth term: '{}'. Expected format: s(col, k=value)",
+                term
+            )));
+        }
+
+        // Parse column index
+        let col_idx = parts[0].parse::<usize>().map_err(|_| {
+            PyValueError::new_err(format!("Invalid column index: '{}'", parts[0]))
+        })?;
+
+        // Parse k=value
+        if !parts[1].starts_with("k=") && !parts[1].starts_with("k =") {
+            return Err(PyValueError::new_err(format!(
+                "Invalid k specification: '{}'. Expected format: k=value",
+                parts[1]
+            )));
+        }
+
+        let k_value = parts[1].split('=').nth(1).ok_or_else(|| {
+            PyValueError::new_err("Missing value after 'k='")
+        })?.trim();
+
+        let num_basis = k_value.parse::<usize>().map_err(|_| {
+            PyValueError::new_err(format!("Invalid k value: '{}'", k_value))
+        })?;
+
+        smooths.push((col_idx, num_basis));
+    }
+
+    if smooths.is_empty() {
+        return Err(PyValueError::new_err("No smooth terms found in formula"));
+    }
+
+    Ok(smooths)
+}
+
 /// Python wrapper for GAM
 #[cfg(feature = "python")]
 #[pyclass(name = "GAM")]
@@ -119,6 +179,110 @@ impl PyGAM {
         result.set_item("fitted", self.inner.fitted)?;
 
         Ok(result.into())
+    }
+
+    /// Fit GAM with automatic smooth setup from k values
+    ///
+    /// Args:
+    ///     x: Input data (n x d array)
+    ///     y: Response variable (n array)
+    ///     k: List of basis dimensions for each column (like k in mgcv)
+    ///     method: "GCV" or "REML"
+    ///     max_iter: Maximum iterations
+    ///
+    /// Example:
+    ///     gam = GAM()
+    ///     result = gam.fit_auto(X, y, k=[10, 15, 20], method='GCV')
+    fn fit_auto<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+        y: PyReadonlyArray1<f64>,
+        k: Vec<usize>,
+        method: &str,
+        max_iter: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let x_array = x.as_array().to_owned();
+        let (n, d) = x_array.dim();
+
+        // Check k dimensions
+        if k.len() != d {
+            return Err(PyValueError::new_err(format!(
+                "k length ({}) must match number of columns ({})",
+                k.len(), d
+            )));
+        }
+
+        // Clear any existing smooths
+        self.inner.smooth_terms.clear();
+
+        // Add smooths for each column
+        for (i, &num_basis) in k.iter().enumerate() {
+            let col = x_array.column(i);
+            let x_min = col.iter().cloned().fold(f64::INFINITY, f64::min);
+            let x_max = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+            let smooth = SmoothTerm::cubic_spline(
+                format!("x{}", i),
+                num_basis,
+                x_min,
+                x_max,
+            ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+            self.inner.add_smooth(smooth);
+        }
+
+        // Call regular fit
+        self.fit(py, x, y, method, max_iter)
+    }
+
+    /// Fit GAM with formula-like syntax (mgcv-style)
+    ///
+    /// Args:
+    ///     x: Input data (n x d array)
+    ///     y: Response variable (n array)
+    ///     formula: Formula string like "s(0, k=10) + s(1, k=15)"
+    ///     method: "GCV" or "REML"
+    ///     max_iter: Maximum iterations
+    ///
+    /// Example:
+    ///     gam = GAM()
+    ///     result = gam.fit_formula(X, y, formula="s(0, k=10) + s(1, k=15)", method='GCV')
+    fn fit_formula<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+        y: PyReadonlyArray1<f64>,
+        formula: &str,
+        method: &str,
+        max_iter: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let x_array = x.as_array().to_owned();
+
+        // Parse formula
+        let smooths = parse_formula(formula)?;
+
+        // Clear any existing smooths
+        self.inner.smooth_terms.clear();
+
+        // Add smooths based on formula
+        for (col_idx, num_basis) in smooths {
+            let col = x_array.column(col_idx);
+            let x_min = col.iter().cloned().fold(f64::INFINITY, f64::min);
+            let x_max = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+            let smooth = SmoothTerm::cubic_spline(
+                format!("x{}", col_idx),
+                num_basis,
+                x_min,
+                x_max,
+            ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+            self.inner.add_smooth(smooth);
+        }
+
+        // Call regular fit
+        self.fit(py, x, y, method, max_iter)
     }
 
     fn predict<'py>(
