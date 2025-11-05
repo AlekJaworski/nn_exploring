@@ -3,10 +3,20 @@ name = "mgcv_rust"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "mgcv_rust"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 ndarray = "0.16"
 approx = "0.5"
 thiserror = "2.0"
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+numpy = { version = "0.22", optional = true }
+
+[features]
+default = []
+python = ["pyo3", "numpy"]
 
 [dev-dependencies]
 approx = "0.5"
