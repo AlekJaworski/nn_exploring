@@ -219,17 +219,15 @@ impl PyGAM {
         // Clear any existing smooths
         self.inner.smooth_terms.clear();
 
-        // Add smooths for each column
+        // Add smooths for each column using quantile-based knots (like mgcv)
         for (i, &num_basis) in k.iter().enumerate() {
             let col = x_array.column(i);
-            let x_min = col.iter().cloned().fold(f64::INFINITY, f64::min);
-            let x_max = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let col_owned = col.to_owned();
 
-            let smooth = SmoothTerm::cubic_spline(
+            let smooth = SmoothTerm::cubic_spline_quantile(
                 format!("x{}", i),
                 num_basis,
-                x_min,
-                x_max,
+                &col_owned,
             ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
             self.inner.add_smooth(smooth);
@@ -268,17 +266,15 @@ impl PyGAM {
         // Clear any existing smooths
         self.inner.smooth_terms.clear();
 
-        // Add smooths based on formula
+        // Add smooths based on formula using quantile-based knots (like mgcv)
         for (col_idx, num_basis) in smooths {
             let col = x_array.column(col_idx);
-            let x_min = col.iter().cloned().fold(f64::INFINITY, f64::min);
-            let x_max = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let col_owned = col.to_owned();
 
-            let smooth = SmoothTerm::cubic_spline(
+            let smooth = SmoothTerm::cubic_spline_quantile(
                 format!("x{}", col_idx),
                 num_basis,
-                x_min,
-                x_max,
+                &col_owned,
             ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
             self.inner.add_smooth(smooth);

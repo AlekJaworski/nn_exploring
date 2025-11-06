@@ -22,7 +22,7 @@ pub struct SmoothTerm {
 }
 
 impl SmoothTerm {
-    /// Create a new smooth term with cubic spline basis
+    /// Create a new smooth term with cubic spline basis (evenly-spaced knots)
     pub fn cubic_spline(
         name: String,
         num_basis: usize,
@@ -32,6 +32,29 @@ impl SmoothTerm {
         let basis = CubicSpline::with_num_knots(
             x_min,
             x_max,
+            num_basis - 2,
+            BoundaryCondition::Natural
+        );
+
+        let knots = basis.knots().unwrap();
+        let penalty = compute_penalty("cubic", num_basis, Some(knots), 1)?;
+
+        Ok(Self {
+            name,
+            basis: Box::new(basis),
+            penalty,
+            lambda: 1.0,
+        })
+    }
+
+    /// Create a new smooth term with quantile-based knots (like mgcv)
+    pub fn cubic_spline_quantile(
+        name: String,
+        num_basis: usize,
+        x_data: &Array1<f64>,
+    ) -> Result<Self> {
+        let basis = CubicSpline::with_quantile_knots(
+            x_data,
             num_basis - 2,
             BoundaryCondition::Natural
         );

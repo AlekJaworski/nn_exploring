@@ -48,6 +48,36 @@ impl CubicSpline {
         Self::new(knots, boundary)
     }
 
+    /// Create a cubic spline with quantile-based knots (like mgcv)
+    /// Places knots at quantiles of the data distribution for better adaptation
+    pub fn with_quantile_knots(x_data: &Array1<f64>, num_knots: usize, boundary: BoundaryCondition) -> Self {
+        // Sort data to compute quantiles
+        let mut sorted_x = x_data.to_vec();
+        sorted_x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let n = sorted_x.len();
+        let mut knots = Vec::with_capacity(num_knots);
+
+        for i in 0..num_knots {
+            // Compute quantile position
+            let q = i as f64 / (num_knots - 1) as f64;
+            let pos = q * (n - 1) as f64;
+            let idx = pos.floor() as usize;
+
+            // Linear interpolation between data points
+            let knot = if idx >= n - 1 {
+                sorted_x[n - 1]
+            } else {
+                let frac = pos - idx as f64;
+                sorted_x[idx] * (1.0 - frac) + sorted_x[idx + 1] * frac
+            };
+
+            knots.push(knot);
+        }
+
+        Self::new(Array1::from_vec(knots), boundary)
+    }
+
     /// Cubic B-spline basis function
     fn b_spline_basis(&self, x: f64, i: usize, k: usize, t: &Array1<f64>) -> f64 {
         if k == 0 {
