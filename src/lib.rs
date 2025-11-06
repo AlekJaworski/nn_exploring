@@ -170,6 +170,9 @@ impl PyGAM {
 
         if let Some(ref params) = self.inner.smoothing_params {
             result.set_item("lambda", params.lambda[0])?;
+            // Also include all lambdas for multi-variable GAMs
+            let all_lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            result.set_item("all_lambdas", all_lambdas)?;
         }
 
         if let Some(deviance) = self.inner.deviance {
@@ -303,6 +306,16 @@ impl PyGAM {
             .as_ref()
             .map(|p| p.lambda[0])
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))
+    }
+
+    /// Get all smoothing parameters (for multi-variable GAMs)
+    fn get_all_lambdas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let lambdas = self.inner.smoothing_params
+            .as_ref()
+            .map(|p| p.lambda.clone())
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+
+        Ok(PyArray1::from_vec_bound(py, lambdas))
     }
 
     fn get_fitted_values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
