@@ -203,6 +203,269 @@ pub fn gcv_criterion(
     Ok(gcv)
 }
 
+/// Compute the REML criterion for multiple smoothing parameters
+///
+/// The REML criterion with multiple penalties is:
+/// REML = n*log(RSS/n) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)
+///
+/// Where:
+/// - RSS: residual sum of squares
+/// - X: design matrix
+/// - W: weight matrix (from IRLS)
+/// - λᵢ: smoothing parameters
+/// - Sᵢ: penalty matrices
+pub fn reml_criterion_multi(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    beta: Option<&Array1<f64>>,
+) -> Result<f64> {
+    let n = y.len();
+    let p = x.ncols();
+
+    // Compute weighted design matrix: sqrt(W) * X
+    let mut x_weighted = x.clone();
+    for i in 0..n {
+        let weight_sqrt = w[i].sqrt();
+        for j in 0..p {
+            x_weighted[[i, j]] *= weight_sqrt;
+        }
+    }
+
+    // Compute X'WX
+    let xtw = x_weighted.t().to_owned();
+    let xtwx = xtw.dot(&x_weighted);
+
+    // Compute A = X'WX + Σλᵢ·Sᵢ
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a = a + &(penalty * *lambda);
+    }
+
+    // Compute coefficients if not provided
+    let beta_computed;
+    let beta = if let Some(b) = beta {
+        b
+    } else {
+        let y_weighted: Array1<f64> = y.iter().zip(w.iter())
+            .map(|(yi, wi)| yi * wi)
+            .collect();
+
+        let b = xtw.dot(&y_weighted);
+        beta_computed = solve(a.clone(), b)?;
+        &beta_computed
+    };
+
+    // Compute fitted values
+    let fitted = x.dot(beta);
+
+    // Compute residuals and RSS
+    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(r, wi)| r * r * wi)
+        .sum();
+
+    // Compute log|X'WX + Σλᵢ·Sᵢ|
+    let log_det_a = determinant(&a)?.ln();
+
+    // Compute -Σrank(Sᵢ)·log(λᵢ)
+    let mut log_lambda_sum = 0.0;
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        if *lambda > 1e-10 {
+            let rank_s = estimate_rank(penalty);
+            if rank_s > 0 {
+                log_lambda_sum += (rank_s as f64) * lambda.ln();
+            }
+        }
+    }
+
+    // REML = n*log(RSS/n) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)
+    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_lambda_sum;
+
+    Ok(reml)
+}
+
+/// Compute the gradient of REML with respect to log(λᵢ)
+///
+/// Returns: ∂REML/∂log(λᵢ) for i = 1..m
+///
+/// The derivative is:
+/// ∂REML/∂log(λᵢ) = -n/(RSS) · ∂RSS/∂log(λᵢ) + tr((X'WX + Σλⱼ·Sⱼ)⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
+pub fn reml_gradient_multi(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+) -> Result<Array1<f64>> {
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Compute weighted design matrix
+    let mut x_weighted = x.clone();
+    for i in 0..n {
+        let weight_sqrt = w[i].sqrt();
+        for j in 0..p {
+            x_weighted[[i, j]] *= weight_sqrt;
+        }
+    }
+
+    // Compute X'WX
+    let xtw = x_weighted.t().to_owned();
+    let xtwx = xtw.dot(&x_weighted);
+
+    // Compute A = X'WX + Σλᵢ·Sᵢ
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a = a + &(penalty * *lambda);
+    }
+
+    // Solve for coefficients
+    let y_weighted: Array1<f64> = y.iter().zip(w.iter())
+        .map(|(yi, wi)| yi * wi)
+        .collect();
+
+    let b = xtw.dot(&y_weighted);
+    let beta = solve(a.clone(), b)?;
+
+    // Compute fitted values and RSS
+    let fitted = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(r, wi)| r * r * wi)
+        .sum();
+
+    // Compute A^(-1)
+    let a_inv = inverse(&a)?;
+
+    // Compute gradient for each λᵢ
+    let mut gradient = Array1::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = estimate_rank(penalty_i);
+
+        // tr((X'WX + Σλⱼ·Sⱼ)⁻¹·λᵢ·Sᵢ)
+        let lambda_s_i = penalty_i * lambda_i;
+        let temp = a_inv.dot(&lambda_s_i);
+        let mut trace = 0.0;
+        for j in 0..p {
+            trace += temp[[j, j]];
+        }
+
+        // ∂RSS/∂log(λᵢ) computation requires implicit differentiation
+        // For now, use approximation: ∂REML/∂log(λᵢ) ≈ tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
+        //
+        // Full derivative would be:
+        // ∂REML/∂log(λᵢ) = -n·∂RSS/∂log(λᵢ)/RSS + tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
+        //
+        // where ∂RSS/∂log(λᵢ) = -2λᵢ·β'·Sᵢ·β
+
+        // Compute β'·Sᵢ·β
+        let s_beta = penalty_i.dot(&beta);
+        let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+
+        // ∂RSS/∂log(λᵢ) = -2λᵢ·β'·Sᵢ·β
+        let drss_dlog_lambda = -2.0 * lambda_i * beta_s_beta;
+
+        // Full gradient
+        gradient[i] = -(n as f64) * drss_dlog_lambda / rss + trace - (rank_i as f64);
+    }
+
+    Ok(gradient)
+}
+
+/// Compute the Hessian of REML with respect to log(λᵢ), log(λⱼ)
+///
+/// Returns: ∂²REML/∂log(λᵢ)∂log(λⱼ) for i,j = 1..m
+///
+/// This is a symmetric m x m matrix
+pub fn reml_hessian_multi(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+) -> Result<Array2<f64>> {
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Compute weighted design matrix
+    let mut x_weighted = x.clone();
+    for i in 0..n {
+        let weight_sqrt = w[i].sqrt();
+        for j in 0..p {
+            x_weighted[[i, j]] *= weight_sqrt;
+        }
+    }
+
+    // Compute X'WX
+    let xtw = x_weighted.t().to_owned();
+    let xtwx = xtw.dot(&x_weighted);
+
+    // Compute A = X'WX + Σλᵢ·Sᵢ
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a = a + &(penalty * *lambda);
+    }
+
+    // Compute A^(-1)
+    let a_inv = inverse(&a)?;
+
+    // Compute Hessian
+    let mut hessian = Array2::zeros((m, m));
+
+    for i in 0..m {
+        for j in i..m {  // Only compute upper triangle (symmetric)
+            let lambda_i = lambdas[i];
+            let lambda_j = lambdas[j];
+            let penalty_i = &penalties[i];
+            let penalty_j = &penalties[j];
+
+            // Compute ∂²REML/∂log(λᵢ)∂log(λⱼ)
+            // ≈ -tr((A⁻¹·λᵢ·Sᵢ)·(A⁻¹·λⱼ·Sⱼ))
+            //
+            // This is a simplification. Full Hessian requires second derivatives
+            // of RSS and more complex implicit differentiation.
+
+            let lambda_s_i = penalty_i * lambda_i;
+            let lambda_s_j = penalty_j * lambda_j;
+
+            let a_inv_si = a_inv.dot(&lambda_s_i);
+            let a_inv_sj = a_inv.dot(&lambda_s_j);
+
+            let product = a_inv_si.dot(&a_inv_sj);
+
+            let mut trace = 0.0;
+            for k in 0..p {
+                trace += product[[k, k]];
+            }
+
+            hessian[[i, j]] = -trace;
+
+            // Fill symmetric entry
+            if i != j {
+                hessian[[j, i]] = hessian[[i, j]];
+            }
+        }
+    }
+
+    Ok(hessian)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
