@@ -51,8 +51,21 @@ impl CubicSpline {
     /// Cubic B-spline basis function
     fn b_spline_basis(&self, x: f64, i: usize, k: usize, t: &Array1<f64>) -> f64 {
         if k == 0 {
-            if i < t.len() - 1 && x >= t[i] && x < t[i + 1] {
-                1.0
+            if i < t.len() - 1 {
+                // Handle boundary: last interval includes the endpoint
+                if i == t.len() - 2 {
+                    if x >= t[i] && x <= t[i + 1] {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    if x >= t[i] && x < t[i + 1] {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
             } else {
                 0.0
             }
@@ -71,6 +84,33 @@ impl CubicSpline {
                 let denom2 = t[i + k + 1] - t[i + 1];
                 if denom2.abs() > 1e-10 {
                     result += (t[i + k + 1] - x) / denom2
+                        * self.b_spline_basis(x, i + 1, k - 1, t);
+                }
+            }
+
+            result
+        }
+    }
+
+    /// Derivative of cubic B-spline basis function
+    fn b_spline_derivative(&self, x: f64, i: usize, k: usize, t: &Array1<f64>) -> f64 {
+        if k == 0 {
+            0.0
+        } else {
+            let mut result = 0.0;
+
+            if i + k < t.len() {
+                let denom1 = t[i + k] - t[i];
+                if denom1.abs() > 1e-10 {
+                    result += (k as f64) / denom1
+                        * self.b_spline_basis(x, i, k - 1, t);
+                }
+            }
+
+            if i + k + 1 < t.len() {
+                let denom2 = t[i + k + 1] - t[i + 1];
+                if denom2.abs() > 1e-10 {
+                    result -= (k as f64) / denom2
                         * self.b_spline_basis(x, i + 1, k - 1, t);
                 }
             }
@@ -100,10 +140,44 @@ impl BasisFunction for CubicSpline {
             extended_knots[degree + i] = self.knots[i];
         }
 
-        // Evaluate basis functions
+        // Get boundary values for extrapolation
+        let x_min = self.knots[0];
+        let x_max = self.knots[knots_len - 1];
+
+        // Evaluate basis functions with linear extrapolation (like mgcv)
+        let eps = 1e-10;  // Small tolerance for boundary detection
         for (i, &xi) in x.iter().enumerate() {
-            for j in 0..self.num_basis {
-                design_matrix[[i, j]] = self.b_spline_basis(xi, j, degree, &extended_knots);
+            if xi < x_min - eps {
+                // Linear extrapolation below range
+                // b_j(x) ≈ b_j(x_min) + b_j'(x_min) * (x - x_min)
+                for j in 0..self.num_basis {
+                    let basis_val = self.b_spline_basis(x_min, j, degree, &extended_knots);
+                    let basis_deriv = self.b_spline_derivative(x_min, j, degree, &extended_knots);
+                    design_matrix[[i, j]] = basis_val + basis_deriv * (xi - x_min);
+                }
+            } else if xi > x_max + eps {
+                // Linear extrapolation above range
+                // b_j(x) ≈ b_j(x_max) + b_j'(x_max) * (x - x_max)
+                // Evaluate slightly before x_max to avoid repeated knot issues
+                let x_boundary = x_max - 2.0 * eps;
+                for j in 0..self.num_basis {
+                    let basis_val = self.b_spline_basis(x_boundary, j, degree, &extended_knots);
+                    let basis_deriv = self.b_spline_derivative(x_boundary, j, degree, &extended_knots);
+                    design_matrix[[i, j]] = basis_val + basis_deriv * (xi - x_max);
+                }
+            } else {
+                // Within range: normal evaluation
+                // Clamp to avoid numerical issues at exact boundaries
+                // Use a tiny offset from x_max to avoid degenerate repeated knots
+                let x_eval = if (xi - x_max).abs() < eps {
+                    x_max - 2.0 * eps  // Slightly before max to avoid repeated knot issues
+                } else {
+                    xi.max(x_min).min(x_max)
+                };
+
+                for j in 0..self.num_basis {
+                    design_matrix[[i, j]] = self.b_spline_basis(x_eval, j, degree, &extended_knots);
+                }
             }
         }
 
