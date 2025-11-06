@@ -187,13 +187,13 @@ impl BasisFunction for CubicSpline {
                 }
             } else if xi > x_max + eps {
                 // Linear extrapolation above range
-                // b_j(x) ≈ b_j(x_max) + b_j'(x_max) * (x - x_max)
+                // b_j(x) ≈ b_j(x_boundary) + b_j'(x_boundary) * (x - x_boundary)
                 // Evaluate slightly before x_max to avoid repeated knot issues
                 let x_boundary = x_max - 2.0 * eps;
                 for j in 0..self.num_basis {
                     let basis_val = self.b_spline_basis(x_boundary, j, degree, &extended_knots);
                     let basis_deriv = self.b_spline_derivative(x_boundary, j, degree, &extended_knots);
-                    design_matrix[[i, j]] = basis_val + basis_deriv * (xi - x_max);
+                    design_matrix[[i, j]] = basis_val + basis_deriv * (xi - x_boundary);
                 }
             } else {
                 // Within range: normal evaluation
