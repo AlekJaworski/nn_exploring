@@ -10,9 +10,11 @@ test_adaptive_*.py
 test_bs_*.py
 test_rank_*.py
 test_analytical_*.py
+test_effective_*.py
 check_*.py
 compare_*.py
 investigate_*.py
 analyze_*.py
 derive_*.md
 summary_*.md
+INVESTIGATION_PLAN.md
