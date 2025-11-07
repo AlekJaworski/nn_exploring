@@ -21,9 +21,15 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         ));
     }
 
-    // Simplified: Use finite difference approximation of second derivative
-    // For a more rigorous implementation, we would integrate the second derivatives
-    // of the B-spline basis functions
+    // Use finite difference approximation of second derivative
+    // D² = [1, -2, 1] / h²
+    //
+    // For the penalty matrix (integrated squared second derivative):
+    // S = ∫ (D²f)² dx ≈ (D²)ᵀ * W * D²
+    // where W is integration weight matrix (diagonal with weights h)
+    //
+    // This gives net scaling of 1/h (not 1/h²)
+    // See Wood (2017) "Generalized Additive Models" Section 5.3
 
     for i in 1..(num_basis - 1) {
         for j in 1..(num_basis - 1) {
@@ -35,16 +41,27 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         }
     }
 
-    // Scale by average knot spacing
+    // Scale by 1/h² for second derivative penalty on B-spline coefficients
+    // Note: For B-spline BASIS coefficients (not function values), the
+    // finite difference approximation to ∫[f''(x)]² dx uses 1/h² scaling
     if n_knots > 1 {
         let avg_spacing = (knots[n_knots - 1] - knots[0]) / (n_knots - 1) as f64;
-        penalty = penalty / (avg_spacing * avg_spacing);
+        penalty = penalty / (avg_spacing * avg_spacing);  // 1/h² scaling
     }
 
-    // TEMPORARY FIX: The penalty appears to be scaled too large by ~1000x
-    // This causes lambda to be optimized to ~1000x too small
-    // TODO: Investigate proper penalty scaling from mgcv source
-    penalty = penalty / 1000.0;
+    // Normalize penalty matrix by Frobenius norm (sqrt of sum of squared elements)
+    // This ensures the penalty matrix has consistent scale across different k values
+    // mgcv normalizes penalties for numerical stability
+    let mut frob_norm_sq = 0.0;
+    for i in 0..num_basis {
+        for j in 0..num_basis {
+            frob_norm_sq += penalty[[i, j]] * penalty[[i, j]];
+        }
+    }
+    let frob_norm = frob_norm_sq.sqrt();
+    if frob_norm > 1e-10 {
+        penalty = penalty / frob_norm;
+    }
 
     Ok(penalty)
 }
@@ -166,9 +183,19 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
         }
     }
 
-    // TEMPORARY FIX: Apply same scaling correction as B-splines
-    // TODO: Investigate proper penalty scaling from mgcv source
-    penalty = penalty / 1000.0;
+    // Normalize penalty matrix by Frobenius norm (sqrt of sum of squared elements)
+    // This ensures the penalty matrix has consistent scale across different k values
+    // mgcv normalizes penalties for numerical stability
+    let mut frob_norm_sq = 0.0;
+    for i in 0..num_basis {
+        for j in 0..num_basis {
+            frob_norm_sq += penalty[[i, j]] * penalty[[i, j]];
+        }
+    }
+    let frob_norm = frob_norm_sq.sqrt();
+    if frob_norm > 1e-10 {
+        penalty = penalty / frob_norm;
+    }
 
     Ok(penalty)
 }
