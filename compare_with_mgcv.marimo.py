@@ -27,13 +27,11 @@ def __():
         except:
             HAS_RPY2 = False
 
-    return mo, np, plt, mgcv_rust, ro, HAS_RPY2, mgcv, stats, numpy2ri
-
-
-@app.cell
-def __(mo, HAS_RPY2):
+    # Display status
     if not HAS_RPY2:
         mo.md("""
+        # Comparing mgcv_rust vs R's mgcv
+
         ⚠️ **rpy2 not available**
 
         Install with:
@@ -52,7 +50,8 @@ def __(mo, HAS_RPY2):
 
         This notebook compares the Rust implementation against R's mgcv package.
         """)
-    return
+
+    return mo, np, plt, mgcv_rust, ro, HAS_RPY2
 
 
 @app.cell
