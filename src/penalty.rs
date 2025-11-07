@@ -88,12 +88,10 @@ fn b_spline_second_derivative(x: f64, i: usize, k: usize, t: &Array1<f64>) -> f6
 ///   k <- seq(xl - dx * m[1], xu + dx * m[1], length = nk + 2 * m[1])
 fn create_mgcv_bs_knots(x_min: f64, x_max: f64, num_basis: usize, degree: usize) -> Array1<f64> {
     // In mgcv: k (bs.dim) is the basis dimension parameter
-    // num_basis = k - 1 for BS splines (due to identifiability constraints)
-    // To recover k from num_basis: k = num_basis + 1
-    let k = num_basis + 1;
-
+    // For our API, num_basis IS k (the number of basis functions we want)
     // mgcv's formula: nk = k - degree + 1 (number of interior knot intervals)
     // Total knots = nk + 2 * degree
+    let k = num_basis;
     let nk = k - degree + 1;
 
     // Extend data range slightly (0.1% on each side)
@@ -550,7 +548,9 @@ pub fn cubic_spline_penalty_mgcv(
     let extended_knots = create_mgcv_bs_knots(x_min, x_max, num_basis, degree);
 
     // Extract interior knots from extended knots
-    let nk = num_basis + 1 - degree + 1;
+    // nk was computed in create_mgcv_bs_knots as num_basis - degree + 1
+    let k = num_basis;
+    let nk = k - degree + 1;
     let k0 = extended_knots.slice(s![degree..(degree + nk)]).to_owned();
 
     // Compute h (knot spacings) and scale by 1/2
@@ -1047,14 +1047,6 @@ mod tests {
 
         // Create simple interior knots for data range
         let knots = Array1::from_vec(vec![x_min, x_max]);
-
-        // Debug: Test W1 matrix construction
-        let degree = 3;
-        let pord = degree - deriv_order;
-        let w1 = compute_w1_matrix(pord).unwrap();
-        println!("\nW1 matrix (pord={}):", pord);
-        println!("  W1: {:?}", w1);
-        println!("  Expected: [[0.6667, 0.3333], [0.3333, 0.6667]]");
 
         // Compute penalty using mgcv algorithm
         let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, deriv_order).unwrap();
