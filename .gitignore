@@ -11,6 +11,8 @@ test_bs_*.py
 test_rank_*.py
 test_analytical_*.py
 test_effective_*.py
+test_exact_*.py
+test_with_*.py
 check_*.py
 compare_*.py
 investigate_*.py
