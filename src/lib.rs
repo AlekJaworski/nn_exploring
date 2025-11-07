@@ -52,7 +52,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
 #[cfg(feature = "python")]
-use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyArrayMethods};
 
 /// Parse formula string like "s(0, k=10) + s(1, k=15)"
 /// Returns Vec of (column_index, num_basis)
@@ -343,9 +343,31 @@ impl PyGAM {
     }
 }
 
+/// Compute penalty matrix for debugging/comparison
+/// Returns the raw penalty matrix for a given basis type
+#[cfg(feature = "python")]
+#[pyfunction]
+fn compute_penalty_matrix<'py>(
+    py: Python<'py>,
+    basis_type: &str,
+    num_basis: usize,
+    knots: PyReadonlyArray1<f64>,
+) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+    use numpy::PyArray2;
+    use ndarray::Array1;
+
+    let knots_array = Array1::from_vec(knots.to_vec()?);
+
+    let penalty = penalty::compute_penalty(basis_type, num_basis, Some(&knots_array), 1)
+        .map_err(|e| PyValueError::new_err(format!("Failed to compute penalty: {}", e)))?;
+
+    Ok(PyArray2::from_owned_array_bound(py, penalty))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGAM>()?;
+    m.add_function(wrap_pyfunction!(compute_penalty_matrix, m)?)?;
     Ok(())
 }

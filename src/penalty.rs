@@ -140,21 +140,8 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         }
     }
 
-    // Normalize by largest eigenvalue (sum of absolute row values as approximation)
-    // mgcv normalizes penalty matrices for numerical stability
-    let mut max_row_sum = 0.0;
-    for i in 0..num_basis {
-        let mut row_sum = 0.0;
-        for j in 0..num_basis {
-            row_sum += penalty[[i, j]].abs();
-        }
-        if row_sum > max_row_sum {
-            max_row_sum = row_sum;
-        }
-    }
-    if max_row_sum > 1e-10 {
-        penalty = penalty / max_row_sum;
-    }
+    // NOTE: mgcv does NOT normalize penalty matrices
+    // We use the raw penalty values to match mgcv's lambda estimates exactly
 
     Ok(penalty)
 }
@@ -312,21 +299,8 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
         }
     }
 
-    // Normalize by infinity norm (max row sum) like BS penalty
-    // This ensures consistent scaling across different k values and basis types
-    let mut max_row_sum = 0.0;
-    for i in 0..num_basis {
-        let mut row_sum = 0.0;
-        for j in 0..num_basis {
-            row_sum += penalty[[i, j]].abs();
-        }
-        if row_sum > max_row_sum {
-            max_row_sum = row_sum;
-        }
-    }
-    if max_row_sum > 1e-10 {
-        penalty = penalty / max_row_sum;
-    }
+    // NOTE: mgcv does NOT normalize penalty matrices
+    // We use the raw penalty values to match mgcv's lambda estimates exactly
 
     Ok(penalty)
 }
