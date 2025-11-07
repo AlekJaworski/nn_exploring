@@ -3,7 +3,7 @@
 use ndarray::{Array1, Array2};
 use crate::{
     Result, GAMError,
-    basis::{BasisFunction, CubicSpline, BoundaryCondition},
+    basis::{BasisFunction, CubicSpline, CubicRegressionSpline, BoundaryCondition},
     penalty::compute_penalty,
     pirls::{fit_pirls, Family, PiRLSResult},
     smooth::{SmoothingParameter, OptimizationMethod},
@@ -48,6 +48,7 @@ impl SmoothTerm {
     }
 
     /// Create a new smooth term with quantile-based knots (like mgcv)
+    /// Uses B-spline basis
     pub fn cubic_spline_quantile(
         name: String,
         num_basis: usize,
@@ -61,6 +62,44 @@ impl SmoothTerm {
 
         let knots = basis.knots().unwrap();
         let penalty = compute_penalty("cubic", num_basis, Some(knots), 1)?;
+
+        Ok(Self {
+            name,
+            basis: Box::new(basis),
+            penalty,
+            lambda: 1.0,
+        })
+    }
+
+    /// Create a new smooth term with cubic regression splines (cr basis, like mgcv default)
+    /// Uses cardinal natural cubic spline basis with quantile-based knots
+    pub fn cr_spline_quantile(
+        name: String,
+        num_basis: usize,
+        x_data: &Array1<f64>,
+    ) -> Result<Self> {
+        let basis = CubicRegressionSpline::with_quantile_knots(x_data, num_basis);
+        let knots = basis.knots().unwrap();
+        let penalty = compute_penalty("cr", num_basis, Some(knots), 1)?;
+
+        Ok(Self {
+            name,
+            basis: Box::new(basis),
+            penalty,
+            lambda: 1.0,
+        })
+    }
+
+    /// Create a new smooth term with cubic regression splines (evenly-spaced knots)
+    pub fn cr_spline(
+        name: String,
+        num_basis: usize,
+        x_min: f64,
+        x_max: f64,
+    ) -> Result<Self> {
+        let basis = CubicRegressionSpline::with_num_knots(x_min, x_max, num_basis);
+        let knots = basis.knots().unwrap();
+        let penalty = compute_penalty("cr", num_basis, Some(knots), 1)?;
 
         Ok(Self {
             name,

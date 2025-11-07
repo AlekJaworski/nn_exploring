@@ -191,11 +191,12 @@ impl PyGAM {
     ///     y: Response variable (n array)
     ///     k: List of basis dimensions for each column (like k in mgcv)
     ///     method: "GCV" or "REML"
+    ///     bs: Basis type: "bs" (B-splines) or "cr" (cubic regression splines, mgcv default)
     ///     max_iter: Maximum iterations
     ///
     /// Example:
     ///     gam = GAM()
-    ///     result = gam.fit_auto(X, y, k=[10, 15, 20], method='GCV')
+    ///     result = gam.fit_auto(X, y, k=[10, 15, 20], method='REML', bs='cr')
     fn fit_auto<'py>(
         &mut self,
         py: Python<'py>,
@@ -203,6 +204,7 @@ impl PyGAM {
         y: PyReadonlyArray1<f64>,
         k: Vec<usize>,
         method: &str,
+        bs: Option<&str>,
         max_iter: Option<usize>,
     ) -> PyResult<PyObject> {
         let x_array = x.as_array().to_owned();
@@ -216,6 +218,8 @@ impl PyGAM {
             )));
         }
 
+        let basis_type = bs.unwrap_or("bs");  // Default to B-splines for backward compatibility
+
         // Clear any existing smooths
         self.inner.smooth_terms.clear();
 
@@ -224,11 +228,27 @@ impl PyGAM {
             let col = x_array.column(i);
             let col_owned = col.to_owned();
 
-            let smooth = SmoothTerm::cubic_spline_quantile(
-                format!("x{}", i),
-                num_basis,
-                &col_owned,
-            ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+            let smooth = match basis_type {
+                "cr" => {
+                    SmoothTerm::cr_spline_quantile(
+                        format!("x{}", i),
+                        num_basis,
+                        &col_owned,
+                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                },
+                "bs" => {
+                    SmoothTerm::cubic_spline_quantile(
+                        format!("x{}", i),
+                        num_basis,
+                        &col_owned,
+                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                },
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "Unknown basis type '{}'. Use 'bs' or 'cr'.", basis_type
+                    )));
+                }
+            };
 
             self.inner.add_smooth(smooth);
         }

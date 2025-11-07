@@ -78,6 +78,92 @@ pub fn thin_plate_penalty(num_basis: usize, dim: usize) -> Result<Array2<f64>> {
     Ok(penalty)
 }
 
+/// Construct penalty matrix for cubic regression splines (cr basis like mgcv)
+///
+/// For cubic regression splines with cardinal natural cubic spline basis,
+/// the penalty matrix S_ij = integral (h_i''(x) * h_j''(x)) dx
+/// where h_i is the i-th cardinal basis function.
+pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2<f64>> {
+    if knots.len() != num_basis {
+        return Err(GAMError::InvalidParameter(
+            format!("Number of knots ({}) must equal number of basis functions ({}) for cr splines",
+                    knots.len(), num_basis)
+        ));
+    }
+
+    let mut penalty = Array2::zeros((num_basis, num_basis));
+    let n = num_basis - 1;
+
+    // For natural cubic splines, we can compute the penalty matrix analytically
+    // The second derivative of a cubic spline in interval [x_i, x_{i+1}] is linear
+    // For cardinal basis functions, we need to integrate the product of second derivatives
+
+    // Compute knot spacings
+    let mut h = vec![0.0; n];
+    for i in 0..n {
+        h[i] = knots[i + 1] - knots[i];
+    }
+
+    // Build penalty matrix using the second derivative formula for natural cubic splines
+    // This is based on Wood (2017) Section 5.3.1
+    for i in 0..num_basis {
+        for j in i..num_basis {
+            let mut integral = 0.0;
+
+            // For each interval [knots[k], knots[k+1]]
+            for k in 0..n {
+                // The second derivatives of basis functions i and j in this interval
+                // For natural cubic splines, the second derivative is piecewise linear
+
+                // Contribution from interval k
+                if k > 0 && k < n {
+                    let weight = if i == k && j == k {
+                        2.0 / (3.0 * h[k]) + 2.0 / (3.0 * h[k - 1])
+                    } else if i == k && j == k + 1 {
+                        1.0 / (3.0 * h[k])
+                    } else if i == k + 1 && j == k {
+                        1.0 / (3.0 * h[k])
+                    } else if i == k - 1 && j == k {
+                        1.0 / (3.0 * h[k - 1])
+                    } else if i == k && j == k - 1 {
+                        1.0 / (3.0 * h[k - 1])
+                    } else if (i as i32 - j as i32).abs() == 1 && (i == k || j == k) {
+                        1.0 / (6.0 * h[k.min(k - 1)])
+                    } else {
+                        0.0
+                    };
+                    integral += weight;
+                } else if k == 0 {
+                    // First interval
+                    let weight = if i == 0 && j == 0 {
+                        2.0 / (3.0 * h[0])
+                    } else if (i == 0 && j == 1) || (i == 1 && j == 0) {
+                        1.0 / (3.0 * h[0])
+                    } else {
+                        0.0
+                    };
+                    integral += weight;
+                } else if k == n - 1 {
+                    // Last interval
+                    let weight = if i == n && j == n {
+                        2.0 / (3.0 * h[n - 1])
+                    } else if (i == n - 1 && j == n) || (i == n && j == n - 1) {
+                        1.0 / (3.0 * h[n - 1])
+                    } else {
+                        0.0
+                    };
+                    integral += weight;
+                }
+            }
+
+            penalty[[i, j]] = integral;
+            penalty[[j, i]] = integral; // Symmetric
+        }
+    }
+
+    Ok(penalty)
+}
+
 /// Compute the penalty matrix S for a given basis
 pub fn compute_penalty(basis_type: &str, num_basis: usize, knots: Option<&Array1<f64>>, dim: usize) -> Result<Array2<f64>> {
     match basis_type {
@@ -86,6 +172,12 @@ pub fn compute_penalty(basis_type: &str, num_basis: usize, knots: Option<&Array1
                 "Cubic spline penalty requires knots".to_string()
             ))?;
             cubic_spline_penalty(num_basis, knots)
+        },
+        "cr" | "cubic_regression" => {
+            let knots = knots.ok_or_else(|| GAMError::InvalidParameter(
+                "Cubic regression spline penalty requires knots".to_string()
+            ))?;
+            cr_spline_penalty(num_basis, knots)
         },
         "tps" | "thin_plate" => {
             thin_plate_penalty(num_basis, dim)

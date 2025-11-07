@@ -229,6 +229,184 @@ impl BasisFunction for CubicSpline {
     }
 }
 
+/// Cubic regression spline basis (cardinal natural cubic splines, like mgcv's "cr")
+///
+/// Uses cardinal basis functions where each basis function is 1 at one knot and 0 at all others.
+/// Each basis function is a natural cubic spline (zero second derivatives at boundaries).
+pub struct CubicRegressionSpline {
+    /// Knot locations
+    knots: Array1<f64>,
+    /// Number of basis functions (equal to number of knots)
+    num_basis: usize,
+}
+
+impl CubicRegressionSpline {
+    /// Create a new cubic regression spline basis with specified knots
+    pub fn new(knots: Array1<f64>) -> Self {
+        let num_basis = knots.len();
+        Self {
+            knots,
+            num_basis,
+        }
+    }
+
+    /// Create cubic regression spline with evenly spaced knots
+    pub fn with_num_knots(min: f64, max: f64, num_knots: usize) -> Self {
+        let knots = Array1::linspace(min, max, num_knots);
+        Self::new(knots)
+    }
+
+    /// Create cubic regression spline with quantile-based knots (like mgcv)
+    pub fn with_quantile_knots(x_data: &Array1<f64>, num_knots: usize) -> Self {
+        // Sort data to compute quantiles
+        let mut sorted_x = x_data.to_vec();
+        sorted_x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let n = sorted_x.len();
+        let mut knots = Vec::with_capacity(num_knots);
+
+        for i in 0..num_knots {
+            // Compute quantile position
+            let q = i as f64 / (num_knots - 1) as f64;
+            let pos = q * (n - 1) as f64;
+            let idx = pos.floor() as usize;
+
+            // Linear interpolation between data points
+            let knot = if idx >= n - 1 {
+                sorted_x[n - 1]
+            } else {
+                let frac = pos - idx as f64;
+                sorted_x[idx] * (1.0 - frac) + sorted_x[idx + 1] * frac
+            };
+
+            knots.push(knot);
+        }
+
+        Self::new(Array1::from_vec(knots))
+    }
+
+    /// Solve tridiagonal system for natural cubic spline coefficients
+    /// This computes the second derivatives at knots for a natural cubic spline
+    fn solve_tridiagonal(&self, h: &[f64], alpha: &[f64]) -> Vec<f64> {
+        let n = self.knots.len() - 1;
+        let mut c = vec![0.0; n + 1];
+        let mut l = vec![0.0; n + 1];
+        let mut mu = vec![0.0; n + 1];
+        let mut z = vec![0.0; n + 1];
+
+        // Forward elimination
+        l[0] = 1.0;
+        mu[0] = 0.0;
+        z[0] = 0.0;
+
+        for i in 1..n {
+            l[i] = 2.0 * (h[i - 1] + h[i]) - h[i - 1] * mu[i - 1];
+            mu[i] = h[i] / l[i];
+            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+        }
+
+        l[n] = 1.0;
+        z[n] = 0.0;
+        c[n] = 0.0;
+
+        // Back substitution
+        for j in (0..n).rev() {
+            c[j] = z[j] - mu[j] * c[j + 1];
+        }
+
+        c
+    }
+
+    /// Evaluate a single natural cubic spline with given values at knots
+    fn evaluate_natural_spline(&self, x: f64, values: &[f64]) -> f64 {
+        let n = self.knots.len() - 1;
+
+        // Find the interval
+        let mut interval = 0;
+        for i in 0..n {
+            if x >= self.knots[i] && x <= self.knots[i + 1] {
+                interval = i;
+                break;
+            }
+            if x > self.knots[i + 1] && i == n - 1 {
+                interval = n - 1;
+                break;
+            }
+        }
+
+        // Handle extrapolation (linear continuation)
+        if x < self.knots[0] {
+            // Linear extrapolation at left boundary
+            let h = self.knots[1] - self.knots[0];
+            let slope = (values[1] - values[0]) / h;
+            return values[0] + slope * (x - self.knots[0]);
+        } else if x > self.knots[n] {
+            // Linear extrapolation at right boundary
+            let h = self.knots[n] - self.knots[n - 1];
+            let slope = (values[n] - values[n - 1]) / h;
+            return values[n] + slope * (x - self.knots[n]);
+        }
+
+        // Compute h values (knot spacings)
+        let mut h = vec![0.0; n];
+        for i in 0..n {
+            h[i] = self.knots[i + 1] - self.knots[i];
+        }
+
+        // Compute alpha values for the spline system
+        let mut alpha = vec![0.0; n + 1];
+        for i in 1..n {
+            alpha[i] = (3.0 / h[i]) * (values[i + 1] - values[i])
+                - (3.0 / h[i - 1]) * (values[i] - values[i - 1]);
+        }
+
+        // Solve for second derivatives
+        let c = self.solve_tridiagonal(&h, &alpha);
+
+        // Compute b and d coefficients
+        let mut b = vec![0.0; n];
+        let mut d = vec![0.0; n];
+        for i in 0..n {
+            b[i] = (values[i + 1] - values[i]) / h[i] - h[i] * (c[i + 1] + 2.0 * c[i]) / 3.0;
+            d[i] = (c[i + 1] - c[i]) / (3.0 * h[i]);
+        }
+
+        // Evaluate the spline at x
+        let i = interval;
+        let dx = x - self.knots[i];
+        values[i] + b[i] * dx + c[i] * dx * dx + d[i] * dx * dx * dx
+    }
+}
+
+impl BasisFunction for CubicRegressionSpline {
+    fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        let n = x.len();
+        let mut design_matrix = Array2::zeros((n, self.num_basis));
+
+        // For each basis function j (corresponding to knot j)
+        for j in 0..self.num_basis {
+            // Create values vector: 1 at knot j, 0 everywhere else
+            let mut values = vec![0.0; self.num_basis];
+            values[j] = 1.0;
+
+            // Evaluate this cardinal natural cubic spline at each x point
+            for (i, &xi) in x.iter().enumerate() {
+                design_matrix[[i, j]] = self.evaluate_natural_spline(xi, &values);
+            }
+        }
+
+        Ok(design_matrix)
+    }
+
+    fn num_basis(&self) -> usize {
+        self.num_basis
+    }
+
+    fn knots(&self) -> Option<&Array1<f64>> {
+        Some(&self.knots)
+    }
+}
+
 /// Thin plate regression spline basis
 pub struct ThinPlateSpline {
     /// Dimension of the covariate space
