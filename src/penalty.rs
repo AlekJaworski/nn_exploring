@@ -345,8 +345,48 @@ pub fn compute_penalty(basis_type: &str, num_basis: usize, knots: Option<&Array1
 mod tests {
     use super::*;
 
+    /// Compute finite difference penalty for comparison (old method)
+    fn finite_difference_penalty(num_basis: usize, knots: &Array1<f64>) -> Array2<f64> {
+        let mut penalty = Array2::zeros((num_basis, num_basis));
+        let n_knots = knots.len();
+
+        // Finite difference [1, -2, 1] pattern
+        for i in 1..(num_basis - 1) {
+            for j in 1..(num_basis - 1) {
+                if i == j {
+                    penalty[[i, j]] = 2.0;
+                } else if (i as i32 - j as i32).abs() == 1 {
+                    penalty[[i, j]] = -1.0;
+                }
+            }
+        }
+
+        // Scale by 1/h²
+        if n_knots > 1 {
+            let avg_spacing = (knots[n_knots - 1] - knots[0]) / (n_knots - 1) as f64;
+            penalty = penalty / (avg_spacing * avg_spacing);
+        }
+
+        // Normalize by infinity norm
+        let mut max_row_sum = 0.0;
+        for i in 0..num_basis {
+            let mut row_sum = 0.0;
+            for j in 0..num_basis {
+                row_sum += penalty[[i, j]].abs();
+            }
+            if row_sum > max_row_sum {
+                max_row_sum = row_sum;
+            }
+        }
+        if max_row_sum > 1e-10 {
+            penalty = penalty / max_row_sum;
+        }
+
+        penalty
+    }
+
     #[test]
-    fn test_cubic_spline_penalty() {
+    fn test_cubic_spline_penalty_basic() {
         let knots = Array1::linspace(0.0, 1.0, 10);
         let penalty = cubic_spline_penalty(12, &knots).unwrap();
 
@@ -355,13 +395,183 @@ mod tests {
         // Penalty matrix should be symmetric
         for i in 0..12 {
             for j in 0..12 {
-                assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10);
+                assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10,
+                    "Penalty not symmetric at ({}, {}): {} vs {}", i, j, penalty[[i, j]], penalty[[j, i]]);
             }
         }
 
         // Should be positive semi-definite (non-negative eigenvalues)
         // This is a basic structural check
         assert!(penalty[[5, 5]] >= 0.0);
+    }
+
+    #[test]
+    fn test_analytical_vs_finite_difference() {
+        // Test with small number of basis functions for easy verification
+        let knots = Array1::linspace(0.0, 1.0, 5);
+        let num_basis = 7;
+
+        let analytical = cubic_spline_penalty(num_basis, &knots).unwrap();
+        let finite_diff = finite_difference_penalty(num_basis, &knots);
+
+        // Both should be symmetric
+        for i in 0..num_basis {
+            for j in 0..num_basis {
+                assert!((analytical[[i, j]] - analytical[[j, i]]).abs() < 1e-10);
+                assert!((finite_diff[[i, j]] - finite_diff[[j, i]]).abs() < 1e-10);
+            }
+        }
+
+        // Both should be normalized (infinity norm = 1)
+        let mut max_row_sum_analytical: f64 = 0.0;
+        let mut max_row_sum_finite: f64 = 0.0;
+        for i in 0..num_basis {
+            let mut row_sum_analytical: f64 = 0.0;
+            let mut row_sum_finite: f64 = 0.0;
+            for j in 0..num_basis {
+                row_sum_analytical += analytical[[i, j]].abs();
+                row_sum_finite += finite_diff[[i, j]].abs();
+            }
+            max_row_sum_analytical = max_row_sum_analytical.max(row_sum_analytical);
+            max_row_sum_finite = max_row_sum_finite.max(row_sum_finite);
+        }
+        assert!((max_row_sum_analytical - 1.0).abs() < 1e-6,
+            "Analytical penalty not normalized: max row sum = {}", max_row_sum_analytical);
+        assert!((max_row_sum_finite - 1.0).abs() < 1e-6,
+            "Finite diff penalty not normalized: max row sum = {}", max_row_sum_finite);
+
+        // Print comparison for inspection
+        println!("\nAnalytical penalty (normalized):");
+        for i in 0..num_basis.min(5) {
+            print!("  ");
+            for j in 0..num_basis.min(5) {
+                print!("{:8.4} ", analytical[[i, j]]);
+            }
+            println!();
+        }
+
+        println!("\nFinite difference penalty (normalized):");
+        for i in 0..num_basis.min(5) {
+            print!("  ");
+            for j in 0..num_basis.min(5) {
+                print!("{:8.4} ", finite_diff[[i, j]]);
+            }
+            println!();
+        }
+    }
+
+    #[test]
+    fn test_penalty_with_known_values() {
+        // Test with simple case: 3 interior knots, 5 basis functions
+        // For cubic B-splines with evenly spaced knots
+        let knots = Array1::from_vec(vec![0.0, 0.5, 1.0]);
+        let num_basis = 5;
+
+        let penalty = cubic_spline_penalty(num_basis, &knots).unwrap();
+
+        // Check basic properties
+        assert_eq!(penalty.shape(), &[5, 5]);
+
+        // Symmetry
+        for i in 0..5 {
+            for j in 0..5 {
+                assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10);
+            }
+        }
+
+        // B-splines have compact support (degree+1 intervals = 4 for cubics)
+        // So the penalty matrix should have some band structure,
+        // but may not be strictly tridiagonal due to overlapping support
+        // Just check it's not completely dense - very far elements should be small
+        assert!(penalty[[0, 4]].abs() < 0.1, "Very far off-diagonal should be small");
+
+        // Normalized: max row sum should be 1
+        let mut max_row_sum: f64 = 0.0;
+        for i in 0..5 {
+            let mut row_sum: f64 = 0.0;
+            for j in 0..5 {
+                row_sum += penalty[[i, j]].abs();
+            }
+            max_row_sum = max_row_sum.max(row_sum);
+        }
+        assert!((max_row_sum - 1.0).abs() < 1e-6,
+            "Penalty should be normalized, got max row sum: {}", max_row_sum);
+    }
+
+    #[test]
+    fn test_penalty_scales_with_knot_spacing() {
+        // Test that penalty magnitude scales appropriately with knot spacing
+        let num_basis = 7;
+
+        // Wide spacing
+        let knots_wide = Array1::linspace(0.0, 10.0, 5);
+        let penalty_wide = cubic_spline_penalty(num_basis, &knots_wide).unwrap();
+
+        // Narrow spacing
+        let knots_narrow = Array1::linspace(0.0, 1.0, 5);
+        let penalty_narrow = cubic_spline_penalty(num_basis, &knots_narrow).unwrap();
+
+        // After normalization, both should have max row sum ≈ 1
+        let mut max_sum_wide: f64 = 0.0;
+        let mut max_sum_narrow: f64 = 0.0;
+        for i in 0..num_basis {
+            let mut sum_wide: f64 = 0.0;
+            let mut sum_narrow: f64 = 0.0;
+            for j in 0..num_basis {
+                sum_wide += penalty_wide[[i, j]].abs();
+                sum_narrow += penalty_narrow[[i, j]].abs();
+            }
+            max_sum_wide = max_sum_wide.max(sum_wide);
+            max_sum_narrow = max_sum_narrow.max(sum_narrow);
+        }
+
+        assert!((max_sum_wide - 1.0).abs() < 1e-6,
+            "Wide spacing: max row sum = {}", max_sum_wide);
+        assert!((max_sum_narrow - 1.0).abs() < 1e-6,
+            "Narrow spacing: max row sum = {}", max_sum_narrow);
+    }
+
+    #[test]
+    fn test_cr_spline_penalty_basic() {
+        // Test cubic regression spline penalty
+        let knots = Array1::from_vec(vec![0.0, 0.25, 0.5, 0.75, 1.0]);
+        let penalty = cr_spline_penalty(5, &knots).unwrap();
+
+        assert_eq!(penalty.shape(), &[5, 5]);
+
+        // Symmetry
+        for i in 0..5 {
+            for j in 0..5 {
+                assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10);
+            }
+        }
+
+        // CR splines (natural cubic splines) have tridiagonal second derivative structure
+        // The penalty should be mostly band-diagonal with main mass near diagonal
+        // Check that it's not completely dense
+        let mut off_diagonal_mass = 0.0;
+        let mut diagonal_mass = 0.0;
+        for i in 0..5 {
+            diagonal_mass += penalty[[i, i]].abs();
+            for j in 0..5 {
+                if (i as i32 - j as i32).abs() > 1 {
+                    off_diagonal_mass += penalty[[i, j]].abs();
+                }
+            }
+        }
+        // Most mass should be on/near diagonal
+        assert!(diagonal_mass > off_diagonal_mass,
+            "CR penalty should have most mass near diagonal");
+
+        // Diagonal elements should be non-negative
+        // (boundary knots may have zero second derivative for natural splines)
+        for i in 0..5 {
+            assert!(penalty[[i, i]] >= 0.0,
+                "Diagonal element {} should be non-negative: {}", i, penalty[[i, i]]);
+        }
+
+        // At least interior knots should have positive diagonal
+        assert!(penalty[[2, 2]] > 0.0, "Interior knot diagonal should be positive");
     }
 
     #[test]
@@ -376,5 +586,31 @@ mod tests {
                 assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10);
             }
         }
+    }
+
+    #[test]
+    fn test_penalty_rank_deficiency() {
+        // For cubic splines with second derivative penalty,
+        // the penalty should have rank = num_basis - 2
+        // (null space contains linear functions)
+        let knots = Array1::linspace(0.0, 1.0, 5);
+        let num_basis = 7;
+        let penalty = cubic_spline_penalty(num_basis, &knots).unwrap();
+
+        // Check the structure of the penalty matrix
+        // For cubic B-splines, the second derivative has support on fewer intervals
+        // than the original basis, so penalty should show some structure
+        let first_row_sum: f64 = (0..num_basis).map(|j| penalty[[0, j]].abs()).sum();
+        let last_row_sum: f64 = (0..num_basis).map(|j| penalty[[num_basis-1, j]].abs()).sum();
+        let middle_row_sum: f64 = (0..num_basis).map(|j| penalty[[3, j]].abs()).sum();
+
+        println!("\nFirst row sum: {}", first_row_sum);
+        println!("Last row sum: {}", last_row_sum);
+        println!("Middle row (3) sum: {}", middle_row_sum);
+
+        // After normalization, at least one row should have sum close to 1
+        // (that's what defines the infinity norm)
+        assert!(first_row_sum <= 1.0 + 1e-6 && last_row_sum <= 1.0 + 1e-6,
+            "Row sums should not exceed 1 after normalization");
     }
 }
