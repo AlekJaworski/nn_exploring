@@ -37,7 +37,6 @@ def num_to_list_padded(integer, padding):
     return result
 
 
-@np.vectorize
 def num_to_list(integer):
     """changes a number to a list - a quasi inverse of the list_to_num"""
     result = [0 for _ in range(3)]

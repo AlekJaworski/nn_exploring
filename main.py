@@ -18,7 +18,7 @@ Y_test = [np.reshape(utils.num_to_list(z), (3, 1)) for z in Y_test]
 # preparing the data
 train_data = list(zip(X_train, Y_train))
 test_data = list(zip(X_test, Y_test))
-utils.visualise(X, y)
+# utils.visualise(X, y)  # Comment out visualization for testing
 
 # training the example net.
 example_net = utils.initialize_new()

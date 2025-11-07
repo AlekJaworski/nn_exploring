@@ -12,9 +12,22 @@ class NeuralNet:
     def add_cross_entropy_loss(self):
         self.loss_layer = layers.CrossEntropyLoss(self.layers[-1].output_size)
 
-    @staticmethod
+    def add_square_loss(self):
+        """Add mean squared error loss for regression tasks."""
+        self.loss_layer = layers.SquareLoss(self.layers[-1].output_size)
+
     def xavier_initialization(self):
-        pass
+        """Initialize all layer weights using Xavier/Glorot initialization."""
+        for layer in self.layers:
+            if hasattr(layer, 'weights') and layer.weights is not None:
+                input_size = layer.input_size
+                output_size = layer.output_size
+                # Xavier initialization: weights ~ N(0, 2/(input_size + output_size))
+                limit = np.sqrt(6.0 / (input_size + output_size))
+                layer.weights = np.random.uniform(-limit, limit, (output_size, input_size))
+                # Biases are typically initialized to zero
+                if hasattr(layer, 'bias'):
+                    layer.bias = np.zeros((output_size, 1))
 
     def forward_pass(self, inputs, actual):
         x = inputs
