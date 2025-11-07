@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 debug_*.py
 test_singular_*.py
+test_lambda_*.py
+test_penalty_*.py
+test_final_*.py
