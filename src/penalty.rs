@@ -3,6 +3,55 @@
 use ndarray::{Array1, Array2, s};
 use crate::{Result, GAMError};
 
+/// Solve a symmetric tridiagonal system Ax=b using Thomas algorithm
+/// a: main diagonal (length n)
+/// b: super/sub diagonal (length n-1, same for symmetric)
+/// d: right-hand side matrix (n x m)
+/// Returns: solution matrix x (n x m)
+fn solve_tridiagonal_symmetric(a: &[f64], b: &[f64], d: &Array2<f64>) -> Result<Array2<f64>> {
+    let n = a.len();
+    let m = d.ncols();
+
+    if b.len() != n - 1 || d.nrows() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Tridiagonal system dimensions don't match".to_string()
+        ));
+    }
+
+    // Forward elimination
+    let mut c_prime = vec![0.0; n - 1];
+    let mut d_prime = Array2::zeros((n, m));
+
+    c_prime[0] = b[0] / a[0];
+    for i in 0..m {
+        d_prime[[0, i]] = d[[0, i]] / a[0];
+    }
+
+    for i in 1..(n - 1) {
+        let denom = a[i] - b[i - 1] * c_prime[i - 1];
+        c_prime[i] = b[i] / denom;
+        for j in 0..m {
+            d_prime[[i, j]] = (d[[i, j]] - b[i - 1] * d_prime[[i - 1, j]]) / denom;
+        }
+    }
+
+    // Last row
+    let denom = a[n - 1] - b[n - 2] * c_prime[n - 2];
+    for j in 0..m {
+        d_prime[[n - 1, j]] = (d[[n - 1, j]] - b[n - 2] * d_prime[[n - 2, j]]) / denom;
+    }
+
+    // Back substitution
+    let mut x = d_prime.clone();
+    for i in (0..(n - 1)).rev() {
+        for j in 0..m {
+            x[[i, j]] -= c_prime[i] * x[[i + 1, j]];
+        }
+    }
+
+    Ok(x)
+}
+
 /// Compute B-spline basis function using Cox-de Boor recursion
 fn b_spline_basis(x: f64, i: usize, k: usize, t: &Array1<f64>) -> f64 {
     if k == 0 {
@@ -664,80 +713,55 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
         ));
     }
 
-    let mut penalty = Array2::zeros((num_basis, num_basis));
-    let n = num_basis - 1;
+    // Cardinal regression spline penalty using mgcv's algorithm
+    // Based on mgcv C source code (getFS function in mgcv.c)
+    // See Wood (2006) Section 4.1.2
 
-    // For natural cubic splines, we can compute the penalty matrix analytically
-    // The second derivative of a cubic spline in interval [x_i, x_{i+1}] is linear
-    // For cardinal basis functions, we need to integrate the product of second derivatives
+    let n = num_basis;
+    let n2 = n - 2;
 
-    // Compute knot spacings
-    let mut h = vec![0.0; n];
-    for i in 0..n {
+    // Step 1: Compute knot spacings h
+    let mut h = vec![0.0; n - 1];
+    for i in 0..(n - 1) {
         h[i] = knots[i + 1] - knots[i];
     }
 
-    // Build penalty matrix using the second derivative formula for natural cubic splines
-    // This is based on Wood (2017) Section 5.3.1
-    for i in 0..num_basis {
-        for j in i..num_basis {
-            let mut integral = 0.0;
-
-            // For each interval [knots[k], knots[k+1]]
-            for k in 0..n {
-                // The second derivatives of basis functions i and j in this interval
-                // For natural cubic splines, the second derivative is piecewise linear
-
-                // Contribution from interval k
-                if k > 0 && k < n {
-                    let weight = if i == k && j == k {
-                        2.0 / (3.0 * h[k]) + 2.0 / (3.0 * h[k - 1])
-                    } else if i == k && j == k + 1 {
-                        1.0 / (3.0 * h[k])
-                    } else if i == k + 1 && j == k {
-                        1.0 / (3.0 * h[k])
-                    } else if i == k - 1 && j == k {
-                        1.0 / (3.0 * h[k - 1])
-                    } else if i == k && j == k - 1 {
-                        1.0 / (3.0 * h[k - 1])
-                    } else if (i as i32 - j as i32).abs() == 1 && (i == k || j == k) {
-                        1.0 / (6.0 * h[k.min(k - 1)])
-                    } else {
-                        0.0
-                    };
-                    integral += weight;
-                } else if k == 0 {
-                    // First interval
-                    let weight = if i == 0 && j == 0 {
-                        2.0 / (3.0 * h[0])
-                    } else if (i == 0 && j == 1) || (i == 1 && j == 0) {
-                        1.0 / (3.0 * h[0])
-                    } else {
-                        0.0
-                    };
-                    integral += weight;
-                } else if k == n - 1 {
-                    // Last interval
-                    let weight = if i == n && j == n {
-                        2.0 / (3.0 * h[n - 1])
-                    } else if (i == n - 1 && j == n) || (i == n && j == n - 1) {
-                        1.0 / (3.0 * h[n - 1])
-                    } else {
-                        0.0
-                    };
-                    integral += weight;
-                }
-            }
-
-            penalty[[i, j]] = integral;
-            penalty[[j, i]] = integral; // Symmetric
-        }
+    // Step 2: Build (n-2) x n matrix D
+    // D[i,i] = 1/h[i]
+    // D[i,i+1] = -1/h[i] - 1/h[i+1]
+    // D[i,i+2] = 1/h[i+1]
+    let mut D = Array2::<f64>::zeros((n2, n));
+    for i in 0..n2 {
+        D[[i, i]] = 1.0 / h[i];
+        D[[i, i + 1]] = -1.0 / h[i] - 1.0 / h[i + 1];
+        D[[i, i + 2]] = 1.0 / h[i + 1];
     }
 
-    // NOTE: mgcv does NOT normalize penalty matrices
-    // We use the raw penalty values to match mgcv's lambda estimates exactly
+    // Step 3: Build symmetric tridiagonal matrix B (n2 x n2)
+    // Leading diagonal: (h[i] + h[i+1])/3
+    // Super/sub diagonal: h[i+1]/6
+    let mut B_diag = vec![0.0; n2];
+    let mut B_off = vec![0.0; n2 - 1];
+    for i in 0..n2 {
+        B_diag[i] = (h[i] + h[i + 1]) / 3.0;
+    }
+    for i in 0..(n2 - 1) {
+        B_off[i] = h[i + 1] / 6.0;
+    }
 
-    Ok(penalty)
+    // Step 4: Solve B * X = D for X = B^{-1}D using Thomas algorithm
+    let B_inv_D = solve_tridiagonal_symmetric(&B_diag, &B_off, &D)?;
+
+    // Step 5: Compute S = D' B^{-1} D
+    let S = D.t().dot(&B_inv_D);
+
+    // Step 6: Apply mgcv's normalization
+    // mgcv normalizes by L^3 / 14630.7351820148 to make penalty scale-invariant
+    let L = knots[n - 1] - knots[0];
+    let normalization = L.powi(3) / 14630.7351820148;
+    let S_normalized = &S * normalization;
+
+    Ok(S_normalized)
 }
 
 /// Compute the penalty matrix S for a given basis
