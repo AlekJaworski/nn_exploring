@@ -54,7 +54,7 @@ class TestMgcvComparison(unittest.TestCase):
         # Fit with R mgcv
         ro.globalenv['x'] = self.x
         ro.globalenv['y'] = self.y
-        ro.r('gam_fit <- gam(y ~ s(x, k=10, bs="cr"), method="REML")')
+        ro.r('gam_fit <- gam(y ~ s(x, k=10, bs="bs"), method="REML")')
         pred_r = np.array(ro.r('predict(gam_fit)'))
 
         # Compare predictions
@@ -82,7 +82,7 @@ class TestMgcvComparison(unittest.TestCase):
         # Fit with R mgcv
         ro.globalenv['x'] = self.x
         ro.globalenv['y'] = self.y
-        ro.r('gam_fit <- gam(y ~ s(x, k=10, bs="cr"), method="REML")')
+        ro.r('gam_fit <- gam(y ~ s(x, k=10, bs="bs"), method="REML")')
         lambda_r = np.array(ro.r('gam_fit$sp'))[0]
 
         print(f"\nLambda comparison:")
@@ -111,7 +111,7 @@ class TestMgcvComparison(unittest.TestCase):
         # Fit with R mgcv
         ro.globalenv['x_lin'] = x_lin
         ro.globalenv['y_lin'] = y_lin
-        ro.r('gam_fit <- gam(y_lin ~ s(x_lin, k=10, bs="cr"), method="REML")')
+        ro.r('gam_fit <- gam(y_lin ~ s(x_lin, k=10, bs="bs"), method="REML")')
         pred_r = np.array(ro.r('predict(gam_fit)'))
 
         # Both should fit the line well
@@ -145,7 +145,7 @@ class TestMgcvComparison(unittest.TestCase):
         ro.globalenv['x1'] = x1
         ro.globalenv['x2'] = x2
         ro.globalenv['y_multi'] = y_multi
-        ro.r('gam_fit <- gam(y_multi ~ s(x1, k=10, bs="cr") + s(x2, k=10, bs="cr"), method="REML")')
+        ro.r('gam_fit <- gam(y_multi ~ s(x1, k=10, bs="bs") + s(x2, k=10, bs="bs"), method="REML")')
         pred_r = np.array(ro.r('predict(gam_fit)'))
 
         # Compare predictions
@@ -180,7 +180,7 @@ class TestMgcvComparison(unittest.TestCase):
         ro.globalenv['x_train'] = x_train
         ro.globalenv['y_train'] = y_train
         ro.globalenv['x_test'] = x_test
-        ro.r('gam_fit <- gam(y_train ~ s(x_train, k=10, bs="cr"), method="REML")')
+        ro.r('gam_fit <- gam(y_train ~ s(x_train, k=10, bs="bs"), method="REML")')
         ro.r('pred_r <- predict(gam_fit, newdata=data.frame(x_train=x_test))')
         pred_r = np.array(ro.r('pred_r'))
 
