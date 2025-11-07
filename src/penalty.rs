@@ -41,6 +41,11 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         penalty = penalty / (avg_spacing * avg_spacing);
     }
 
+    // TEMPORARY FIX: The penalty appears to be scaled too large by ~1000x
+    // This causes lambda to be optimized to ~1000x too small
+    // TODO: Investigate proper penalty scaling from mgcv source
+    penalty = penalty / 1000.0;
+
     Ok(penalty)
 }
 
@@ -160,6 +165,10 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
             penalty[[j, i]] = integral; // Symmetric
         }
     }
+
+    // TEMPORARY FIX: Apply same scaling correction as B-splines
+    // TODO: Investigate proper penalty scaling from mgcv source
+    penalty = penalty / 1000.0;
 
     Ok(penalty)
 }
