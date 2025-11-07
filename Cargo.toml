@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ndarray = "0.16"
+ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
 approx = "0.5"
 thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }

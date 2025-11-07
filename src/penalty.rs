@@ -1,6 +1,7 @@
 //! Penalty matrix construction for smoothing splines
 
 use ndarray::{Array1, Array2, s};
+use ndarray_linalg::{Solve};
 use crate::{Result, GAMError};
 
 /// Compute B-spline basis function using Cox-de Boor recursion
@@ -189,6 +190,140 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
     // We use the raw penalty values to match mgcv's lambda estimates exactly
 
     Ok(penalty)
+}
+
+/// Compute evaluation points k1 for mgcv band Cholesky algorithm
+///
+/// Creates subdivided evaluation points based on interior knot spacings
+/// Formula: h1 = repeat(h / pord, pord), k1 = cumsum([k0[0], ...h1])
+fn create_evaluation_points(interior_knots: &Array1<f64>, pord: usize) -> Array1<f64> {
+    let h = interior_knots.slice(s![1..]).to_owned() - interior_knots.slice(s![..interior_knots.len()-1]);
+
+    // h1 = repeat each h value pord times, divided by pord
+    let mut h1_vec = Vec::with_capacity(h.len() * pord);
+    for &h_val in h.iter() {
+        for _ in 0..pord {
+            h1_vec.push(h_val / (pord as f64));
+        }
+    }
+
+    // k1 = cumulative sum starting from k0[0]
+    let mut k1_vec = Vec::with_capacity(h1_vec.len() + 1);
+    k1_vec.push(interior_knots[0]);
+
+    let mut cumsum = interior_knots[0];
+    for &h1_val in &h1_vec {
+        cumsum += h1_val;
+        k1_vec.push(cumsum);
+    }
+
+    Array1::from_vec(k1_vec)
+}
+
+/// Compute derivative matrix D[k1, basis] = d^m/dx^m B_i(x) at evaluation points
+///
+/// Each column i contains the m-th derivative of basis function i evaluated at k1 points
+fn compute_derivative_matrix(
+    k1: &Array1<f64>,
+    num_basis: usize,
+    extended_knots: &Array1<f64>,
+    degree: usize,
+    deriv_order: usize,
+) -> Array2<f64> {
+    let mut d = Array2::zeros((k1.len(), num_basis));
+
+    for i in 0..num_basis {
+        for (j, &x) in k1.iter().enumerate() {
+            let deriv = match deriv_order {
+                0 => b_spline_basis(x, i, degree, extended_knots),
+                1 => b_spline_derivative(x, i, degree, extended_knots),
+                2 => b_spline_second_derivative(x, i, degree, extended_knots),
+                _ => panic!("Derivative order > 2 not implemented"),
+            };
+            d[[j, i]] = deriv;
+        }
+    }
+
+    d
+}
+
+/// Compute W1 weight matrix for mgcv band Cholesky algorithm
+///
+/// CRITICAL: Must use column-major reshape + transpose to match R's matrix() behavior
+/// This ensures correct signs on off-diagonal elements
+///
+/// Formula: W1 = P^T @ H @ P where:
+/// - P = inv(powers_matrix), powers from Vandermonde-like construction
+/// - H[i,j] = (1 + (-1)^(i+j)) / (i+j-1) for i,j in 1..pord+1
+fn compute_w1_matrix(pord: usize) -> Result<Array2<f64>> {
+    let n = pord + 1;
+
+    // Sequence values from -1 to 1
+    let seq_vals: Vec<f64> = (0..n)
+        .map(|i| -1.0 + 2.0 * (i as f64) / (pord as f64))
+        .collect();
+
+    // Build powers matrix EXACTLY as R does:
+    // R: matrix(rep(seq_vals, pord+1)^rep(0:pord, each=pord+1), pord+1, pord+1)
+    // This uses column-major layout, then we transpose to match R's row-wise printing
+    let mut vec = Vec::with_capacity(n * n);
+    for power in 0..n {
+        for &val in &seq_vals {
+            vec.push(val.powi(power as i32));
+        }
+    }
+
+    // Reshape column-major (like R's matrix()), then transpose
+    let mut powers_matrix = Array2::zeros((n, n));
+    for (idx, &val) in vec.iter().enumerate() {
+        let col = idx / n;
+        let row = idx % n;
+        powers_matrix[[row, col]] = val;
+    }
+    let powers_matrix = powers_matrix.t().to_owned();  // Transpose!
+
+    // Invert to get P
+    // For small matrices (pord <= 2), use explicit formula
+    let p = if n == 2 {
+        // 2x2 inverse: [[a, b], [c, d]]^-1 = 1/det * [[d, -b], [-c, a]]
+        let a = powers_matrix[[0, 0]];
+        let b = powers_matrix[[0, 1]];
+        let c = powers_matrix[[1, 0]];
+        let d = powers_matrix[[1, 1]];
+        let det = a * d - b * c;
+        if det.abs() < 1e-10 {
+            return Err(GAMError::SingularMatrix);
+        }
+        let mut inv = Array2::zeros((2, 2));
+        inv[[0, 0]] = d / det;
+        inv[[0, 1]] = -b / det;
+        inv[[1, 0]] = -c / det;
+        inv[[1, 1]] = a / det;
+        inv
+    } else {
+        // For larger matrices, would need proper linear algebra library
+        return Err(GAMError::InvalidParameter(
+            format!("Matrix inversion for size {} not implemented", n)
+        ));
+    };
+
+    // Build H matrix: H[i,j] = (1 + (-1)^(i+j)) / (i+j-1)
+    // where i, j are 1-indexed (0-indexed: i+1, j+1)
+    let mut h = Array2::zeros((n, n));
+    for i in 0..n {
+        for j in 0..n {
+            let sum_idx = (i + 1) + (j + 1);  // 1-indexed sum
+            let numerator = 1.0 + (-1.0_f64).powi((sum_idx - 2) as i32);
+            let denominator = (sum_idx - 1) as f64;
+            h[[i, j]] = numerator / denominator;
+        }
+    }
+
+    // W1 = P^T @ H @ P
+    let pt_h = p.t().dot(&h);
+    let w1 = pt_h.dot(&p);
+
+    Ok(w1)
 }
 
 /// Gauss-Legendre quadrature points and weights on [-1, 1]
