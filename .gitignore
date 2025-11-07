@@ -6,3 +6,12 @@ test_singular_*.py
 test_lambda_*.py
 test_penalty_*.py
 test_final_*.py
+test_adaptive_*.py
+test_bs_*.py
+test_rank_*.py
+check_*.py
+compare_*.py
+investigate_*.py
+analyze_*.py
+derive_*.md
+summary_*.md
