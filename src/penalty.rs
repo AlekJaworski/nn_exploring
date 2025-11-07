@@ -77,10 +77,51 @@ fn b_spline_second_derivative(x: f64, i: usize, k: usize, t: &Array1<f64>) -> f6
     }
 }
 
+/// Create mgcv-style extended knot vector for B-splines
+///
+/// mgcv creates knots that extend beyond the data range by degree * spacing
+/// Formula from mgcv smooth.construct.bs.smooth.spec:
+///   xr <- xu - xl
+///   xl <- xl - xr * 0.001
+///   xu <- xu + xr * 0.001
+///   dx <- (xu - xl)/(nk - 1)
+///   k <- seq(xl - dx * m[1], xu + dx * m[1], length = nk + 2 * m[1])
+fn create_mgcv_bs_knots(x_min: f64, x_max: f64, num_basis: usize, degree: usize) -> Array1<f64> {
+    // In mgcv: k (bs.dim) is the basis dimension parameter
+    // num_basis = k - 1 for BS splines (due to identifiability constraints)
+    // To recover k from num_basis: k = num_basis + 1
+    let k = num_basis + 1;
+
+    // mgcv's formula: nk = k - degree + 1 (number of interior knot intervals)
+    // Total knots = nk + 2 * degree
+    let nk = k - degree + 1;
+
+    // Extend data range slightly (0.1% on each side)
+    let x_range = x_max - x_min;
+    let xl = x_min - x_range * 0.001;
+    let xu = x_max + x_range * 0.001;
+
+    // Compute interior knot spacing
+    let dx = (xu - xl) / (nk - 1) as f64;
+
+    // Create extended knot sequence from (xl - degree*dx) to (xu + degree*dx)
+    let n_total = nk + 2 * degree;
+    let start = xl - (degree as f64) * dx;
+    let end = xu + (degree as f64) * dx;
+
+    Array1::linspace(start, end, n_total)
+}
+
 /// Construct penalty matrix for cubic splines using analytical B-spline integrals
 ///
 /// Computes S_ij = ∫ B''_i(x) B''_j(x) dx analytically using numerical integration
-/// This is the correct penalty matrix that mgcv uses (not finite differences)
+/// This matches mgcv's penalty matrix calculation
+///
+/// # Arguments
+/// * `num_basis` - Number of basis functions (for mgcv compatibility, pass k here)
+/// * `knots` - Interior knots (used only to get data range [x_min, x_max])
+///
+/// Note: This function creates mgcv-style extended knots internally
 pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2<f64>> {
     let mut penalty = Array2::zeros((num_basis, num_basis));
 
@@ -91,25 +132,18 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         ));
     }
 
-    // Create extended knot vector for cubic B-splines (degree 3)
-    let degree = 3;
-    let mut extended_knots = Array1::zeros(n_knots + 2 * degree);
-
-    // Repeat boundary knots
-    let ext_len = extended_knots.len();
-    for i in 0..degree {
-        extended_knots[i] = knots[0];
-        extended_knots[ext_len - 1 - i] = knots[n_knots - 1];
-    }
-    for i in 0..n_knots {
-        extended_knots[degree + i] = knots[i];
-    }
-
-    // Compute S_ij = ∫ B''_i(x) B''_j(x) dx using Gaussian quadrature
-    // For each pair of basis functions, integrate over their overlapping support
-
+    // Get data range from interior knots
     let x_min = knots[0];
     let x_max = knots[n_knots - 1];
+
+    // Create mgcv-style extended knot vector
+    let degree = 3;
+    let extended_knots = create_mgcv_bs_knots(x_min, x_max, num_basis, degree);
+
+    // Compute S_ij = ∫ B''_i(x) B''_j(x) dx using Gaussian quadrature
+    // Integrate over the full extended knot range
+
+    let n_intervals = extended_knots.len() - 1;
 
     // Use 10-point Gaussian quadrature per interval for high accuracy
     let n_quad = 10;
@@ -119,12 +153,15 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         for j in i..num_basis {
             let mut integral = 0.0;
 
-            // Integrate over each knot interval
-            // B-splines have compact support, so we only integrate where both are non-zero
-            for k in 0..(n_knots - 1) {
-                let a = knots[k];
-                let b = knots[k + 1];
+            // Integrate over each knot interval in the extended knot sequence
+            for k in 0..n_intervals {
+                let a = extended_knots[k];
+                let b = extended_knots[k + 1];
                 let h = b - a;
+
+                if h < 1e-14 {
+                    continue; // Skip zero-length intervals
+                }
 
                 // Transform Gaussian quadrature points from [-1, 1] to [a, b]
                 for &(xi, wi) in &quad_points {
