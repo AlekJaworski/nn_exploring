@@ -326,6 +326,48 @@ fn compute_w1_matrix(pord: usize) -> Result<Array2<f64>> {
     Ok(w1)
 }
 
+/// Build ld vector (diagonal of banded B matrix) with reindexing and overlaps
+///
+/// Steps:
+/// 1. Build ld0 = tile(diag(W1), len(h)) * repeat(h_scaled, pord+1)
+/// 2. Reindex to select specific elements
+/// 3. Add overlaps from adjacent intervals
+fn build_ld_vector(w1: &Array2<f64>, h_scaled: &Array1<f64>, pord: usize) -> Array1<f64> {
+    let diag_w1: Vec<f64> = (0..w1.nrows()).map(|i| w1[[i, i]]).collect();
+    let n_h = h_scaled.len();
+
+    // ld0 = tile(diag(W1), len(h)) * repeat(h_scaled, pord+1)
+    let mut ld0 = Vec::with_capacity(n_h * (pord + 1));
+    for &h_val in h_scaled.iter() {
+        for &diag_val in &diag_w1 {
+            ld0.push(diag_val * h_val);
+        }
+    }
+
+    // Reindex: select elements at specific positions
+    // indices = [repeat(1:pord, n_h) + tile(0:(n_h-1) * (pord+1), pord), len(ld0)]
+    let mut indices = Vec::with_capacity(n_h * pord + 1);
+    for interval_idx in 0..n_h {
+        for offset in 1..=pord {
+            indices.push(offset + interval_idx * (pord + 1));
+        }
+    }
+    indices.push(ld0.len());
+
+    let mut ld: Vec<f64> = indices.iter().map(|&idx| ld0[idx - 1]).collect();  // R's 1-indexing to 0-indexing
+
+    // Handle overlaps: add contributions from adjacent intervals
+    if n_h > 1 {
+        for interval_idx in 1..n_h {
+            let i0 = interval_idx * pord;  // Index in ld
+            let i2 = interval_idx * (pord + 1);  // Index in ld0 (1-indexed in R, so no -1 needed)
+            ld[i0] += ld0[i2 - 1];  // Convert to 0-indexing
+        }
+    }
+
+    Array1::from_vec(ld)
+}
+
 /// Gauss-Legendre quadrature points and weights on [-1, 1]
 /// Returns (point, weight) pairs for n-point quadrature
 fn gauss_legendre_points(n: usize) -> Vec<(f64, f64)> {
