@@ -271,7 +271,13 @@ pub fn reml_criterion_multi(
         .sum();
 
     // Compute log|X'WX + Σλᵢ·Sᵢ|
-    let log_det_a = determinant(&a)?.ln();
+    // Add small ridge term to ensure numerical stability
+    let ridge = 1e-6;
+    let mut a_reg = a.clone();
+    for i in 0..p {
+        a_reg[[i, i]] += ridge;
+    }
+    let log_det_a = determinant(&a_reg)?.ln();
 
     // Compute -Σrank(Sᵢ)·log(λᵢ)
     let mut log_lambda_sum = 0.0;
@@ -345,7 +351,13 @@ pub fn reml_gradient_multi(
         .sum();
 
     // Compute A^(-1)
-    let a_inv = inverse(&a)?;
+    // Add small ridge term to ensure numerical stability (especially for perfectly regular data)
+    let ridge = 1e-6;
+    let mut a_reg = a.clone();
+    for i in 0..p {
+        a_reg[[i, i]] += ridge;
+    }
+    let a_inv = inverse(&a_reg)?;
 
     // Compute gradient for each λᵢ
     let mut gradient = Array1::zeros(m);
@@ -423,7 +435,13 @@ pub fn reml_hessian_multi(
     }
 
     // Compute A^(-1)
-    let a_inv = inverse(&a)?;
+    // Add small ridge term to ensure numerical stability
+    let ridge = 1e-6;
+    let mut a_reg = a.clone();
+    for i in 0..p {
+        a_reg[[i, i]] += ridge;
+    }
+    let a_inv = inverse(&a_reg)?;
 
     // Compute Hessian
     let mut hessian = Array2::zeros((m, m));

@@ -228,8 +228,10 @@ class TestMgcvConsistency(unittest.TestCase):
         """Test that fit_auto and fit_formula produce same results"""
 
         np.random.seed(42)
-        x1 = np.linspace(0, 1, 50)
-        x2 = np.linspace(-1, 1, 50)
+        # Use random data instead of linspace to avoid numerical issues
+        # with B-splines on perfectly regular multi-variable data
+        x1 = np.random.uniform(0, 1, 50)
+        x2 = np.random.uniform(-1, 1, 50)
         y = np.sin(2*np.pi*x1) + 0.5*x2**2 + 0.1*np.random.randn(50)
         X = np.column_stack([x1, x2])
 

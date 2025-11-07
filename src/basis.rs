@@ -50,17 +50,26 @@ impl CubicSpline {
 
     /// Create a cubic spline with quantile-based knots (like mgcv)
     /// Places knots at quantiles of the data distribution for better adaptation
+    ///
+    /// For B-splines with repeated boundary knots, this places interior knots
+    /// strictly between the data boundaries to avoid numerical issues.
     pub fn with_quantile_knots(x_data: &Array1<f64>, num_knots: usize, boundary: BoundaryCondition) -> Self {
         // Sort data to compute quantiles
         let mut sorted_x = x_data.to_vec();
         sorted_x.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let n = sorted_x.len();
+        let x_min = sorted_x[0];
+        let x_max = sorted_x[n - 1];
+
         let mut knots = Vec::with_capacity(num_knots);
 
+        // For B-splines with repeated boundary knots, place interior knots
+        // strictly between boundaries (not at them) to avoid degeneracy
+        // Use positions 1/(num_knots+1), 2/(num_knots+1), ..., num_knots/(num_knots+1)
         for i in 0..num_knots {
-            // Compute quantile position
-            let q = i as f64 / (num_knots - 1) as f64;
+            // Compute quantile position (strictly interior, not at boundaries)
+            let q = (i + 1) as f64 / (num_knots + 1) as f64;
             let pos = q * (n - 1) as f64;
             let idx = pos.floor() as usize;
 
@@ -73,6 +82,16 @@ impl CubicSpline {
             };
 
             knots.push(knot);
+        }
+
+        // Ensure knots are strictly interior by clamping
+        for knot in &mut knots {
+            if *knot <= x_min {
+                *knot = x_min + (x_max - x_min) * 1e-6;
+            }
+            if *knot >= x_max {
+                *knot = x_max - (x_max - x_min) * 1e-6;
+            }
         }
 
         Self::new(Array1::from_vec(knots), boundary)
