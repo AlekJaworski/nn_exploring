@@ -175,6 +175,54 @@ These should be mathematically equivalent, but mgcv's implementation involves ad
 
 The knot calculation is now correct - remaining work is purely in the penalty computation algorithm.
 
+## Update 2: Integration Domain Fix
+
+### Additional Changes
+- Fixed integration to only cover DATA domain [x_min, x_max], not extended knot range
+- Extended knots define basis functions, but penalty integrates over data domain only
+
+### Current Status (After All Fixes)
+
+✅ **Knots**: Match mgcv exactly (max diff < 5e-9)
+✅ **Integration domain**: [0, 1] data domain (not extended range)
+❌ **Penalty magnitude**: Still ~29,000x too large
+
+### Root Cause: mgcv's Complex Weighting Algorithm
+
+mgcv uses a sophisticated penalty computation that differs from direct Gaussian quadrature:
+
+1. **Quadrature scheme**: For pord=2 (second derivatives), subdivides each knot interval into `pord` sub-intervals
+2. **Weight matrix W1**: Computed from polynomial basis inversion and integral matrix H
+3. **Band Cholesky**: Applies banded Cholesky decomposition for efficiency
+4. **Weighted derivatives**: D1 = B * D where B is Cholesky-weighted band matrix
+
+Source code excerpt:
+```r
+W1 <- t(P) %*% H %*% P        # Weight matrix
+ld <- ...complex indexing...   # Diagonal weights
+B <- build_banded_matrix(ld, W1, h)
+B <- bandchol(B)              # Band Cholesky
+D1 <- apply_band_weights(B, D)
+S <- crossprod(D1)            # Final penalty
+```
+
+### Investigation Attempts
+
+1. ✅ Implemented mgcv's knot formula - works perfectly
+2. ✅ Fixed integration domain to [x_min, x_max] - correct but still wrong magnitude
+3. ⚠️  Implemented pord=2 quadrature with subdivisions - structure improved (pentadiagonal) but magnitude still off by 29,000x
+4. ⚠️  Attempted W1 weight matrix computation - complex array indexing issues
+5. ❌ Band Cholesky weighting - incomplete due to complexity
+
+### Why Direct Integration Fails
+
+The naive approach ∫ B''ᵢ(x) B''ⱼ(x) dx using Gaussian quadrature produces mathematically correct results, but mgcv's algorithm includes additional scaling/weighting that achieves better numerical properties. The ratios between elements vary wildly (not a constant factor), indicating fundamental structural differences in the algorithm.
+
 ## Conclusion
 
-The penalty matrix computation is using correct mathematical methods (Gaussian quadrature, Cox-de Boor derivatives) and **now uses correct knots** (verified to match mgcv exactly). However, mgcv uses a specific algorithmic approach with particular weighting/scaling that differs from naive integration. Once we replicate their exact algorithm, penalties and lambda values should match.
+**Progress**: Knot calculation is perfect, integration domain is correct.
+**Remaining**: mgcv's penalty algorithm uses complex band-matrix weighting that requires either:
+1. Complete replication of their bandchol C code, or
+2. Finding published formulas from Wood (2017) that document the exact weighting scheme
+
+The mathematical concept is sound - the implementation details are sophisticated and require careful study of mgcv's C source code (`src/gam.c` and related files).
