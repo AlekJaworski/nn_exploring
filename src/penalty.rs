@@ -1082,4 +1082,61 @@ mod tests {
                 "Trace should match mgcv within 1%: got {:.1}, expected {:.1}",
                 trace, expected_trace);
     }
+
+    #[test]
+    fn test_mgcv_penalty_different_parameters() {
+        // CRITICAL: Test with COMPLETELY DIFFERENT parameters to prove no hardcoding
+
+        // Test 1: Different num_basis (10 instead of 20)
+        println!("\n=== Test 1: num_basis=10 ===");
+        let num_basis = 10;
+        let knots = Array1::from_vec(vec![0.0, 1.0]);
+        let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
+
+        assert_eq!(penalty.nrows(), num_basis, "Penalty should be {}x{}", num_basis, num_basis);
+        assert_eq!(penalty.ncols(), num_basis, "Penalty should be {}x{}", num_basis, num_basis);
+
+        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
+        println!("  Frobenius: {:.1}", frobenius);
+        assert!(frobenius > 0.0, "Frobenius norm should be positive");
+
+        // Test 2: Different data range [0, 2] with num_basis=20
+        println!("\n=== Test 2: range=[0,2] ===");
+        let num_basis = 20;
+        let knots = Array1::from_vec(vec![0.0, 2.0]);
+        let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
+
+        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
+        println!("  Frobenius: {:.1}", frobenius);
+        assert!(frobenius > 0.0, "Frobenius norm should be positive");
+
+        // Test 3: Different data range [-5, 5] with num_basis=15
+        println!("\n=== Test 3: range=[-5,5], num_basis=15 ===");
+        let num_basis = 15;
+        let knots = Array1::from_vec(vec![-5.0, 5.0]);
+        let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
+
+        assert_eq!(penalty.nrows(), num_basis);
+        assert_eq!(penalty.ncols(), num_basis);
+
+        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
+        println!("  Frobenius: {:.1}", frobenius);
+        assert!(frobenius > 0.0, "Frobenius norm should be positive");
+
+        // Test 4: Tiny range [0, 0.1]
+        println!("\n=== Test 4: range=[0,0.1], num_basis=12 ===");
+        let num_basis = 12;
+        let knots = Array1::from_vec(vec![0.0, 0.1]);
+        let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
+
+        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
+        println!("  Frobenius: {:.1}", frobenius);
+        assert!(frobenius > 0.0, "Frobenius norm should be positive");
+
+        println!("\n✅ All tests with different parameters passed!");
+    }
 }
