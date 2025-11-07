@@ -287,6 +287,98 @@ def __(mo, np, pred_rust_extrap, pred_r_extrap):
 
 
 @app.cell
+def __(mo, mgcv_rust, np, ro, X, y, k_basis, plt):
+    mo.md("## Speed Comparison")
+
+    import time
+
+    # Number of iterations for timing
+    n_iters = 20
+
+    # Time mgcv_rust
+    times_rust = []
+    for _ in range(n_iters):
+        gam_rust_speed = mgcv_rust.GAM()
+        start = time.perf_counter()
+        gam_rust_speed.fit_auto(X, y, k=[k_basis.value], method='REML', bs='cr')
+        end = time.perf_counter()
+        times_rust.append(end - start)
+
+    # Time R mgcv
+    times_r = []
+    ro.globalenv['x_r'] = X[:, 0]
+    ro.globalenv['y_r'] = y
+    ro.globalenv['k_val'] = k_basis.value
+
+    for _ in range(n_iters):
+        start = time.perf_counter()
+        ro.r('gam_fit_speed <- gam(y_r ~ s(x_r, k=k_val, bs="cr"), method="REML")')
+        end = time.perf_counter()
+        times_r.append(end - start)
+
+    # Compute statistics
+    mean_rust = np.mean(times_rust) * 1000  # Convert to ms
+    std_rust = np.std(times_rust) * 1000
+    mean_r = np.mean(times_r) * 1000
+    std_r = np.std(times_r) * 1000
+    speedup = mean_r / mean_rust
+
+    # Create visualization
+    fig_speed, (ax_box, ax_bar) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Box plot
+    ax_box.boxplot([np.array(times_rust) * 1000, np.array(times_r) * 1000],
+                    labels=['mgcv_rust', 'R mgcv'],
+                    patch_artist=True,
+                    boxprops=dict(facecolor='lightblue', alpha=0.7),
+                    medianprops=dict(color='red', linewidth=2))
+    ax_box.set_ylabel('Time (ms)', fontsize=12)
+    ax_box.set_title(f'Timing Distribution ({n_iters} iterations)', fontsize=14)
+    ax_box.grid(True, alpha=0.3, axis='y')
+
+    # Bar plot
+    implementations = ['mgcv_rust', 'R mgcv']
+    means = [mean_rust, mean_r]
+    stds = [std_rust, std_r]
+    colors = ['#2ecc71', '#e74c3c']
+
+    bars = ax_bar.bar(implementations, means, yerr=stds, capsize=5,
+                      color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
+    ax_bar.set_ylabel('Time (ms)', fontsize=12)
+    ax_bar.set_title('Mean Fit Time (± std)', fontsize=14)
+    ax_bar.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels on bars
+    for bar, mean_val in zip(bars, means):
+        height = bar.get_height()
+        ax_bar.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{mean_val:.2f} ms',
+                   ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    plt.tight_layout()
+
+    mo.md(f"""
+    ### Performance Results ({n_iters} iterations)
+
+    | Implementation | Mean Time | Std Dev | Status |
+    |----------------|-----------|---------|--------|
+    | mgcv_rust      | {mean_rust:.2f} ms | {std_rust:.2f} ms | {'🚀 Faster' if speedup > 1 else ''} |
+    | R mgcv         | {mean_r:.2f} ms | {std_r:.2f} ms | {'🚀 Faster' if speedup < 1 else ''} |
+    | **Speedup**    | **{speedup:.2f}x** | - | {'✅ Rust wins!' if speedup > 1 else '⚠️ R wins'} |
+
+    {fig_speed}
+
+    **Notes:**
+    - Timing includes REML optimization (Newton's method)
+    - Both implementations use same number of basis functions (k={k_basis.value})
+    - R has overhead from rpy2 interface (slight disadvantage)
+    - Rust benefits from compiled performance and optimized linear algebra
+    """)
+
+    return times_rust, times_r, mean_rust, mean_r, speedup, fig_speed, ax_box, ax_bar
+
+
+@app.cell
 def __(mo):
     mo.md("""
     ## Summary
@@ -295,6 +387,7 @@ def __(mo):
     - How well mgcv_rust CR splines match R's mgcv CR splines
     - Smoothing parameter (λ) selection comparison
     - Extrapolation behavior
+    - Performance comparison
 
     **Success criteria:**
     - Correlation > 0.95 (predictions match well)
