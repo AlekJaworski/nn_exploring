@@ -141,9 +141,8 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
     let extended_knots = create_mgcv_bs_knots(x_min, x_max, num_basis, degree);
 
     // Compute S_ij = ∫ B''_i(x) B''_j(x) dx using Gaussian quadrature
-    // Integrate over the full extended knot range
-
-    let n_intervals = extended_knots.len() - 1;
+    // IMPORTANT: Integrate only over the DATA domain [x_min, x_max], NOT the extended knot range!
+    // The extended knots define the basis functions, but the penalty is over the data domain.
 
     // Use 10-point Gaussian quadrature per interval for high accuracy
     let n_quad = 10;
@@ -153,19 +152,28 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
         for j in i..num_basis {
             let mut integral = 0.0;
 
-            // Integrate over each knot interval in the extended knot sequence
-            for k in 0..n_intervals {
+            // Integrate only over knot intervals that fall within [x_min, x_max]
+            for k in 0..(extended_knots.len() - 1) {
                 let a = extended_knots[k];
                 let b = extended_knots[k + 1];
-                let h = b - a;
+
+                // Skip intervals completely outside the data domain
+                if b <= x_min || a >= x_max {
+                    continue;
+                }
+
+                // Clip interval to data domain [x_min, x_max]
+                let a_clip = a.max(x_min);
+                let b_clip = b.min(x_max);
+                let h = b_clip - a_clip;
 
                 if h < 1e-14 {
                     continue; // Skip zero-length intervals
                 }
 
-                // Transform Gaussian quadrature points from [-1, 1] to [a, b]
+                // Transform Gaussian quadrature points from [-1, 1] to [a_clip, b_clip]
                 for &(xi, wi) in &quad_points {
-                    let x = a + 0.5 * h * (xi + 1.0);
+                    let x = a_clip + 0.5 * h * (xi + 1.0);
                     let d2_bi = b_spline_second_derivative(x, i, degree, &extended_knots);
                     let d2_bj = b_spline_second_derivative(x, j, degree, &extended_knots);
                     integral += wi * d2_bi * d2_bj * 0.5 * h;
