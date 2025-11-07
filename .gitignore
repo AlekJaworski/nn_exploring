@@ -9,6 +9,7 @@ test_final_*.py
 test_adaptive_*.py
 test_bs_*.py
 test_rank_*.py
+test_analytical_*.py
 check_*.py
 compare_*.py
 investigate_*.py
