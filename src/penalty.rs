@@ -755,7 +755,7 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
     // Step 5: Compute S = D' B^{-1} D
     let S = D.t().dot(&B_inv_D);
 
-    // Step 6: Apply mgcv's normalization
+    // Step 6: Apply normalization to match mgcv's penalty scaling
     // mgcv normalizes the penalty to make it scale-invariant and properly scaled
     // Empirically derived formula that matches mgcv across different k values:
     // normalization = L^3 / (6.4 * k^3.32)
