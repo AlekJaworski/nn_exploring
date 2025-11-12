@@ -144,7 +144,7 @@ pub fn fit_pirls(
         }
 
         // Construct weighted normal equations: (X'WX + Σ λ_j S_j)β = X'Wz
-        let mut xtwx = Array2::zeros((p, p));
+        let mut xtwx = Array2::<f64>::zeros((p, p));
         for i in 0..n {
             for j in 0..p {
                 for k in 0..p {
@@ -153,13 +153,29 @@ pub fn fit_pirls(
             }
         }
 
+        // Compute max diagonal for ridge scaling before moving xtwx
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p {
+            max_diag = max_diag.max(xtwx[[i, i]].abs());
+        }
+
         // Add penalty terms
         let mut penalty_total = Array2::<f64>::zeros((p, p));
         for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
             penalty_total = penalty_total + &(penalty_j * *lambda_j);
         }
 
-        let a = xtwx + penalty_total;
+        let mut a = xtwx + penalty_total;
+
+        // Add adaptive ridge for numerical stability (like mgcv does)
+        // This prevents singularity issues with rank-deficient penalty matrices
+        // Scale ridge by number of penalties for multidimensional cases
+        let num_penalties = lambda.len();
+        let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
+        let ridge: f64 = ridge_scale * max_diag;
+        for i in 0..p {
+            a[[i, i]] += ridge;
+        }
 
         // Compute X'Wz
         let mut xtwz = Array1::zeros(p);

@@ -27,7 +27,9 @@ pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
             }
         }
 
-        if max_val < 1e-12 {
+        // Use more relaxed threshold for ill-conditioned penalized systems
+        // mgcv uses even more relaxed thresholds with ridge regularization
+        if max_val < 1e-14 {
             return Err(GAMError::SingularMatrix);
         }
 
@@ -157,7 +159,8 @@ pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
             }
         }
 
-        if max_val < 1e-12 {
+        // Use more relaxed threshold for numerical stability
+        if max_val < 1e-14 {
             return Err(GAMError::SingularMatrix);
         }
 
