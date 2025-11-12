@@ -67,14 +67,8 @@ impl SmoothingParameter {
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
-        let m = penalties.len();
-
-        // Single smooth case - use grid search (more stable)
-        if m == 1 {
-            return self.optimize_reml_grid_single(y, x, w, &penalties[0]);
-        }
-
-        // Multiple smooths - use Newton's method
+        // Use Newton's method for all cases (single or multiple smooths)
+        // This matches mgcv's fast-REML.fit approach
         self.optimize_reml_newton_multi(y, x, w, penalties, max_iter, tolerance)
     }
 
@@ -155,7 +149,6 @@ impl SmoothingParameter {
             // Check for convergence
             let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
             if grad_norm < tolerance {
-                // Update final lambdas and return
                 self.lambda = lambdas;
                 return Ok(());
             }
@@ -196,10 +189,11 @@ impl SmoothingParameter {
                         if new_reml < best_reml {
                             best_reml = new_reml;
                             best_step_scale = step_scale;
-                        } else if half == 0 {
-                            // First try didn't improve - keep best from line search
+                        } else if best_step_scale > 0.0 {
+                            // Found an improvement earlier, no further improvement now - stop
                             break;
                         }
+                        // If no improvement yet (best_step_scale == 0), keep trying smaller steps
                     },
                     Err(_) => {
                         // Numerical issue - try smaller step
