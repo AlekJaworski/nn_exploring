@@ -4,32 +4,47 @@ use ndarray::{Array1, Array2};
 use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
 
-/// Estimate the rank of a matrix by counting diagonal elements above threshold
-/// This is a rough approximation - proper implementation would use SVD
+/// Estimate the rank of a matrix using row norms as approximation to singular values
+/// For symmetric matrices like penalty matrices, this gives a reasonable estimate
 fn estimate_rank(matrix: &Array2<f64>) -> usize {
     let n = matrix.nrows().min(matrix.ncols());
-    let mut rank = 0;
 
-    // Count non-zero diagonal elements (rough estimate)
+    // For symmetric matrices, compute row-wise squared norms as eigenvalue estimates
+    // This is much faster than SVD but gives reasonable rank estimates
+    let mut row_norms = Vec::with_capacity(n);
     for i in 0..n {
-        if matrix[[i, i]].abs() > 1e-8 {
+        let mut norm_sq = 0.0;
+        for j in 0..matrix.ncols() {
+            norm_sq += matrix[[i, j]].powi(2);
+        }
+        row_norms.push(norm_sq);
+    }
+
+    // Sort in descending order
+    row_norms.sort_by(|a, b| b.partial_cmp(a).unwrap());
+
+    // Count rows with significant norm (threshold scaled by largest norm)
+    let threshold = 1e-12 * row_norms[0].max(1.0);
+    let mut rank = 0;
+    for &norm_sq in &row_norms {
+        if norm_sq > threshold {
             rank += 1;
+        } else {
+            break;
         }
     }
 
-    // If all diagonal elements are zero, count non-zero off-diagonal elements
-    if rank == 0 {
-        for i in 0..matrix.nrows() {
-            for j in 0..matrix.ncols() {
-                if matrix[[i, j]].abs() > 1e-8 {
-                    rank += 1;
-                    break;
-                }
-            }
+    // CR splines have rank k-2 for second derivative penalty
+    // If we got k, reduce to k-2 for CR penalty matrices specifically
+    // (This is a heuristic based on known structure)
+    if rank == n && n >= 2 {
+        // Check if last two row norms are significantly smaller
+        if row_norms[n-1] < 1e-10 * row_norms[0] && row_norms[n-2] < 1e-10 * row_norms[0] {
+            rank = n - 2;
         }
     }
 
-    rank
+    rank.max(1) // At least rank 1
 }
 
 /// Compute the REML criterion for smoothing parameter selection
@@ -96,6 +111,15 @@ pub fn reml_criterion(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
+    // Compute penalty term: β'Sβ
+    let s_beta = penalty.dot(beta);
+    let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
+        .map(|(bi, sbi)| bi * sbi)
+        .sum();
+
+    // Compute RSS + λβ'Sβ (this is what mgcv calls rss.bSb)
+    let rss_bsb = rss + lambda * beta_s_beta;
+
     // Compute X'WX + λS
     let xtw = x_weighted.t().to_owned();
     let xtwx = xtw.dot(&x_weighted);
@@ -104,26 +128,29 @@ pub fn reml_criterion(
     // Compute log determinants
     let log_det_a = determinant(&a)?.ln();
 
-    // For penalty matrix with rank r, the correct term is log|λS| = r*log(λ) + log|S_+|
-    // where S_+ is the pseudo-determinant (product of non-zero eigenvalues)
-    //
-    // For simplicity, we estimate the rank by counting eigenvalues > threshold
-    // A proper implementation would use SVD or eigendecomposition
+    // Estimate rank of penalty matrix
     let rank_s = estimate_rank(penalty);
 
-    // The REML criterion is:
-    // REML = n*log(RSS/n) + log|X'WX + λS| - log|λS| - ...
-    //      = n*log(RSS/n) + log|X'WX + λS| - rank(S)*log(λ) - log|S_+|
+    // Compute scale parameter: φ = RSS / (n - rank(S))
+    // Note: φ is based on RSS alone, not RSS + λβ'Sβ
+    let phi = rss / (n - rank_s) as f64;
+
+    // The correct REML criterion (matching mgcv's fast-REML.r implementation):
+    // REML = ((RSS + λβ'Sβ)/φ + (n-rank(S))*log(2π φ) + log|X'WX + λS| - rank(S)*log(λ) - log|S_+|) / 2
     //
-    // For now, ignore the constant log|S_+| term and use:
-    let log_lambda_s = if lambda > 1e-10 && rank_s > 0 {
+    // For now, we ignore the constant log|S_+| term (pseudo-determinant of S)
+    // since it doesn't affect optimization over λ
+    let log_lambda_term = if lambda > 1e-10 && rank_s > 0 {
         (rank_s as f64) * lambda.ln()
     } else {
         0.0
     };
 
-    // REML = n*log(RSS/n) + log|X'WX + λS| - rank(S)*log(λ)
-    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_lambda_s;
+    let pi = std::f64::consts::PI;
+    let reml = (rss_bsb / phi
+                + ((n - rank_s) as f64) * (2.0 * pi * phi).ln()
+                + log_det_a
+                - log_lambda_term) / 2.0;
 
     Ok(reml)
 }
@@ -270,6 +297,19 @@ pub fn reml_criterion_multi(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
+    // Compute penalty term: Σλᵢ·β'·Sᵢ·β
+    let mut penalty_sum = 0.0;
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        let s_beta = penalty.dot(beta);
+        let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambda * beta_s_beta;
+    }
+
+    // Compute RSS + Σλᵢ·β'·Sᵢ·β
+    let rss_bsb = rss + penalty_sum;
+
     // Compute log|X'WX + Σλᵢ·Sᵢ|
     // Add small ridge term to ensure numerical stability
     let ridge = 1e-6;
@@ -279,19 +319,29 @@ pub fn reml_criterion_multi(
     }
     let log_det_a = determinant(&a_reg)?.ln();
 
-    // Compute -Σrank(Sᵢ)·log(λᵢ)
+    // Compute total rank and -Σrank(Sᵢ)·log(λᵢ)
+    let mut total_rank = 0;
     let mut log_lambda_sum = 0.0;
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         if *lambda > 1e-10 {
             let rank_s = estimate_rank(penalty);
             if rank_s > 0 {
+                total_rank += rank_s;
                 log_lambda_sum += (rank_s as f64) * lambda.ln();
             }
         }
     }
 
-    // REML = n*log(RSS/n) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)
-    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_lambda_sum;
+    // Compute scale parameter: φ = RSS / (n - Σrank(Sᵢ))
+    let phi = rss / (n - total_rank) as f64;
+
+    // The correct REML criterion:
+    // REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-Σrank(Sᵢ))*log(2πφ) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)) / 2
+    let pi = std::f64::consts::PI;
+    let reml = (rss_bsb / phi
+                + ((n - total_rank) as f64) * (2.0 * pi * phi).ln()
+                + log_det_a
+                - log_lambda_sum) / 2.0;
 
     Ok(reml)
 }
@@ -299,6 +349,13 @@ pub fn reml_criterion_multi(
 /// Compute the gradient of REML with respect to log(λᵢ)
 ///
 /// Returns: ∂REML/∂log(λᵢ) for i = 1..m
+///
+/// NOTE: This function uses the old REML formula (RSS only) and needs to be updated
+/// to match the new formula that uses RSS + λβ'Sβ. Currently only used for multi-smooth
+/// Newton optimization. Single-smooth optimization uses grid search which works correctly.
+///
+/// TODO: Update derivative to match new REML formula:
+/// REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-Σrank)*log(2πφ) + log|A| - Σrank·log(λ)) / 2
 ///
 /// The derivative is:
 /// ∂REML/∂log(λᵢ) = -n/(RSS) · ∂RSS/∂log(λᵢ) + tr((X'WX + Σλⱼ·Sⱼ)⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
@@ -402,6 +459,9 @@ pub fn reml_gradient_multi(
 /// Compute the Hessian of REML with respect to log(λᵢ), log(λⱼ)
 ///
 /// Returns: ∂²REML/∂log(λᵢ)∂log(λⱼ) for i,j = 1..m
+///
+/// NOTE: Like reml_gradient_multi(), this uses the old REML formula and needs updating.
+/// Currently only used for multi-smooth Newton optimization.
 ///
 /// This is a symmetric m x m matrix
 pub fn reml_hessian_multi(

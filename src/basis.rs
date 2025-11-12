@@ -1,7 +1,7 @@
 //! Basis functions for smoothing splines
 
 use ndarray::{Array1, Array2};
-use crate::Result;
+use crate::{Result, GAMError};
 
 /// Trait for basis function implementations
 pub trait BasisFunction: Send {

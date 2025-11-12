@@ -263,12 +263,12 @@ impl PyGAM {
     ///     x: Input data (n x d array)
     ///     y: Response variable (n array)
     ///     formula: Formula string like "s(0, k=10) + s(1, k=15)"
-    ///     method: "GCV" or "REML"
+    ///     method: "REML" (default) or "GCV"
     ///     max_iter: Maximum iterations
     ///
     /// Example:
     ///     gam = GAM()
-    ///     result = gam.fit_formula(X, y, formula="s(0, k=10) + s(1, k=15)", method='GCV')
+    ///     result = gam.fit_formula(X, y, formula="s(0, k=10) + s(1, k=15)", method='REML')
     fn fit_formula<'py>(
         &mut self,
         py: Python<'py>,
