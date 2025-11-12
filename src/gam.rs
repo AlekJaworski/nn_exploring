@@ -79,7 +79,7 @@ impl SmoothTerm {
 
     /// Create a new smooth term with cubic regression splines (cr basis, like mgcv default)
     /// Uses cardinal natural cubic spline basis with quantile-based knots
-    /// Applies sum-to-zero identifiability constraint (reduces k to k-1 basis)
+    /// NOTE: Uses k basis functions (not k-1) to match mgcv's approach
     pub fn cr_spline_quantile(
         name: String,
         num_basis: usize,
@@ -88,27 +88,20 @@ impl SmoothTerm {
         let basis = CubicRegressionSpline::with_quantile_knots(x_data, num_basis);
         let knots = basis.knots().unwrap();
 
-        // Compute unconstrained penalty (k x k)
-        let penalty_unconstrained = compute_penalty("cr", num_basis, Some(knots), 1)?;
-
-        // Apply sum-to-zero constraint using QR decomposition
-        // This gives us Q matrix (k x k-1) for constraint absorption
-        let q_matrix = sum_to_zero_constraint_matrix(num_basis)?;
-
-        // Transform penalty: S_constrained = Q^T * S * Q (k-1 x k-1)
-        let penalty_constrained = apply_constraint_to_penalty(&penalty_unconstrained, &q_matrix)?;
+        // Compute penalty (k x k) - mgcv keeps all k basis functions
+        let penalty = compute_penalty("cr", num_basis, Some(knots), 1)?;
 
         Ok(Self {
             name,
             basis: Box::new(basis),
-            penalty: penalty_constrained,
+            penalty,
             lambda: 1.0,
-            constraint_matrix: Some(q_matrix),  // Store Q for basis transformation
+            constraint_matrix: None,  // No pre-transformation (mgcv handles constraints during solving)
         })
     }
 
     /// Create a new smooth term with cubic regression splines (evenly-spaced knots)
-    /// Applies sum-to-zero identifiability constraint (reduces k to k-1 basis)
+    /// NOTE: Uses k basis functions (not k-1) to match mgcv's approach
     pub fn cr_spline(
         name: String,
         num_basis: usize,
@@ -118,21 +111,15 @@ impl SmoothTerm {
         let basis = CubicRegressionSpline::with_num_knots(x_min, x_max, num_basis);
         let knots = basis.knots().unwrap();
 
-        // Compute unconstrained penalty (k x k)
-        let penalty_unconstrained = compute_penalty("cr", num_basis, Some(knots), 1)?;
-
-        // Apply sum-to-zero constraint using QR decomposition
-        let q_matrix = sum_to_zero_constraint_matrix(num_basis)?;
-
-        // Transform penalty: S_constrained = Q^T * S * Q (k-1 x k-1)
-        let penalty_constrained = apply_constraint_to_penalty(&penalty_unconstrained, &q_matrix)?;
+        // Compute penalty (k x k) - mgcv keeps all k basis functions
+        let penalty = compute_penalty("cr", num_basis, Some(knots), 1)?;
 
         Ok(Self {
             name,
             basis: Box::new(basis),
-            penalty: penalty_constrained,
+            penalty,
             lambda: 1.0,
-            constraint_matrix: Some(q_matrix),  // Store Q for basis transformation
+            constraint_matrix: None,  // No pre-transformation (mgcv handles constraints during solving)
         })
     }
 
