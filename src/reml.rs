@@ -9,39 +9,32 @@ use crate::linalg::{solve, determinant, inverse};
 fn estimate_rank(matrix: &Array2<f64>) -> usize {
     let n = matrix.nrows().min(matrix.ncols());
 
-    // For symmetric matrices, compute row-wise squared norms as eigenvalue estimates
-    // This is much faster than SVD but gives reasonable rank estimates
-    let mut row_norms = Vec::with_capacity(n);
+    // For CR splines and similar penalty matrices with second derivative penalties,
+    // the rank is k-2 where k is the number of basis functions.
+    // We check if the matrix has near-zero rows/columns indicating rank deficiency.
+
+    // Count the number of near-zero rows (indicating null space)
+    let mut null_space_dim = 0;
+    let matrix_norm = matrix.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+    let threshold = 1e-8 * matrix_norm.max(1.0);
+
     for i in 0..n {
-        let mut norm_sq = 0.0;
+        let mut row_norm = 0.0;
         for j in 0..matrix.ncols() {
-            norm_sq += matrix[[i, j]].powi(2);
+            row_norm += matrix[[i, j]].abs();
         }
-        row_norms.push(norm_sq);
-    }
-
-    // Sort in descending order
-    row_norms.sort_by(|a, b| b.partial_cmp(a).unwrap());
-
-    // Count rows with significant norm (threshold scaled by largest norm)
-    let threshold = 1e-12 * row_norms[0].max(1.0);
-    let mut rank = 0;
-    for &norm_sq in &row_norms {
-        if norm_sq > threshold {
-            rank += 1;
-        } else {
-            break;
+        if row_norm < threshold {
+            null_space_dim += 1;
         }
     }
 
-    // CR splines have rank k-2 for second derivative penalty
-    // If we got k, reduce to k-2 for CR penalty matrices specifically
-    // (This is a heuristic based on known structure)
-    if rank == n && n >= 2 {
-        // Check if last two row norms are significantly smaller
-        if row_norms[n-1] < 1e-10 * row_norms[0] && row_norms[n-2] < 1e-10 * row_norms[0] {
-            rank = n - 2;
-        }
+    // Rank = n - nullity
+    let rank = n - null_space_dim;
+
+    // For standard penalty matrices (CR, cubic splines, etc.), the minimum rank is k-2
+    // If we got full rank or close to it, assume rank deficiency of 2
+    if rank >= n - 1 && n >= 2 {
+        return n - 2;
     }
 
     rank.max(1) // At least rank 1
@@ -350,15 +343,13 @@ pub fn reml_criterion_multi(
 ///
 /// Returns: ∂REML/∂log(λᵢ) for i = 1..m
 ///
-/// NOTE: This function uses the old REML formula (RSS only) and needs to be updated
-/// to match the new formula that uses RSS + λβ'Sβ. Currently only used for multi-smooth
-/// Newton optimization. Single-smooth optimization uses grid search which works correctly.
+/// Following mgcv's fast-REML.r implementation (lines 1718-1719), the gradient is:
+/// ∂REML/∂log(λᵢ) = [tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ) + (λᵢ·β'·Sᵢ·β)/φ] / 2
 ///
-/// TODO: Update derivative to match new REML formula:
-/// REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-Σrank)*log(2πφ) + log|A| - Σrank·log(λ)) / 2
-///
-/// The derivative is:
-/// ∂REML/∂log(λᵢ) = -n/(RSS) · ∂RSS/∂log(λᵢ) + tr((X'WX + Σλⱼ·Sⱼ)⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
+/// Where:
+/// - A = X'WX + Σλⱼ·Sⱼ
+/// - φ = RSS / (n - Σrank(Sⱼ))
+/// - At optimum, ∂RSS/∂log(λᵢ) ≈ 0 (first-order condition), so we can ignore it
 pub fn reml_gradient_multi(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -407,8 +398,14 @@ pub fn reml_gradient_multi(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
+    // Compute total rank and φ
+    let mut total_rank = 0;
+    for penalty in penalties.iter() {
+        total_rank += estimate_rank(penalty);
+    }
+    let phi = rss / (n - total_rank) as f64;
+
     // Compute A^(-1)
-    // Add small ridge term to ensure numerical stability (especially for perfectly regular data)
     let ridge = 1e-6;
     let mut a_reg = a.clone();
     for i in 0..p {
@@ -424,7 +421,7 @@ pub fn reml_gradient_multi(
         let penalty_i = &penalties[i];
         let rank_i = estimate_rank(penalty_i);
 
-        // tr((X'WX + Σλⱼ·Sⱼ)⁻¹·λᵢ·Sᵢ)
+        // Term 1: tr(A⁻¹·λᵢ·Sᵢ)
         let lambda_s_i = penalty_i * lambda_i;
         let temp = a_inv.dot(&lambda_s_i);
         let mut trace = 0.0;
@@ -432,25 +429,15 @@ pub fn reml_gradient_multi(
             trace += temp[[j, j]];
         }
 
-        // ∂RSS/∂log(λᵢ) computation requires implicit differentiation
-        // For now, use approximation: ∂REML/∂log(λᵢ) ≈ tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
-        //
-        // Full derivative would be:
-        // ∂REML/∂log(λᵢ) = -n·∂RSS/∂log(λᵢ)/RSS + tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
-        //
-        // where ∂RSS/∂log(λᵢ) = -2λᵢ·β'·Sᵢ·β
-
-        // Compute β'·Sᵢ·β
+        // Term 2: λᵢ·β'·Sᵢ·β
         let s_beta = penalty_i.dot(&beta);
         let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
             .map(|(bi, sbi)| bi * sbi)
             .sum();
+        let penalty_term = lambda_i * beta_s_beta;
 
-        // ∂RSS/∂log(λᵢ) = -2λᵢ·β'·Sᵢ·β
-        let drss_dlog_lambda = -2.0 * lambda_i * beta_s_beta;
-
-        // Full gradient
-        gradient[i] = -(n as f64) * drss_dlog_lambda / rss + trace - (rank_i as f64);
+        // Gradient: [tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ) + (λᵢ·β'·Sᵢ·β)/φ] / 2
+        gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
     }
 
     Ok(gradient)
@@ -460,8 +447,8 @@ pub fn reml_gradient_multi(
 ///
 /// Returns: ∂²REML/∂log(λᵢ)∂log(λⱼ) for i,j = 1..m
 ///
-/// NOTE: Like reml_gradient_multi(), this uses the old REML formula and needs updating.
-/// Currently only used for multi-smooth Newton optimization.
+/// Following mgcv's fast-REML.r (lines 1721-1722), the Hessian is:
+/// ∂²REML/∂log(λᵢ)∂log(λⱼ) = [-tr(A⁻¹·λᵢ·Sᵢ·A⁻¹·λⱼ·Sⱼ) + penalty_hess_term/φ] / 2
 ///
 /// This is a symmetric m x m matrix
 pub fn reml_hessian_multi(
@@ -532,7 +519,10 @@ pub fn reml_hessian_multi(
                 trace += product[[k, k]];
             }
 
-            hessian[[i, j]] = -trace;
+            // Hessian: tr(A⁻¹·λᵢ·Sᵢ·A⁻¹·λⱼ·Sⱼ) / 2
+            // Note: This is POSITIVE for minimization. mgcv's fast-REML.r computes
+            // reml2 = -d2/2 where d2 is itself negative, giving a positive Hessian.
+            hessian[[i, j]] = trace / 2.0;
 
             // Fill symmetric entry
             if i != j {
