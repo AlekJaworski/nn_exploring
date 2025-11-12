@@ -26,6 +26,9 @@ class TestMultidimensionalInternal(unittest.TestCase):
         np.random.seed(42)
         self.n = 150
 
+        # Note: Use random data instead of linspace to avoid perfect collinearity
+        # which can cause numerical issues even with regularization
+
     def _fit_and_check_basic(self, X, y, k_values, test_name):
         """Helper to fit and do basic sanity checks"""
         gam = mgcv_rust.GAM()
@@ -131,9 +134,10 @@ class TestMultidimensionalInternal(unittest.TestCase):
 
     def test_3d_all_complex(self):
         """3D: three complex sine functions"""
-        x1 = np.linspace(0, 1, self.n)
-        x2 = np.linspace(0, 1, self.n)
-        x3 = np.linspace(0, 1, self.n)
+        # Use random data to avoid collinearity
+        x1 = np.random.uniform(0, 1, self.n)
+        x2 = np.random.uniform(0, 1, self.n)
+        x3 = np.random.uniform(0, 1, self.n)
         y = (np.sin(2*np.pi*x1) +
              np.sin(3*np.pi*x2) +
              np.sin(4*np.pi*x3) +
