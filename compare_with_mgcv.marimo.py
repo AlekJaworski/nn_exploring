@@ -50,6 +50,55 @@ def __():
 
 
 @app.cell
+def __(np):
+    def generate_test_data(n_samples=100, noise_level=0.2, true_fn=None, seed=42):
+        """
+        Generate test data for GAM fitting.
+
+        Parameters:
+        -----------
+        n_samples : int, default=100
+            Number of data points to generate
+        noise_level : float, default=0.2
+            Standard deviation of Gaussian noise to add
+        true_fn : callable, default=None
+            Function that takes x (array) and returns y_true (array).
+            If None, uses y = sin(2πx) as default.
+        seed : int, default=42
+            Random seed for reproducibility
+
+        Returns:
+        --------
+        dict with keys:
+            'x': input points (1D array)
+            'y': noisy observations (1D array)
+            'y_true': true function values (1D array)
+            'noise': noise added (1D array)
+        """
+        np.random.seed(seed)
+
+        x = np.linspace(0, 1, n_samples)
+
+        # Use default function if none provided
+        if true_fn is None:
+            y_true = np.sin(2 * np.pi * x)
+        else:
+            y_true = true_fn(x)
+
+        noise = noise_level * np.random.randn(n_samples)
+        y = y_true + noise
+
+        return {
+            'x': x,
+            'y': y,
+            'y_true': y_true,
+            'noise': noise
+        }
+
+    return generate_test_data,
+
+
+@app.cell
 def __(mo, np, HAS_RPY2):
     if not HAS_RPY2:
         raise RuntimeError("rpy2 not available - cannot continue")
@@ -66,16 +115,22 @@ def __(mo, np, HAS_RPY2):
 
 
 @app.cell
-def __(np, n_points, noise_level):
-    # Generate data
-    np.random.seed(42)
-    n = n_points.value
-    x = np.linspace(0, 1, n)
-    y_true = np.sin(2 * np.pi * x)
-    noise = noise_level.value * np.random.randn(n)
-    y = y_true + noise
+def __(generate_test_data, n_points, noise_level):
+    # Generate data using the reusable function
+    data = generate_test_data(
+        n_samples=n_points.value,
+        noise_level=noise_level.value,
+        true_fn=None,  # Use default sin(2πx)
+        seed=42
+    )
 
-    return n, x, y_true, y, noise
+    n = n_points.value
+    x = data['x']
+    y_true = data['y_true']
+    y = data['y']
+    noise = data['noise']
+
+    return n, x, y_true, y, noise, data
 
 
 @app.cell
@@ -286,6 +341,93 @@ def __(mo, np, pred_rust_extrap, pred_r_extrap):
 
 
 @app.cell
+def __(mo, generate_test_data, mgcv_rust, ro, np):
+    import time
+
+    mo.md("""
+    ## Performance Comparison
+
+    Comparing fitting times between mgcv_rust and R's mgcv across different sample sizes.
+    """)
+
+    # Test different sample sizes
+    sample_sizes = [50, 100, 200, 500, 1000]
+    times_rust = []
+    times_r = []
+
+    for n_test in sample_sizes:
+        # Generate test data
+        test_data = generate_test_data(n_samples=n_test, noise_level=0.2, seed=42)
+        X_test = test_data['x'].reshape(-1, 1)
+        y_test = test_data['y']
+
+        # Time mgcv_rust
+        start = time.time()
+        gam_test_rust = mgcv_rust.GAM()
+        gam_test_rust.fit_auto(X_test, y_test, k=[10], method='REML')
+        time_rust = time.time() - start
+        times_rust.append(time_rust)
+
+        # Time R mgcv
+        ro.globalenv['x_test'] = test_data['x']
+        ro.globalenv['y_test'] = y_test
+        start = time.time()
+        ro.r('gam_test <- gam(y_test ~ s(x_test, k=10, bs="bs"), method="REML")')
+        time_r = time.time() - start
+        times_r.append(time_r)
+
+    return sample_sizes, times_rust, times_r, time
+
+
+@app.cell
+def __(mo, plt, np, sample_sizes, times_rust, times_r):
+    mo.md("### Timing Results")
+
+    fig_time, (ax_time1, ax_time2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Absolute times
+    ax_time1.plot(sample_sizes, times_rust, 'b-o', linewidth=2, markersize=8, label='mgcv_rust')
+    ax_time1.plot(sample_sizes, times_r, 'r--s', linewidth=2, markersize=8, label='R mgcv')
+    ax_time1.set_xlabel('Number of samples', fontsize=12)
+    ax_time1.set_ylabel('Time (seconds)', fontsize=12)
+    ax_time1.set_title('Fitting Time Comparison', fontsize=14)
+    ax_time1.legend()
+    ax_time1.grid(True, alpha=0.3)
+    ax_time1.set_xscale('log')
+    ax_time1.set_yscale('log')
+
+    # Speedup ratio
+    speedup = np.array(times_r) / np.array(times_rust)
+    ax_time2.plot(sample_sizes, speedup, 'g-^', linewidth=2, markersize=8)
+    ax_time2.axhline(y=1.0, color='k', linestyle='--', alpha=0.5, label='Equal performance')
+    ax_time2.set_xlabel('Number of samples', fontsize=12)
+    ax_time2.set_ylabel('Speedup (R time / Rust time)', fontsize=12)
+    ax_time2.set_title('Performance Ratio', fontsize=14)
+    ax_time2.legend()
+    ax_time2.grid(True, alpha=0.3)
+    ax_time2.set_xscale('log')
+
+    plt.tight_layout()
+    fig_time
+
+    # Generate timing table
+    timing_table = "| Samples | mgcv_rust | R mgcv | Speedup |\n"
+    timing_table += "|---------|-----------|--------|----------|\n"
+    for n, t_rust, t_r, sp in zip(sample_sizes, times_rust, times_r, speedup):
+        timing_table += f"| {n} | {t_rust:.4f}s | {t_r:.4f}s | {sp:.2f}x |\n"
+
+    mo.md(f"""
+    ### Timing Summary
+
+    {timing_table}
+
+    **Average speedup:** {np.mean(speedup):.2f}x
+    """)
+
+    return fig_time, ax_time1, ax_time2, speedup, timing_table
+
+
+@app.cell
 def __(mo):
     mo.md("""
     ## Summary
@@ -294,13 +436,21 @@ def __(mo):
     - How well mgcv_rust matches R's mgcv predictions **using the same basis (B-splines)**
     - Smoothing parameter (λ) selection comparison
     - Extrapolation behavior
+    - **Performance comparison** across different sample sizes
 
     **Expected results:**
     - Correlation > 0.95 (predictions match well)
     - λ ratio between 0.5-2.0 (similar smoothing)
     - No zeros in extrapolation regions
+    - Competitive or better performance compared to R mgcv
 
     **Note:** We use `bs="bs"` in R to match our B-spline implementation, not `bs="cr"` (cubic regression splines).
+
+    **Data generation:** All tests use a consistent, reusable `generate_test_data()` function that allows customization of:
+    - Sample size
+    - Noise level
+    - True function (default: sin(2πx))
+    - Random seed
     """)
     return
 
