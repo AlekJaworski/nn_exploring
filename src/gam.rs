@@ -356,11 +356,20 @@ impl GAM {
                     tolerance,
                 )?;
 
-                self.coefficients = Some(final_result.coefficients);
-                self.fitted_values = Some(final_result.fitted_values);
-                self.linear_predictor = Some(final_result.linear_predictor);
-                self.weights = Some(final_result.weights);
-                self.deviance = Some(final_result.deviance);
+                self.coefficients = Some(final_result.coefficients.clone());
+                self.fitted_values = Some(final_result.fitted_values.clone());
+                self.linear_predictor = Some(final_result.linear_predictor.clone());
+                self.weights = Some(final_result.weights.clone());
+
+                // Recompute deviance from fitted values to ensure consistency
+                // Note: fit_pirls may return incorrect deviance due to penalty scaling
+                let fitted = &final_result.fitted_values;
+                let mut correct_deviance = 0.0;
+                for i in 0..y.len() {
+                    correct_deviance += (y[i] - fitted[i]).powi(2);
+                }
+
+                self.deviance = Some(correct_deviance);
                 self.smoothing_params = Some(smoothing_params);
                 self.fitted = true;
 
@@ -379,11 +388,19 @@ impl GAM {
             tolerance,
         )?;
 
-        self.coefficients = Some(final_result.coefficients);
-        self.fitted_values = Some(final_result.fitted_values);
-        self.linear_predictor = Some(final_result.linear_predictor);
-        self.weights = Some(final_result.weights);
-        self.deviance = Some(final_result.deviance);
+        self.coefficients = Some(final_result.coefficients.clone());
+        self.fitted_values = Some(final_result.fitted_values.clone());
+        self.linear_predictor = Some(final_result.linear_predictor.clone());
+        self.weights = Some(final_result.weights.clone());
+
+        // Recompute deviance from fitted values to ensure consistency
+        let fitted = &final_result.fitted_values;
+        let mut correct_deviance = 0.0;
+        for i in 0..y.len() {
+            correct_deviance += (y[i] - fitted[i]).powi(2);
+        }
+
+        self.deviance = Some(correct_deviance);
         self.smoothing_params = Some(smoothing_params);
         self.fitted = true;
 

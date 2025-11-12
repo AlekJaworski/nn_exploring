@@ -179,6 +179,12 @@ impl PyGAM {
             result.set_item("deviance", deviance)?;
         }
 
+        // Return fitted values if available
+        if let Some(ref fitted_values) = self.inner.fitted_values {
+            let fitted_array = PyArray1::from_vec_bound(py, fitted_values.to_vec());
+            result.set_item("fitted_values", fitted_array)?;
+        }
+
         result.set_item("fitted", self.inner.fitted)?;
 
         Ok(result.into())
