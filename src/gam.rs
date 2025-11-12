@@ -248,18 +248,54 @@ impl GAM {
             col_offset += num_cols;
         }
 
-        // Construct penalty matrices
+        // Construct penalty matrices with mgcv-style normalization
         let mut penalties: Vec<Array2<f64>> = Vec::new();
         col_offset = 0;
 
-        for smooth in &self.smooth_terms {
+        for (idx, smooth) in self.smooth_terms.iter().enumerate() {
             let num_basis = smooth.num_basis();
+
+            // Get the basis matrix for this smooth term
+            let design = &design_matrices[idx];
+
+            // Compute mgcv's penalty normalization factor:
+            // maXX = ||X||_inf^2 (infinity norm squared = max row sum squared)
+            // maS = ||S||_inf / maXX (infinity norm of S divided by maXX)
+            // S_rescaled = S / maS = S * maXX / ||S||_inf
+
+            // Compute infinity norm of design matrix (max absolute row sum)
+            let mut inf_norm_X = 0.0;
+            for i in 0..design.nrows() {
+                let row_sum: f64 = design.row(i).iter().map(|x| x.abs()).sum();
+                if row_sum > inf_norm_X {
+                    inf_norm_X = row_sum;
+                }
+            }
+            let maXX = inf_norm_X * inf_norm_X;
+
+            // Compute infinity norm of penalty matrix (max absolute row sum)
+            let mut inf_norm_S = 0.0;
+            for i in 0..num_basis {
+                let row_sum: f64 = (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum();
+                if row_sum > inf_norm_S {
+                    inf_norm_S = row_sum;
+                }
+            }
+
+            // Apply normalization: maS = ||S||_inf / maXX, S_new = S / maS
+            let scale_factor = if inf_norm_S > 1e-10 {
+                maXX / inf_norm_S
+            } else {
+                1.0 // Avoid division by zero for degenerate penalties
+            };
+
+
             let mut penalty_full = Array2::zeros((total_basis, total_basis));
 
-            // Place this smooth's penalty in the appropriate block
+            // Place this smooth's normalized penalty in the appropriate block
             for i in 0..num_basis {
                 for j in 0..num_basis {
-                    penalty_full[[col_offset + i, col_offset + j]] = smooth.penalty[[i, j]];
+                    penalty_full[[col_offset + i, col_offset + j]] = smooth.penalty[[i, j]] * scale_factor;
                 }
             }
 
@@ -320,11 +356,20 @@ impl GAM {
                     tolerance,
                 )?;
 
-                self.coefficients = Some(final_result.coefficients);
-                self.fitted_values = Some(final_result.fitted_values);
-                self.linear_predictor = Some(final_result.linear_predictor);
-                self.weights = Some(final_result.weights);
-                self.deviance = Some(final_result.deviance);
+                self.coefficients = Some(final_result.coefficients.clone());
+                self.fitted_values = Some(final_result.fitted_values.clone());
+                self.linear_predictor = Some(final_result.linear_predictor.clone());
+                self.weights = Some(final_result.weights.clone());
+
+                // Recompute deviance from fitted values to ensure consistency
+                // Note: fit_pirls may return incorrect deviance due to penalty scaling
+                let fitted = &final_result.fitted_values;
+                let mut correct_deviance = 0.0;
+                for i in 0..y.len() {
+                    correct_deviance += (y[i] - fitted[i]).powi(2);
+                }
+
+                self.deviance = Some(correct_deviance);
                 self.smoothing_params = Some(smoothing_params);
                 self.fitted = true;
 
@@ -343,11 +388,19 @@ impl GAM {
             tolerance,
         )?;
 
-        self.coefficients = Some(final_result.coefficients);
-        self.fitted_values = Some(final_result.fitted_values);
-        self.linear_predictor = Some(final_result.linear_predictor);
-        self.weights = Some(final_result.weights);
-        self.deviance = Some(final_result.deviance);
+        self.coefficients = Some(final_result.coefficients.clone());
+        self.fitted_values = Some(final_result.fitted_values.clone());
+        self.linear_predictor = Some(final_result.linear_predictor.clone());
+        self.weights = Some(final_result.weights.clone());
+
+        // Recompute deviance from fitted values to ensure consistency
+        let fitted = &final_result.fitted_values;
+        let mut correct_deviance = 0.0;
+        for i in 0..y.len() {
+            correct_deviance += (y[i] - fitted[i]).powi(2);
+        }
+
+        self.deviance = Some(correct_deviance);
         self.smoothing_params = Some(smoothing_params);
         self.fitted = true;
 
