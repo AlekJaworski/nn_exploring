@@ -274,7 +274,20 @@ pub fn reml_criterion_multi(
             .collect();
 
         let b = xtw.dot(&y_weighted);
-        beta_computed = solve(a.clone(), b)?;
+
+        // Add ridge for numerical stability when solving
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p {
+            max_diag = max_diag.max(a[[i, i]].abs());
+        }
+        let ridge_scale = 1e-5 * (1.0 + (lambdas.len() as f64).sqrt());
+        let ridge = ridge_scale * max_diag;
+        let mut a_solve = a.clone();
+        for i in 0..p {
+            a_solve[[i, i]] += ridge;
+        }
+
+        beta_computed = solve(a_solve, b)?;
         &beta_computed
     };
 
@@ -304,8 +317,15 @@ pub fn reml_criterion_multi(
     let rss_bsb = rss + penalty_sum;
 
     // Compute log|X'WX + Σλᵢ·Sᵢ|
-    // Add small ridge term to ensure numerical stability
-    let ridge = 1e-6;
+    // Add adaptive ridge term to ensure numerical stability
+    // Scale by problem size and matrix magnitude for robustness
+    let mut max_diag: f64 = 1.0;
+    for i in 0..p {
+        max_diag = max_diag.max(a[[i, i]].abs());
+    }
+    // Use stronger ridge for multidimensional cases (more penalties = more potential for ill-conditioning)
+    let ridge_scale = 1e-5 * (1.0 + (lambdas.len() as f64).sqrt());
+    let ridge = ridge_scale * max_diag;
     let mut a_reg = a.clone();
     for i in 0..p {
         a_reg[[i, i]] += ridge;
@@ -386,7 +406,20 @@ pub fn reml_gradient_multi(
         .collect();
 
     let b = xtw.dot(&y_weighted);
-    let beta = solve(a.clone(), b)?;
+
+    // Add ridge for numerical stability
+    let mut max_diag: f64 = 1.0;
+    for i in 0..p {
+        max_diag = max_diag.max(a[[i, i]].abs());
+    }
+    let ridge_scale = 1e-5 * (1.0 + (penalties.len() as f64).sqrt());
+    let ridge = ridge_scale * max_diag;
+    let mut a_solve = a.clone();
+    for i in 0..p {
+        a_solve[[i, i]] += ridge;
+    }
+
+    let beta = solve(a_solve, b)?;
 
     // Compute fitted values and RSS
     let fitted = x.dot(&beta);
@@ -406,7 +439,13 @@ pub fn reml_gradient_multi(
     let phi = rss / (n - total_rank) as f64;
 
     // Compute A^(-1)
-    let ridge = 1e-6;
+    // Use adaptive ridge based on matrix magnitude and number of penalties
+    let mut max_diag: f64 = 1.0;
+    for i in 0..p {
+        max_diag = max_diag.max(a[[i, i]].abs());
+    }
+    let ridge_scale = 1e-5 * (1.0 + (penalties.len() as f64).sqrt());
+    let ridge = ridge_scale * max_diag;
     let mut a_reg = a.clone();
     for i in 0..p {
         a_reg[[i, i]] += ridge;
@@ -482,8 +521,13 @@ pub fn reml_hessian_multi(
     }
 
     // Compute A^(-1)
-    // Add small ridge term to ensure numerical stability
-    let ridge = 1e-6;
+    // Add adaptive ridge term to ensure numerical stability
+    let mut max_diag: f64 = 1.0;
+    for i in 0..p {
+        max_diag = max_diag.max(a[[i, i]].abs());
+    }
+    let ridge_scale = 1e-5 * (1.0 + (lambdas.len() as f64).sqrt());
+    let ridge = ridge_scale * max_diag;
     let mut a_reg = a.clone();
     for i in 0..p {
         a_reg[[i, i]] += ridge;

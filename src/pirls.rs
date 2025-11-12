@@ -167,10 +167,12 @@ pub fn fit_pirls(
 
         let mut a = xtwx + penalty_total;
 
-        // Add small ridge for numerical stability (like mgcv does)
+        // Add adaptive ridge for numerical stability (like mgcv does)
         // This prevents singularity issues with rank-deficient penalty matrices
-        // Use slightly stronger ridge to handle collinear predictors
-        let ridge: f64 = 1e-6 * max_diag;
+        // Scale ridge by number of penalties for multidimensional cases
+        let num_penalties = lambda.len();
+        let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
+        let ridge: f64 = ridge_scale * max_diag;
         for i in 0..p {
             a[[i, i]] += ridge;
         }
