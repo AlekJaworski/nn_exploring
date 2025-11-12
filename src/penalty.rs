@@ -755,17 +755,12 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
     // Step 5: Compute S = D' B^{-1} D
     let S = D.t().dot(&B_inv_D);
 
-    // Step 6: Apply normalization to match mgcv's penalty scaling
-    // mgcv normalizes the penalty to make it scale-invariant and properly scaled
-    // Empirically derived formula that matches mgcv across different k values:
-    // normalization = L^3 / (6.4 * k^3.32)
-    let L = knots[n - 1] - knots[0];
-    let k_factor = 6.4 * (n as f64).powf(3.32);
-    let normalization = L.powi(3) / k_factor;
+    // Note: Penalty normalization is now handled in gam.rs after the basis matrix
+    // is evaluated, using mgcv's data-dependent normalization:
+    // S_rescaled = S * ||X||_inf^2 / ||S||_inf
+    // where ||·||_inf is the matrix infinity norm (max absolute row sum)
 
-    let S_normalized = &S * normalization;
-
-    Ok(S_normalized)
+    Ok(S)
 }
 
 /// Compute the penalty matrix S for a given basis
