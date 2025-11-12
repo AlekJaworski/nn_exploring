@@ -124,6 +124,9 @@ pub fn reml_criterion(
     // Estimate rank of penalty matrix
     let rank_s = estimate_rank(penalty);
 
+    // DEBUG
+    eprintln!("DEBUG REML: penalty shape={:?}, rank={}, n={}", penalty.dim(), rank_s, n);
+
     // Compute scale parameter: φ = RSS / (n - rank(S))
     // Note: φ is based on RSS alone, not RSS + λβ'Sβ
     let phi = rss / (n - rank_s) as f64;

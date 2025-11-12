@@ -23,8 +23,81 @@ impl SmoothingParameter {
     /// Create new smoothing parameters with initial values
     pub fn new(num_smooths: usize, method: OptimizationMethod) -> Self {
         Self {
-            lambda: vec![0.1; num_smooths],  // Better starting point than 1.0
+            lambda: vec![0.1; num_smooths],  // Will be updated adaptively in optimize()
             method,
+        }
+    }
+
+    /// Initialize lambda adaptively based on penalty and data matrix norms
+    ///
+    /// Uses the heuristic: lambda_init ≈ (target_ratio * ||X_i'WX_i||) / ||S_i||
+    /// where X_i is the design matrix for smooth i, and target_ratio balances terms
+    fn initialize_lambda_adaptive(
+        &mut self,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[Array2<f64>],
+    ) {
+        use ndarray::s;
+
+        let n = x.nrows();
+
+        // Find column ranges for each smooth (penalties are in block diagonal form)
+        let mut col_offset = 0;
+        for (i, penalty) in penalties.iter().enumerate() {
+            // Find the size of this penalty block (non-zero rows/cols)
+            let mut num_basis = 0;
+            for row in 0..penalty.nrows() {
+                let mut has_nonzero = false;
+                for col in 0..penalty.ncols() {
+                    if penalty[[row, col]].abs() > 1e-14 {
+                        has_nonzero = true;
+                        break;
+                    }
+                }
+                if has_nonzero {
+                    num_basis += 1;
+                }
+            }
+
+            if num_basis == 0 {
+                // No penalty - use small lambda
+                self.lambda[i] = 1e-6;
+                continue;
+            }
+
+            // Extract columns for this smooth term
+            let x_smooth = x.slice(s![.., col_offset..col_offset + num_basis]).to_owned();
+
+            // Compute ||X_i'WX_i|| Frobenius norm for THIS smooth only
+            let mut x_weighted = x_smooth.clone();
+            for row in 0..n {
+                let weight_sqrt = w[row].sqrt();
+                for col in 0..num_basis {
+                    x_weighted[[row, col]] *= weight_sqrt;
+                }
+            }
+            let xtw = x_weighted.t().to_owned();
+            let xtwx = xtw.dot(&x_weighted);
+            let xtwx_norm = (xtwx.iter().map(|v| v * v).sum::<f64>()).sqrt();
+
+            // Compute ||S_i|| Frobenius norm
+            let s_norm = (penalty.iter().map(|v| v * v).sum::<f64>()).sqrt();
+
+            if s_norm > 1e-10 && xtwx_norm > 1e-10 {
+                // Target: lambda * ||S|| / ||X'WX|| ≈ 0.5 (middle ground)
+                // So: lambda ≈ 0.5 * ||X'WX|| / ||S||
+                let target_ratio = 0.5;
+                self.lambda[i] = target_ratio * xtwx_norm / s_norm;
+
+                // Clamp to reasonable range
+                self.lambda[i] = self.lambda[i].max(1e-4).min(1e4);
+            } else {
+                // Penalty or design matrix is degenerate
+                self.lambda[i] = 0.1;
+            }
+
+            col_offset += num_basis;
         }
     }
 
@@ -43,6 +116,13 @@ impl SmoothingParameter {
                 "Number of penalties must match number of lambdas".to_string()
             ));
         }
+
+        // Initialize lambda adaptively based on penalty and data matrix norms
+        // This provides a much better starting point, especially for large k
+        self.initialize_lambda_adaptive(x, w, penalties);
+
+        // Debug: print initial lambda
+        eprintln!("Initial lambda (adaptive): {:?}", self.lambda);
 
         match self.method {
             OptimizationMethod::REML => {
@@ -67,8 +147,13 @@ impl SmoothingParameter {
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
-        // Use Newton's method for all cases (single or multiple smooths)
-        // This matches mgcv's fast-REML.fit approach
+        // TEMP: Use grid search for single smooth to test
+        if penalties.len() == 1 {
+            eprintln!("Using GRID SEARCH for lambda optimization");
+            return self.optimize_reml_grid_single(y, x, w, &penalties[0]);
+        }
+
+        // Use Newton's method for multiple smooths
         self.optimize_reml_newton_multi(y, x, w, penalties, max_iter, tolerance)
     }
 
