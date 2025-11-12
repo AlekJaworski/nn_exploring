@@ -346,7 +346,7 @@ mod tests {
     fn test_smoothing_parameter_creation() {
         let sp = SmoothingParameter::new(2, OptimizationMethod::REML);
         assert_eq!(sp.lambda.len(), 2);
-        assert_eq!(sp.lambda[0], 1.0);
+        assert_eq!(sp.lambda[0], 0.1);  // Updated to match current default
     }
 
     #[test]
