@@ -350,6 +350,13 @@ pub fn reml_criterion_multi(
 ///
 /// Returns: ∂REML/∂log(λᵢ) for i = 1..m
 ///
+/// NOTE: This function uses the old REML formula (RSS only) and needs to be updated
+/// to match the new formula that uses RSS + λβ'Sβ. Currently only used for multi-smooth
+/// Newton optimization. Single-smooth optimization uses grid search which works correctly.
+///
+/// TODO: Update derivative to match new REML formula:
+/// REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-Σrank)*log(2πφ) + log|A| - Σrank·log(λ)) / 2
+///
 /// The derivative is:
 /// ∂REML/∂log(λᵢ) = -n/(RSS) · ∂RSS/∂log(λᵢ) + tr((X'WX + Σλⱼ·Sⱼ)⁻¹·λᵢ·Sᵢ) - rank(Sᵢ)
 pub fn reml_gradient_multi(
@@ -452,6 +459,9 @@ pub fn reml_gradient_multi(
 /// Compute the Hessian of REML with respect to log(λᵢ), log(λⱼ)
 ///
 /// Returns: ∂²REML/∂log(λᵢ)∂log(λⱼ) for i,j = 1..m
+///
+/// NOTE: Like reml_gradient_multi(), this uses the old REML formula and needs updating.
+/// Currently only used for multi-smooth Newton optimization.
 ///
 /// This is a symmetric m x m matrix
 pub fn reml_hessian_multi(
