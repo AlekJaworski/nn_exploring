@@ -198,6 +198,87 @@ pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
     Ok(inv)
 }
 
+/// Apply sum-to-zero identifiability constraint using simplified QR approach
+///
+/// This implements mgcv's approach to absorbing identifiability constraints
+/// into the parameterization. For sum-to-zero constraint Σf(xi) = 0, we:
+/// 1. Create constraint matrix C = [1, 1, ..., 1]^T / sqrt(k)  (normalized)
+/// 2. Build orthogonal complement using Gram-Schmidt
+/// 3. Return Q (k x k-1) matrix where columns are orthonormal basis for constraint complement
+///
+/// The constrained basis is then: X_constrained = X * Q
+/// The constrained penalty is: S_constrained = Q^T * S * Q
+///
+/// # Arguments
+/// * `k` - Number of basis functions (before constraint)
+///
+/// # Returns
+/// * Q matrix (k x k-1) with orthonormal columns orthogonal to [1,1,...,1]
+pub fn sum_to_zero_constraint_matrix(k: usize) -> Result<Array2<f64>> {
+    // Build orthonormal basis for the orthogonal complement of [1,1,...,1]
+    // Start with standard basis vectors and orthogonalize against [1,1,...,1]/sqrt(k)
+
+    let mut q = Array2::zeros((k, k - 1));
+    let sqrt_k = (k as f64).sqrt();
+
+    // For each basis vector (except the first which is [1,1,...,1])
+    for j in 0..(k - 1) {
+        // Start with standard basis vector e_{j+1} (0,0,...,1,0,...,0)
+        let mut v = Array1::zeros(k);
+        v[j + 1] = 1.0;
+
+        // Subtract projection onto [1,1,...,1]/sqrt(k)
+        // projection = (v · [1/sqrt(k),...,1/sqrt(k)]) * [1/sqrt(k),...,1/sqrt(k)]
+        let dot_with_ones = v.sum() / sqrt_k;  // v · [1/sqrt(k),...]
+        for i in 0..k {
+            v[i] -= dot_with_ones / sqrt_k;  // subtract projection
+        }
+
+        // Orthogonalize against previously computed columns
+        for prev_j in 0..j {
+            let prev_col = q.column(prev_j);
+            let dot: f64 = v.iter().zip(prev_col.iter()).map(|(a, b)| a * b).sum();
+            for i in 0..k {
+                v[i] -= dot * prev_col[i];
+            }
+        }
+
+        // Normalize
+        let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if norm < 1e-10 {
+            return Err(GAMError::SingularMatrix);
+        }
+
+        for i in 0..k {
+            q[[i, j]] = v[i] / norm;
+        }
+    }
+
+    Ok(q)
+}
+
+/// Apply identifiability constraint to penalty matrix
+///
+/// Given penalty matrix S (k x k) and constraint matrix Q (k x k-1),
+/// compute: S_constrained = Q^T * S * Q
+///
+/// # Arguments
+/// * `penalty` - Original penalty matrix (k x k)
+/// * `q_matrix` - Constraint matrix from QR decomposition (k x k-1)
+///
+/// # Returns
+/// * Constrained penalty matrix (k-1 x k-1)
+pub fn apply_constraint_to_penalty(
+    penalty: &Array2<f64>,
+    q_matrix: &Array2<f64>
+) -> Result<Array2<f64>> {
+    // S_constrained = Q^T * S * Q
+    let s_q = penalty.dot(q_matrix);
+    let constrained_penalty = q_matrix.t().dot(&s_q);
+
+    Ok(constrained_penalty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

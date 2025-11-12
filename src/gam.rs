@@ -7,6 +7,7 @@ use crate::{
     penalty::compute_penalty,
     pirls::{fit_pirls, Family, PiRLSResult},
     smooth::{SmoothingParameter, OptimizationMethod},
+    linalg::{sum_to_zero_constraint_matrix, apply_constraint_to_penalty},
 };
 
 /// A smooth term in a GAM
@@ -15,10 +16,13 @@ pub struct SmoothTerm {
     pub name: String,
     /// Basis function
     pub basis: Box<dyn BasisFunction>,
-    /// Penalty matrix
+    /// Penalty matrix (may be constrained)
     pub penalty: Array2<f64>,
     /// Smoothing parameter
     pub lambda: f64,
+    /// Constraint matrix Q for identifiability (optional)
+    /// If present, transforms unconstrained basis to constrained: X_constrained = X * Q
+    pub constraint_matrix: Option<Array2<f64>>,
 }
 
 impl SmoothTerm {
@@ -44,6 +48,7 @@ impl SmoothTerm {
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
+            constraint_matrix: None,  // No constraint for regular cubic splines
         })
     }
 
@@ -68,11 +73,13 @@ impl SmoothTerm {
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
+            constraint_matrix: None,  // No constraint for regular cubic splines
         })
     }
 
     /// Create a new smooth term with cubic regression splines (cr basis, like mgcv default)
     /// Uses cardinal natural cubic spline basis with quantile-based knots
+    /// Applies sum-to-zero identifiability constraint (reduces k to k-1 basis)
     pub fn cr_spline_quantile(
         name: String,
         num_basis: usize,
@@ -80,17 +87,28 @@ impl SmoothTerm {
     ) -> Result<Self> {
         let basis = CubicRegressionSpline::with_quantile_knots(x_data, num_basis);
         let knots = basis.knots().unwrap();
-        let penalty = compute_penalty("cr", num_basis, Some(knots), 1)?;
+
+        // Compute unconstrained penalty (k x k)
+        let penalty_unconstrained = compute_penalty("cr", num_basis, Some(knots), 1)?;
+
+        // Apply sum-to-zero constraint using QR decomposition
+        // This gives us Q matrix (k x k-1) for constraint absorption
+        let q_matrix = sum_to_zero_constraint_matrix(num_basis)?;
+
+        // Transform penalty: S_constrained = Q^T * S * Q (k-1 x k-1)
+        let penalty_constrained = apply_constraint_to_penalty(&penalty_unconstrained, &q_matrix)?;
 
         Ok(Self {
             name,
             basis: Box::new(basis),
-            penalty,
+            penalty: penalty_constrained,
             lambda: 1.0,
+            constraint_matrix: Some(q_matrix),  // Store Q for basis transformation
         })
     }
 
     /// Create a new smooth term with cubic regression splines (evenly-spaced knots)
+    /// Applies sum-to-zero identifiability constraint (reduces k to k-1 basis)
     pub fn cr_spline(
         name: String,
         num_basis: usize,
@@ -99,24 +117,46 @@ impl SmoothTerm {
     ) -> Result<Self> {
         let basis = CubicRegressionSpline::with_num_knots(x_min, x_max, num_basis);
         let knots = basis.knots().unwrap();
-        let penalty = compute_penalty("cr", num_basis, Some(knots), 1)?;
+
+        // Compute unconstrained penalty (k x k)
+        let penalty_unconstrained = compute_penalty("cr", num_basis, Some(knots), 1)?;
+
+        // Apply sum-to-zero constraint using QR decomposition
+        let q_matrix = sum_to_zero_constraint_matrix(num_basis)?;
+
+        // Transform penalty: S_constrained = Q^T * S * Q (k-1 x k-1)
+        let penalty_constrained = apply_constraint_to_penalty(&penalty_unconstrained, &q_matrix)?;
 
         Ok(Self {
             name,
             basis: Box::new(basis),
-            penalty,
+            penalty: penalty_constrained,
             lambda: 1.0,
+            constraint_matrix: Some(q_matrix),  // Store Q for basis transformation
         })
     }
 
     /// Evaluate the basis functions for this smooth term
+    /// If constraint matrix is present, applies it to get constrained basis
     pub fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
-        self.basis.evaluate(x)
+        let basis_unconstrained = self.basis.evaluate(x)?;
+
+        // If constraint matrix exists, apply it: X_constrained = X * Q
+        if let Some(ref q_matrix) = self.constraint_matrix {
+            Ok(basis_unconstrained.dot(q_matrix))
+        } else {
+            Ok(basis_unconstrained)
+        }
     }
 
-    /// Get number of basis functions
+    /// Get number of basis functions (after constraint if applied)
     pub fn num_basis(&self) -> usize {
-        self.basis.num_basis()
+        // If constraint is applied, return the constrained dimension
+        if let Some(ref q_matrix) = self.constraint_matrix {
+            q_matrix.ncols()  // k-1 for sum-to-zero constraint
+        } else {
+            self.basis.num_basis()  // k for unconstrained
+        }
     }
 }
 
