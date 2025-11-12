@@ -89,7 +89,7 @@ impl SmoothingParameter {
         let mut best_lambda = self.lambda[0];
         let mut best_reml = f64::INFINITY;
 
-        // Fine grid search
+        // Coarse grid search to find approximate optimum
         for i in 0..50 {
             let log_lambda = -4.0 + i as f64 * 0.12;  // -4 to 2 (0.0001 to 100)
             let lambda = 10.0_f64.powf(log_lambda);
@@ -98,6 +98,22 @@ impl SmoothingParameter {
             if reml < best_reml {
                 best_reml = reml;
                 best_lambda = lambda;
+            }
+        }
+
+        // Refine with finer grid search around best lambda
+        let log_best = best_lambda.ln();
+        let search_width = 0.15;  // Search ±0.15 in log space
+        for i in 0..30 {
+            let log_lambda = log_best - search_width + i as f64 * (2.0 * search_width / 29.0);
+            let lambda = log_lambda.exp();
+            if lambda > 0.0 {
+                let reml = reml_criterion(y, x, w, lambda, penalty, None)?;
+
+                if reml < best_reml {
+                    best_reml = reml;
+                    best_lambda = lambda;
+                }
             }
         }
 

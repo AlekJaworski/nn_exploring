@@ -111,6 +111,15 @@ pub fn reml_criterion(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
+    // Compute penalty term: β'Sβ
+    let s_beta = penalty.dot(beta);
+    let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
+        .map(|(bi, sbi)| bi * sbi)
+        .sum();
+
+    // Compute RSS + λβ'Sβ (this is what mgcv calls rss.bSb)
+    let rss_bsb = rss + lambda * beta_s_beta;
+
     // Compute X'WX + λS
     let xtw = x_weighted.t().to_owned();
     let xtwx = xtw.dot(&x_weighted);
@@ -119,26 +128,29 @@ pub fn reml_criterion(
     // Compute log determinants
     let log_det_a = determinant(&a)?.ln();
 
-    // For penalty matrix with rank r, the correct term is log|λS| = r*log(λ) + log|S_+|
-    // where S_+ is the pseudo-determinant (product of non-zero eigenvalues)
-    //
-    // For simplicity, we estimate the rank by counting eigenvalues > threshold
-    // A proper implementation would use SVD or eigendecomposition
+    // Estimate rank of penalty matrix
     let rank_s = estimate_rank(penalty);
 
-    // The REML criterion is:
-    // REML = n*log(RSS/n) + log|X'WX + λS| - log|λS| - ...
-    //      = n*log(RSS/n) + log|X'WX + λS| - rank(S)*log(λ) - log|S_+|
+    // Compute scale parameter: φ = RSS / (n - rank(S))
+    // Note: φ is based on RSS alone, not RSS + λβ'Sβ
+    let phi = rss / (n - rank_s) as f64;
+
+    // The correct REML criterion (matching mgcv's fast-REML.r implementation):
+    // REML = ((RSS + λβ'Sβ)/φ + (n-rank(S))*log(2π φ) + log|X'WX + λS| - rank(S)*log(λ) - log|S_+|) / 2
     //
-    // For now, ignore the constant log|S_+| term and use:
-    let log_lambda_s = if lambda > 1e-10 && rank_s > 0 {
+    // For now, we ignore the constant log|S_+| term (pseudo-determinant of S)
+    // since it doesn't affect optimization over λ
+    let log_lambda_term = if lambda > 1e-10 && rank_s > 0 {
         (rank_s as f64) * lambda.ln()
     } else {
         0.0
     };
 
-    // REML = n*log(RSS/n) + log|X'WX + λS| - rank(S)*log(λ)
-    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_lambda_s;
+    let pi = std::f64::consts::PI;
+    let reml = (rss_bsb / phi
+                + ((n - rank_s) as f64) * (2.0 * pi * phi).ln()
+                + log_det_a
+                - log_lambda_term) / 2.0;
 
     Ok(reml)
 }
@@ -285,6 +297,19 @@ pub fn reml_criterion_multi(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
+    // Compute penalty term: Σλᵢ·β'·Sᵢ·β
+    let mut penalty_sum = 0.0;
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        let s_beta = penalty.dot(beta);
+        let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambda * beta_s_beta;
+    }
+
+    // Compute RSS + Σλᵢ·β'·Sᵢ·β
+    let rss_bsb = rss + penalty_sum;
+
     // Compute log|X'WX + Σλᵢ·Sᵢ|
     // Add small ridge term to ensure numerical stability
     let ridge = 1e-6;
@@ -294,19 +319,29 @@ pub fn reml_criterion_multi(
     }
     let log_det_a = determinant(&a_reg)?.ln();
 
-    // Compute -Σrank(Sᵢ)·log(λᵢ)
+    // Compute total rank and -Σrank(Sᵢ)·log(λᵢ)
+    let mut total_rank = 0;
     let mut log_lambda_sum = 0.0;
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         if *lambda > 1e-10 {
             let rank_s = estimate_rank(penalty);
             if rank_s > 0 {
+                total_rank += rank_s;
                 log_lambda_sum += (rank_s as f64) * lambda.ln();
             }
         }
     }
 
-    // REML = n*log(RSS/n) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)
-    let reml = (n as f64) * (rss / n as f64).ln() + log_det_a - log_lambda_sum;
+    // Compute scale parameter: φ = RSS / (n - Σrank(Sᵢ))
+    let phi = rss / (n - total_rank) as f64;
+
+    // The correct REML criterion:
+    // REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-Σrank(Sᵢ))*log(2πφ) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)) / 2
+    let pi = std::f64::consts::PI;
+    let reml = (rss_bsb / phi
+                + ((n - total_rank) as f64) * (2.0 * pi * phi).ln()
+                + log_det_a
+                - log_lambda_sum) / 2.0;
 
     Ok(reml)
 }
