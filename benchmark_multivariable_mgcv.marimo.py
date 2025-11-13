@@ -510,7 +510,6 @@ def _(X_data, k_list, mgcv_rust, mo, n_v, np, plt, ro, y_data):
         speedup_multi,
         std_r_multi,
         std_rust_multi,
-        time,
         times_r_multi,
         times_rust_multi,
     )
