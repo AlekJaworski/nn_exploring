@@ -275,6 +275,102 @@ def visualize_results(X, y, y_true, pred_rust, pred_r, effects):
     print(f"✓ Saved visualization to {output_file}")
 
 
+def benchmark_performance(X, y, k=12, n_iters=50):
+    """Benchmark fitting performance."""
+    print("\n" + "="*70)
+    print("Performance Benchmark")
+    print("="*70)
+
+    import time
+    n_vars = X.shape[1]
+    k_list = [k] * n_vars
+
+    print(f"\nBenchmarking with {n_iters} iterations...")
+    print(f"Data: n={len(y)}, dimensions={n_vars}, k={k} per dimension")
+
+    # Benchmark mgcv_rust
+    print("\nTiming mgcv_rust...")
+    times_rust = []
+    for i in range(n_iters):
+        gam = mgcv_rust.GAM()
+        start = time.perf_counter()
+        gam.fit_auto(X, y, k=k_list, method='REML', bs='cr')
+        end = time.perf_counter()
+        times_rust.append(end - start)
+        if (i + 1) % 10 == 0:
+            print(f"  {i + 1}/{n_iters} iterations complete...")
+
+    mean_rust = np.mean(times_rust) * 1000  # Convert to ms
+    std_rust = np.std(times_rust) * 1000
+    min_rust = np.min(times_rust) * 1000
+    max_rust = np.max(times_rust) * 1000
+
+    print(f"\nmgcv_rust results:")
+    print(f"  Mean:   {mean_rust:.2f} ms")
+    print(f"  Std:    {std_rust:.2f} ms")
+    print(f"  Min:    {min_rust:.2f} ms")
+    print(f"  Max:    {max_rust:.2f} ms")
+
+    # Benchmark R's mgcv
+    if HAS_RPY2:
+        print("\nTiming R's mgcv...")
+        times_r = []
+
+        with localconverter(ro.default_converter + numpy2ri.converter):
+            # Set up data once
+            for i in range(n_vars):
+                ro.globalenv[f'x{i+1}'] = X[:, i]
+            ro.globalenv['y_r'] = y
+            ro.globalenv['k_val'] = k
+
+            smooth_terms = [f's(x{i+1}, k=k_val, bs="cr")' for i in range(n_vars)]
+            formula = f'y_r ~ {" + ".join(smooth_terms)}'
+
+            # Time fitting
+            for i in range(n_iters):
+                start = time.perf_counter()
+                ro.r(f'gam_fit_bench <- gam({formula}, method="REML")')
+                end = time.perf_counter()
+                times_r.append(end - start)
+                if (i + 1) % 10 == 0:
+                    print(f"  {i + 1}/{n_iters} iterations complete...")
+
+        mean_r = np.mean(times_r) * 1000
+        std_r = np.std(times_r) * 1000
+        min_r = np.min(times_r) * 1000
+        max_r = np.max(times_r) * 1000
+
+        print(f"\nR's mgcv results:")
+        print(f"  Mean:   {mean_r:.2f} ms")
+        print(f"  Std:    {std_r:.2f} ms")
+        print(f"  Min:    {min_r:.2f} ms")
+        print(f"  Max:    {max_r:.2f} ms")
+
+        # Compute speedup
+        speedup = mean_r / mean_rust
+        print(f"\n" + "="*70)
+        print(f"Speedup: {speedup:.2f}x")
+        if speedup > 1:
+            print(f"mgcv_rust is {speedup:.2f}x FASTER than R's mgcv ✓")
+        else:
+            print(f"R's mgcv is {1/speedup:.2f}x faster than mgcv_rust")
+        print("="*70)
+
+        return {
+            'rust_mean': mean_rust,
+            'rust_std': std_rust,
+            'r_mean': mean_r,
+            'r_std': std_r,
+            'speedup': speedup,
+        }
+    else:
+        print("\nR comparison not available (rpy2 not installed)")
+        return {
+            'rust_mean': mean_rust,
+            'rust_std': std_rust,
+        }
+
+
 def test_extrapolation(gam_rust, X_train, n_test=200):
     """Test extrapolation behavior."""
     print("\n" + "="*70)
@@ -379,6 +475,9 @@ def main():
     # Test extrapolation
     test_extrapolation(gam_rust, X)
 
+    # Benchmark performance
+    perf_results = benchmark_performance(X, y, k=k, n_iters=50)
+
     # Final summary
     print("\n" + "="*70)
     print("SUMMARY")
@@ -394,6 +493,12 @@ def main():
         print(f"  RMSE diff < 0.1:     {status_rmse} ({metrics['rmse_diff']:.6f})")
         print(f"  Max diff < 0.2:      {status_max} ({metrics['max_diff']:.6f})")
 
+        if 'speedup' in perf_results:
+            print(f"\nPerformance:")
+            print(f"  mgcv_rust: {perf_results['rust_mean']:.2f} ± {perf_results['rust_std']:.2f} ms")
+            print(f"  R mgcv:    {perf_results['r_mean']:.2f} ± {perf_results['r_std']:.2f} ms")
+            print(f"  Speedup:   {perf_results['speedup']:.2f}x {'✓' if perf_results['speedup'] > 1 else ''}")
+
         if metrics['corr'] > 0.99 and metrics['rmse_diff'] < 0.1:
             print("\n✓ ALL TESTS PASSED - Multidimensional inference working correctly!")
             return 0
@@ -402,6 +507,7 @@ def main():
             return 1
     else:
         print("✓ mgcv_rust completed successfully")
+        print(f"  Mean fit time: {perf_results['rust_mean']:.2f} ± {perf_results['rust_std']:.2f} ms")
         print("  (R comparison not available)")
         return 0
 
