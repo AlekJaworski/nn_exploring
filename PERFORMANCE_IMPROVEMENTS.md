@@ -124,10 +124,11 @@ Correctness:
 - No correctness issues
 - Best balance of performance and simplicity
 
-### ✗ Do NOT use `fit_auto_parallel()`
-- Slower than both baseline and optimized versions
-- Only useful if future work finds larger problem sizes
-- Keep implementation for reference/learning
+### ✗ Parallel implementation REMOVED
+- Rayon-based parallelization was explored but found to be 14% slower
+- Thread overhead exceeded computation time saved
+- Removed from codebase to avoid confusion
+- Benchmarks and analysis preserved in `parallel_comparison.json`
 
 ### Future Optimization Opportunities
 
@@ -165,14 +166,18 @@ All tests pass with correct results (R² and fitted values match within toleranc
 
 ## Files
 
-- `src/gam.rs` - Original baseline implementation
-- `src/gam_optimized.rs` - Optimized version with caching (✓ recommended)
-- `src/gam_parallel.rs` - Parallel version with rayon (✗ not recommended)
+**Implementation:**
+- `src/gam.rs` - Original baseline implementation + shared `store_results()` method
+- `src/gam_optimized.rs` - Optimized version with caching (✓ recommended for production)
+
+**Testing & Benchmarks:**
 - `performance_test.py` - Comprehensive test suite (23 scenarios)
 - `compare_optimized.py` - Baseline vs optimized benchmarks
-- `compare_parallel.py` - Three-way comparison benchmarks
-- `optimization_comparison.json` - Detailed optimization results
-- `parallel_comparison.json` - Detailed parallel results
+- `compare_parallel.py` - Three-way comparison (including removed parallel version)
+
+**Results:**
+- `optimization_comparison.json` - Detailed optimization results (14% avg speedup)
+- `parallel_comparison.json` - Parallel exploration results (14% slower, removed from codebase)
 
 ## Conclusion
 

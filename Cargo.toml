@@ -8,8 +8,7 @@ name = "mgcv_rust"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ndarray = { version = "0.16", features = ["rayon"] }
-rayon = "1.8"
+ndarray = "0.16"
 approx = "0.5"
 thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
