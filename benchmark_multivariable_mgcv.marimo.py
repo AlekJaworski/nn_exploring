@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.10.14"
+__generated_with = "0.12.5"
 app = marimo.App(width="medium")
 
 
 @app.cell
-def __():
+def _():
     import marimo as mo
     import numpy as np
     import matplotlib.pyplot as plt
@@ -45,39 +45,26 @@ def __():
         """
 
     mo.md(status_msg)
-    return mo, np, plt, mgcv_rust, ro, HAS_RPY2
+    return HAS_RPY2, importr, mgcv_rust, mo, np, numpy2ri, plt, ro, status_msg
 
 
 @app.cell
-def __(mo, np, HAS_RPY2):
-    if not HAS_RPY2:
-        raise RuntimeError("rpy2 not available - cannot continue")
-
-    mo.md("## Configure Test Parameters")
-
-    # Interactive parameters
-    n_points = mo.ui.slider(50, 500, value=100, step=50, label="Number of points")
-    noise_level = mo.ui.slider(0.0, 0.5, value=0.1, step=0.05, label="Noise level")
-    k_basis = mo.ui.slider(5, 20, value=10, step=1, label="Number of basis functions (k)")
-    n_vars = mo.ui.slider(2, 5, value=3, step=1, label="Number of variables")
-
-    mo.vstack([
-        mo.md(f"**Interactive Parameters**"),
-        n_points,
-        noise_level,
-        k_basis,
-        n_vars,
-    ])
-    return n_points, noise_level, k_basis, n_vars
+def _():
+    # Configuration parameters
+    n_points = 1000
+    noise_level = 0.7
+    k_basis = 12
+    n_vars = 3
+    return k_basis, n_points, n_vars, noise_level
 
 
 @app.cell
-def __(np, n_points, noise_level, n_vars, mo):
+def _(mo, n_points, n_vars, noise_level, np):
     mo.md("## Generate Multivariable Test Data")
 
     np.random.seed(42)
-    n = n_points.value
-    n_v = n_vars.value
+    n = n_points
+    n_v = n_vars
 
     # Generate random points in [0, 1]^n_vars space
     X_data = np.random.uniform(0, 1, size=(n, n_v))
@@ -93,13 +80,13 @@ def __(np, n_points, noise_level, n_vars, mo):
         else:
             y_true_data += 0.5 * np.sin(4 * np.pi * X_data[:, i])
 
-    y_data = y_true_data + np.random.normal(0, noise_level.value, n)
+    y_data = y_true_data + np.random.normal(0, noise_level, n)
 
-    return X_data, y_data, y_true_data, n, n_v
+    return X_data, n, n_v, y_data, y_true_data
 
 
 @app.cell
-def __(mo, plt, X_data, y_data, y_true_data, n_v):
+def _(X_data, mo, n_v, plt, y_data):
     mo.md("### Data Visualization")
 
     # Create pairwise plots for first 3 variables
@@ -130,15 +117,15 @@ def __(mo, plt, X_data, y_data, y_true_data, n_v):
     """)
 
     fig_data
-    return fig_data, axes, n_plot_vars
+    return axes, fig_data, i, n_plot_vars
 
 
 @app.cell
-def __(mo, mgcv_rust, X_data, y_data, k_basis, ro, np, n_v):
+def _(X_data, k_basis, mgcv_rust, mo, n_v, np, ro, y_data):
     mo.md("## Fit Multivariable GAM Models")
 
     # Fit with mgcv_rust using CR splines for all variables
-    k_list = [k_basis.value] * n_v
+    k_list = [k_basis] * n_v
     gam_rust_multi = mgcv_rust.GAM()
     result_rust_multi = gam_rust_multi.fit_auto(X_data, y_data, k=k_list, method='REML', bs='cr')
     pred_rust_multi = gam_rust_multi.predict(X_data)
@@ -149,7 +136,7 @@ def __(mo, mgcv_rust, X_data, y_data, k_basis, ro, np, n_v):
     for i in range(n_v):
         ro.globalenv[f'x{i+1}'] = X_data[:, i]
     ro.globalenv['y_r'] = y_data
-    ro.globalenv['k_val'] = k_basis.value
+    ro.globalenv['k_val'] = k_basis
 
     # Construct formula
     smooth_terms = [f's(x{i+1}, k=k_val, bs="cr")' for i in range(n_v)]
@@ -179,20 +166,25 @@ def __(mo, mgcv_rust, X_data, y_data, k_basis, ro, np, n_v):
     {lambda_table}
     """)
     return (
-        k_list,
-        gam_rust_multi,
-        result_rust_multi,
-        pred_rust_multi,
-        lambda_rust_multi,
-        pred_r_multi,
-        lambda_r_multi,
-        smooth_terms,
         formula,
+        gam_rust_multi,
+        i,
+        k_list,
+        l_m,
+        l_r,
+        lambda_r_multi,
+        lambda_rust_multi,
+        lambda_table,
+        pred_r_multi,
+        pred_rust_multi,
+        ratio,
+        result_rust_multi,
+        smooth_terms,
     )
 
 
 @app.cell
-def __(mo, plt, pred_rust_multi, pred_r_multi, y_true_data, y_data):
+def _(mo, np, plt, pred_r_multi, pred_rust_multi, y_data, y_true_data):
     mo.md("### Prediction Comparison")
 
     fig_pred, (ax_pred1, ax_pred2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -230,11 +222,11 @@ def __(mo, plt, pred_rust_multi, pred_r_multi, y_true_data, y_data):
 
     plt.tight_layout()
     fig_pred
-    return fig_pred, ax_pred1, ax_pred2, idx_sort, lim_min, lim_max
+    return ax_pred1, ax_pred2, fig_pred, idx_sort, lim_max, lim_min
 
 
 @app.cell
-def __(mo, np, pred_rust_multi, pred_r_multi, y_true_data, y_data):
+def _(mo, np, pred_r_multi, pred_rust_multi, y_data, y_true_data):
     # Compute comparison metrics
     corr_multi = np.corrcoef(pred_rust_multi, pred_r_multi)[0, 1]
     rmse_diff_multi = np.sqrt(np.mean((pred_rust_multi - pred_r_multi)**2))
@@ -264,16 +256,16 @@ def __(mo, np, pred_rust_multi, pred_r_multi, y_true_data, y_data):
     """)
     return (
         corr_multi,
-        rmse_diff_multi,
         max_diff_multi,
-        rmse_rust_true,
-        rmse_r_true,
         rmse_data_true,
+        rmse_diff_multi,
+        rmse_r_true,
+        rmse_rust_true,
     )
 
 
 @app.cell
-def __(mo, plt, pred_rust_multi, pred_r_multi):
+def _(mo, np, plt, pred_r_multi, pred_rust_multi):
     mo.md("### Residual Difference Analysis")
 
     diff_multi = pred_rust_multi - pred_r_multi
@@ -301,11 +293,11 @@ def __(mo, plt, pred_rust_multi, pred_r_multi):
 
     plt.tight_layout()
     fig_diff
-    return diff_multi, fig_diff, ax_diff1, ax_diff2
+    return ax_diff1, ax_diff2, diff_multi, fig_diff
 
 
 @app.cell
-def __(mo, np, gam_rust_multi, ro, n_v):
+def _(gam_rust_multi, mo, n_v, np, ro):
     mo.md("## Extrapolation Test")
 
     # Generate test points with some values outside [0, 1]
@@ -335,17 +327,18 @@ def __(mo, np, gam_rust_multi, ro, n_v):
             y_true_extrap += 0.5 * np.sin(4 * np.pi * X_extrap[:, i])
 
     return (
-        n_test,
         X_extrap,
-        pred_rust_extrap_multi,
-        pred_r_extrap_multi,
-        y_true_extrap,
+        i,
+        n_test,
         newdata_str,
+        pred_r_extrap_multi,
+        pred_rust_extrap_multi,
+        y_true_extrap,
     )
 
 
 @app.cell
-def __(mo, np, pred_rust_extrap_multi, pred_r_extrap_multi, plt):
+def _(mo, np, plt, pred_r_extrap_multi, pred_rust_extrap_multi):
     mo.md("### Extrapolation Quality")
 
     # Check for zeros or anomalies
@@ -405,29 +398,29 @@ def __(mo, np, pred_rust_extrap_multi, pred_r_extrap_multi, plt):
     {fig_extrap}
     """)
     return (
-        has_zeros_rust_multi,
-        has_zeros_r_multi,
-        has_nan_rust,
-        has_nan_r,
+        ax1,
+        ax2,
+        diff_extrap,
         extrap_corr_multi,
         extrap_rmse,
         fig_extrap,
-        ax1,
-        ax2,
-        lim_min_e,
+        has_nan_r,
+        has_nan_rust,
+        has_zeros_r_multi,
+        has_zeros_rust_multi,
         lim_max_e,
-        diff_extrap,
+        lim_min_e,
     )
 
 
 @app.cell
-def __(mo, mgcv_rust, np, ro, X_data, y_data, k_list, n_v, plt):
+def _(X_data, k_list, mgcv_rust, mo, n_v, np, plt, ro, y_data):
     mo.md("## Performance Benchmark")
 
     import time
 
     # Number of iterations for timing
-    n_iters = 20
+    n_iters = 100
 
     # Time mgcv_rust
     times_rust_multi = []
@@ -514,50 +507,64 @@ def __(mo, mgcv_rust, np, ro, X_data, y_data, k_list, n_v, plt):
     """)
 
     return (
-        times_rust_multi,
-        times_r_multi,
-        mean_rust_multi,
-        mean_r_multi,
-        std_rust_multi,
-        std_r_multi,
-        speedup_multi,
-        fig_speed,
-        ax_box,
         ax_bar,
-        smooth_terms_bench,
+        ax_box,
+        bar,
+        bars,
+        colors,
+        end,
+        fig_speed,
         formula_bench,
+        gam_rust_speed,
+        height,
+        i,
+        implementations,
+        mean_r_multi,
+        mean_rust_multi,
+        mean_val,
+        means,
+        n_iters,
+        smooth_terms_bench,
+        speedup_multi,
+        start,
+        std_r_multi,
+        std_rust_multi,
+        stds,
+        time,
+        times_r_multi,
+        times_rust_multi,
     )
 
 
 @app.cell
-def __(mo, n_v, k_list):
-    mo.md(f"""
-    ## Summary
+def _(k_list, mo, n_v):
+    mo.md(
+        f"""
+        ## Summary
 
-    This benchmark compares mgcv_rust and R's mgcv for **multivariable GAM fitting** with:
-    - **{n_v} input variables** (x1, x2, ..., x{n_v})
-    - **{k_list[0]} basis functions per variable** (CR splines)
-    - **REML optimization** for smoothing parameter selection
+        This benchmark compares mgcv_rust and R's mgcv for **multivariable GAM fitting** with:
+        - **{n_v} input variables** (x1, x2, ..., x{n_v})
+        - **{k_list[0]} basis functions per variable** (CR splines)
+        - **REML optimization** for smoothing parameter selection
 
-    ### What we tested:
-    1. **Fitting**: Additive model with one smooth term per variable
-    2. **Prediction**: Accuracy on training data
-    3. **Extrapolation**: Behavior outside training domain
-    4. **Performance**: Speed comparison across implementations
+        ### What we tested:
+        1. **Fitting**: Additive model with one smooth term per variable
+        2. **Prediction**: Accuracy on training data
+        3. **Extrapolation**: Behavior outside training domain
+        4. **Performance**: Speed comparison across implementations
 
-    ### Success criteria:
-    - ✅ Correlation > 0.95 (implementations agree)
-    - ✅ Similar smoothing parameters (λ values)
-    - ✅ No numerical issues in extrapolation
-    - ✅ Competitive or better performance
+        ### Success criteria:
+        - ✅ Correlation > 0.95 (implementations agree)
+        - ✅ Similar smoothing parameters (λ values)
+        - ✅ No numerical issues in extrapolation
+        - ✅ Competitive or better performance
 
-    ### Key insights:
-    - Multivariable fitting scales differently in each implementation
-    - Smoothing parameter selection is independent per variable
-    - Both implementations use CR splines which extrapolate linearly
-
-    **Adjust the sliders above to test with different configurations!**
-    """)
+        ### Key insights:
+        - Multivariable fitting scales differently in each implementation
+        - Smoothing parameter selection is independent per variable
+        - Both implementations use CR splines which extrapolate linearly
+        """
+    )
     return
 
 
