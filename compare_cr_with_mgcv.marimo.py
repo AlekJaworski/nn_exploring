@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.10.14"
+__generated_with = "0.12.5"
 app = marimo.App(width="medium")
 
 
 @app.cell
-def __():
+def _():
     import marimo as mo
     import numpy as np
     import matplotlib.pyplot as plt
@@ -45,42 +45,30 @@ def __():
         """
 
     mo.md(status_msg)
-    return mo, np, plt, mgcv_rust, ro, HAS_RPY2
+    return HAS_RPY2, importr, mgcv_rust, mo, np, numpy2ri, plt, ro, status_msg
 
 
 @app.cell
-def __(mo, np, HAS_RPY2):
-    if not HAS_RPY2:
-        raise RuntimeError("rpy2 not available - cannot continue")
-
-    mo.md("## Generate Test Data")
-
+def _():
     # Interactive parameters
-    n_points = mo.ui.slider(50, 500, value=100, step=50, label="Number of points")
-    noise_level = mo.ui.slider(0.0, 0.5, value=0.1, step=0.05, label="Noise level")
-    k_basis = mo.ui.slider(5, 20, value=10, step=1, label="Number of basis functions (k)")
-
-    mo.vstack([
-        mo.md(f"**Interactive Parameters**"),
-        n_points,
-        noise_level,
-        k_basis,
-    ])
-    return n_points, noise_level, k_basis
+    n_points = 1000
+    noise_level = 0.7
+    k_basis = 12
+    return k_basis, n_points, noise_level
 
 
 @app.cell
-def __(np, n_points, noise_level):
+def _(n_points, noise_level, np):
     np.random.seed(42)
-    n = n_points.value
+    n = n_points
     x = np.linspace(0, 1, n)
-    y_true = np.sin(2 * np.pi * x)
-    y = y_true + np.random.normal(0, noise_level.value, n)
-    return x, y, y_true, n
+    y_true = np.sin(2 * np.pi * x * (1 + x))
+    y = y_true + np.random.normal(0, noise_level, n)
+    return n, x, y, y_true
 
 
 @app.cell
-def __(mo, plt, x, y, y_true):
+def _(mo, plt, x, y, y_true):
     mo.md("### Data Visualization")
 
     fig_data, ax_data = plt.subplots(figsize=(10, 4))
@@ -98,20 +86,20 @@ def __(mo, plt, x, y, y_true):
 
 
 @app.cell
-def __(mo, mgcv_rust, x, y, k_basis, ro, np):
+def _(k_basis, mgcv_rust, mo, np, ro, x, y):
     mo.md("## Fit Models with CR Splines")
 
     # Fit with mgcv_rust using CR splines
     X = x.reshape(-1, 1)
     gam_rust = mgcv_rust.GAM()
-    result_rust = gam_rust.fit_auto(X, y, k=[k_basis.value], method='REML', bs='cr')
+    result_rust = gam_rust.fit_auto(X, y, k=[k_basis], method='REML', bs='cr')
     pred_rust = gam_rust.predict(X)
     lambda_rust = result_rust['lambda']
 
     # Fit with R mgcv using CR splines
     ro.globalenv['x_r'] = x
     ro.globalenv['y_r'] = y
-    ro.globalenv['k_val'] = k_basis.value
+    ro.globalenv['k_val'] = k_basis
     ro.r('gam_fit <- gam(y_r ~ s(x_r, k=k_val, bs="cr"), method="REML")')
     pred_r = np.array(ro.r('predict(gam_fit)'))
     lambda_r = np.array(ro.r('gam_fit$sp'))[0]
@@ -125,19 +113,11 @@ def __(mo, mgcv_rust, x, y, k_basis, ro, np):
     | R mgcv         | CR (cubic regression) | {lambda_r:.6f} | - |
     | Ratio (Rust/R) | - | {lambda_rust/lambda_r:.4f} | - |
     """)
-    return (
-        X,
-        gam_rust,
-        result_rust,
-        pred_rust,
-        lambda_rust,
-        pred_r,
-        lambda_r,
-    )
+    return X, gam_rust, lambda_r, lambda_rust, pred_r, pred_rust, result_rust
 
 
 @app.cell
-def __(mo, plt, x, y, pred_rust, pred_r, y_true):
+def _(mo, plt, pred_r, pred_rust, x, y, y_true):
     mo.md("### Prediction Comparison")
 
     fig_pred, ax_pred = plt.subplots(figsize=(12, 5))
@@ -159,7 +139,7 @@ def __(mo, plt, x, y, pred_rust, pred_r, y_true):
 
 
 @app.cell
-def __(mo, np, pred_rust, pred_r):
+def _(mo, np, pred_r, pred_rust):
     # Compute comparison metrics
     corr = np.corrcoef(pred_rust, pred_r)[0, 1]
     rmse_diff = np.sqrt(np.mean((pred_rust - pred_r)**2))
@@ -174,11 +154,11 @@ def __(mo, np, pred_rust, pred_r):
     | RMSE difference | {rmse_diff:.6f} | {'✅ Low' if rmse_diff < 0.1 else '⚠️ Moderate'} |
     | Max difference | {max_diff:.6f} | {'✅ Low' if max_diff < 0.2 else '⚠️ Moderate'} |
     """)
-    return corr, rmse_diff, max_diff
+    return corr, max_diff, rmse_diff
 
 
 @app.cell
-def __(mo, plt, x, pred_rust, pred_r):
+def _(mo, plt, pred_r, pred_rust, x):
     mo.md("### Residual Difference")
 
     diff = pred_rust - pred_r
@@ -211,11 +191,11 @@ def __(mo, plt, x, pred_rust, pred_r):
 
     plt.tight_layout()
     fig_diff
-    return diff, fig_diff, ax_diff1, ax_diff2, lim_min, lim_max
+    return ax_diff1, ax_diff2, diff, fig_diff, lim_max, lim_min
 
 
 @app.cell
-def __(mo, np, gam_rust, ro):
+def _(gam_rust, mo, np, ro):
     mo.md("## Extrapolation Test")
 
     # Test extrapolation
@@ -229,12 +209,11 @@ def __(mo, np, gam_rust, ro):
     pred_r_extrap = np.array(ro.r('pred_r_extrap'))
 
     y_true_extrap = np.sin(2 * np.pi * x_extrap)
-
-    return x_extrap, X_extrap, pred_rust_extrap, pred_r_extrap, y_true_extrap
+    return X_extrap, pred_r_extrap, pred_rust_extrap, x_extrap, y_true_extrap
 
 
 @app.cell
-def __(mo, plt, x_extrap, pred_rust_extrap, pred_r_extrap, y_true_extrap):
+def _(mo, plt, pred_r_extrap, pred_rust_extrap, x_extrap, y_true_extrap):
     mo.md("### Extrapolation Comparison")
 
     fig_extrap, ax_extrap = plt.subplots(figsize=(12, 6))
@@ -266,7 +245,7 @@ def __(mo, plt, x_extrap, pred_rust_extrap, pred_r_extrap, y_true_extrap):
 
 
 @app.cell
-def __(mo, np, pred_rust_extrap, pred_r_extrap):
+def _(mo, np, pred_r_extrap, pred_rust_extrap):
     # Check for zeros in extrapolation
     has_zeros_rust = np.any(np.abs(pred_rust_extrap) < 1e-6)
     has_zeros_r = np.any(np.abs(pred_r_extrap) < 1e-6)
@@ -283,24 +262,24 @@ def __(mo, np, pred_rust_extrap, pred_r_extrap):
 
     {'✅ Both implementations extrapolate properly' if not has_zeros_rust and not has_zeros_r else '⚠️ Check extrapolation implementation'}
     """)
-    return has_zeros_rust, has_zeros_r, extrap_corr
+    return extrap_corr, has_zeros_r, has_zeros_rust
 
 
 @app.cell
-def __(mo, mgcv_rust, np, ro, X, y, k_basis, plt):
+def _(X, k_basis, mgcv_rust, mo, np, plt, ro, y):
     mo.md("## Speed Comparison")
 
     import time
 
     # Number of iterations for timing
-    n_iters = 20
+    n_iters = 100
 
     # Time mgcv_rust
     times_rust = []
     for _ in range(n_iters):
         gam_rust_speed = mgcv_rust.GAM()
         start = time.perf_counter()
-        gam_rust_speed.fit_auto(X, y, k=[k_basis.value], method='REML', bs='cr')
+        gam_rust_speed.fit_auto(X, y, k=[k_basis], method='REML', bs='cr')
         end = time.perf_counter()
         times_rust.append(end - start)
 
@@ -308,7 +287,7 @@ def __(mo, mgcv_rust, np, ro, X, y, k_basis, plt):
     times_r = []
     ro.globalenv['x_r'] = X[:, 0]
     ro.globalenv['y_r'] = y
-    ro.globalenv['k_val'] = k_basis.value
+    ro.globalenv['k_val'] = k_basis
 
     for _ in range(n_iters):
         start = time.perf_counter()
@@ -370,32 +349,57 @@ def __(mo, mgcv_rust, np, ro, X, y, k_basis, plt):
 
     **Notes:**
     - Timing includes REML optimization (Newton's method)
-    - Both implementations use same number of basis functions (k={k_basis.value})
+    - Both implementations use same number of basis functions (k={k_basis})
     - R has overhead from rpy2 interface (slight disadvantage)
     - Rust benefits from compiled performance and optimized linear algebra
     """)
-
-    return times_rust, times_r, mean_rust, mean_r, speedup, fig_speed, ax_box, ax_bar
+    return (
+        ax_bar,
+        ax_box,
+        bar,
+        bars,
+        colors,
+        end,
+        fig_speed,
+        gam_rust_speed,
+        height,
+        implementations,
+        mean_r,
+        mean_rust,
+        mean_val,
+        means,
+        n_iters,
+        speedup,
+        start,
+        std_r,
+        std_rust,
+        stds,
+        time,
+        times_r,
+        times_rust,
+    )
 
 
 @app.cell
-def __(mo):
-    mo.md("""
-    ## Summary
+def _(mo):
+    mo.md(
+        """
+        ## Summary
 
-    This comparison shows:
-    - How well mgcv_rust CR splines match R's mgcv CR splines
-    - Smoothing parameter (λ) selection comparison
-    - Extrapolation behavior
-    - Performance comparison
+        This comparison shows:
+        - How well mgcv_rust CR splines match R's mgcv CR splines
+        - Smoothing parameter (λ) selection comparison
+        - Extrapolation behavior
+        - Performance comparison
 
-    **Success criteria:**
-    - Correlation > 0.95 (predictions match well)
-    - λ ratio between 0.5-2.0 (similar smoothing)
-    - No zeros in extrapolation regions
+        **Success criteria:**
+        - Correlation > 0.95 (predictions match well)
+        - λ ratio between 0.5-2.0 (similar smoothing)
+        - No zeros in extrapolation regions
 
-    **Note:** Both implementations use `bs="cr"` (cubic regression splines), which is mgcv's default.
-    """)
+        **Note:** Both implementations use `bs="cr"` (cubic regression splines), which is mgcv's default.
+        """
+    )
     return
 
 
