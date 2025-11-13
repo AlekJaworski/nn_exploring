@@ -117,7 +117,7 @@ def _(X_data, mo, n_v, plt, y_data):
     """)
 
     fig_data
-    return axes, fig_data, i, n_plot_vars
+    return axes, fig_data, n_plot_vars
 
 
 @app.cell
@@ -168,16 +168,11 @@ def _(X_data, k_basis, mgcv_rust, mo, n_v, np, ro, y_data):
     return (
         formula,
         gam_rust_multi,
-        i,
         k_list,
-        l_m,
-        l_r,
         lambda_r_multi,
         lambda_rust_multi,
-        lambda_table,
         pred_r_multi,
         pred_rust_multi,
-        ratio,
         result_rust_multi,
         smooth_terms,
     )
@@ -328,7 +323,6 @@ def _(gam_rust_multi, mo, n_v, np, ro):
 
     return (
         X_extrap,
-        i,
         n_test,
         newdata_str,
         pred_r_extrap_multi,
@@ -509,27 +503,13 @@ def _(X_data, k_list, mgcv_rust, mo, n_v, np, plt, ro, y_data):
     return (
         ax_bar,
         ax_box,
-        bar,
-        bars,
-        colors,
-        end,
         fig_speed,
-        formula_bench,
-        gam_rust_speed,
-        height,
-        i,
-        implementations,
         mean_r_multi,
         mean_rust_multi,
-        mean_val,
-        means,
         n_iters,
-        smooth_terms_bench,
         speedup_multi,
-        start,
         std_r_multi,
         std_rust_multi,
-        stds,
         time,
         times_r_multi,
         times_rust_multi,
