@@ -170,10 +170,10 @@ impl PyGAM {
         let result = pyo3::types::PyDict::new_bound(py);
 
         if let Some(ref params) = self.inner.smoothing_params {
-            result.set_item("lambda", params.lambda[0])?;
-            // Also include all lambdas for multi-variable GAMs
-            let all_lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
-            result.set_item("all_lambdas", all_lambdas)?;
+            // Return lambda as array (for multi-variable GAMs)
+            // For single variable, this will be a 1-element array
+            let lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            result.set_item("lambda", lambdas)?;
         }
 
         if let Some(deviance) = self.inner.deviance {
