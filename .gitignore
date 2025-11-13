@@ -1,6 +1,7 @@
 /target
 __pycache__/
 *.pyc
+venv/
 debug_*.py
 test_singular_*.py
 test_lambda_*.py
