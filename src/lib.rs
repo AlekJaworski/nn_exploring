@@ -10,6 +10,7 @@ pub mod reml;
 pub mod pirls;
 pub mod smooth;
 pub mod gam;
+pub mod gam_optimized;
 pub mod utils;
 pub mod linalg;
 
@@ -261,6 +262,104 @@ impl PyGAM {
 
         // Call regular fit
         self.fit(py, x, y, method, max_iter)
+    }
+
+    /// Fit GAM with automatic smooth setup (optimized version with caching)
+    ///
+    /// Uses caching and improved algorithms for better performance
+    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None))]
+    fn fit_auto_optimized<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+        y: PyReadonlyArray1<f64>,
+        k: Vec<usize>,
+        method: &str,
+        bs: Option<&str>,
+        max_iter: Option<usize>,
+    ) -> PyResult<PyObject> {
+        use crate::gam_optimized::*;
+
+        let x_array = x.as_array().to_owned();
+        let (_n, d) = x_array.dim();
+        let y_array = y.as_array().to_owned();
+
+        // Check k dimensions
+        if k.len() != d {
+            return Err(PyValueError::new_err(format!(
+                "k length ({}) must match number of columns ({})",
+                k.len(), d
+            )));
+        }
+
+        let basis_type = bs.unwrap_or("bs");
+
+        // Clear any existing smooths
+        self.inner.smooth_terms.clear();
+
+        // Add smooths for each column
+        for (i, &num_basis) in k.iter().enumerate() {
+            let col = x_array.column(i);
+            let col_owned = col.to_owned();
+
+            let smooth = match basis_type {
+                "cr" => {
+                    SmoothTerm::cr_spline_quantile(
+                        format!("x{}", i),
+                        num_basis,
+                        &col_owned,
+                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                },
+                "bs" => {
+                    SmoothTerm::cubic_spline_quantile(
+                        format!("x{}", i),
+                        num_basis,
+                        &col_owned,
+                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                },
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "Unknown basis type '{}'. Use 'bs' or 'cr'.", basis_type
+                    )));
+                }
+            };
+
+            self.inner.add_smooth(smooth);
+        }
+
+        // Call optimized fit
+        let opt_method = match method {
+            "GCV" => OptimizationMethod::GCV,
+            "REML" => OptimizationMethod::REML,
+            _ => return Err(PyValueError::new_err("method must be 'GCV' or 'REML'")),
+        };
+
+        let max_outer = max_iter.unwrap_or(10);
+
+        self.inner.fit_optimized(&x_array, &y_array, opt_method, max_outer, 100, 1e-6)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+        // Return results
+        let result = pyo3::types::PyDict::new_bound(py);
+
+        if let Some(ref params) = self.inner.smoothing_params {
+            result.set_item("lambda", params.lambda[0])?;
+            let all_lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            result.set_item("all_lambdas", all_lambdas)?;
+        }
+
+        if let Some(deviance) = self.inner.deviance {
+            result.set_item("deviance", deviance)?;
+        }
+
+        if let Some(ref fitted_values) = self.inner.fitted_values {
+            let fitted_array = PyArray1::from_vec_bound(py, fitted_values.to_vec());
+            result.set_item("fitted_values", fitted_array)?;
+        }
+
+        result.set_item("fitted", self.inner.fitted)?;
+
+        Ok(result.into())
     }
 
     /// Fit GAM with formula-like syntax (mgcv-style)
