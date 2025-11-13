@@ -4,7 +4,7 @@ use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
 
 /// Trait for basis function implementations
-pub trait BasisFunction: Send {
+pub trait BasisFunction: Send + Sync {
     /// Evaluate the basis functions at given points
     fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>>;
 

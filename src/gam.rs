@@ -472,6 +472,30 @@ impl GAM {
             coef.iter().filter(|&&c| c.abs() > 1e-10).count() as f64
         })
     }
+
+    /// Store fit results (used by fit_optimized and fit_parallel)
+    pub(crate) fn store_results(
+        &mut self,
+        pirls_result: crate::pirls::PiRLSResult,
+        smoothing_params: SmoothingParameter,
+        y: &Array1<f64>,
+    ) {
+        self.coefficients = Some(pirls_result.coefficients.clone());
+        self.fitted_values = Some(pirls_result.fitted_values.clone());
+        self.linear_predictor = Some(pirls_result.linear_predictor.clone());
+        self.weights = Some(pirls_result.weights.clone());
+
+        // Recompute deviance for consistency
+        let fitted = &pirls_result.fitted_values;
+        let mut correct_deviance = 0.0;
+        for i in 0..y.len() {
+            correct_deviance += (y[i] - fitted[i]).powi(2);
+        }
+
+        self.deviance = Some(correct_deviance);
+        self.smoothing_params = Some(smoothing_params);
+        self.fitted = true;
+    }
 }
 
 #[cfg(test)]
