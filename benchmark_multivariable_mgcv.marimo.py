@@ -12,10 +12,13 @@ def _():
     import mgcv_rust
 
     try:
+        import warnings
+        warnings.filterwarnings('ignore', category=DeprecationWarning)
         import rpy2.robjects as ro
         from rpy2.robjects import numpy2ri
         from rpy2.robjects.packages import importr
-        numpy2ri.activate()
+        from rpy2.robjects.conversion import localconverter
+
         importr('mgcv')  # Check mgcv is available
         HAS_RPY2 = True
 
@@ -25,6 +28,10 @@ def _():
         ✅ rpy2 and R mgcv available
 
         **Note:** This notebook benchmarks fitting and prediction with multiple variables using CR splines.
+
+        **Lambda values:** Note that mgcv_rust and R's mgcv use different internal scaling
+        conventions, so lambda values may differ significantly while predictions match perfectly.
+        See `LAMBDA_SCALING_EXPLANATION.md` for details.
         """
     except:
         HAS_RPY2 = False
@@ -121,7 +128,7 @@ def _(X_data, mo, n_v, plt, y_data):
 
 
 @app.cell
-def _(X_data, k_basis, mgcv_rust, mo, n_v, np, ro, y_data):
+def _(X_data, k_basis, localconverter, mgcv_rust, mo, n_v, np, numpy2ri, ro, y_data):
     mo.md("## Fit Multivariable GAM Models")
 
     # Fit with mgcv_rust using CR splines for all variables
@@ -133,18 +140,19 @@ def _(X_data, k_basis, mgcv_rust, mo, n_v, np, ro, y_data):
 
     # Fit with R mgcv using CR splines for all variables
     # Build the formula: y ~ s(x1, k=k, bs="cr") + s(x2, k=k, bs="cr") + ...
-    for i in range(n_v):
-        ro.globalenv[f'x{i+1}'] = X_data[:, i]
-    ro.globalenv['y_r'] = y_data
-    ro.globalenv['k_val'] = k_basis
+    with localconverter(ro.default_converter + numpy2ri.converter):
+        for i in range(n_v):
+            ro.globalenv[f'x{i+1}'] = X_data[:, i]
+        ro.globalenv['y_r'] = y_data
+        ro.globalenv['k_val'] = k_basis
 
-    # Construct formula
-    smooth_terms = [f's(x{i+1}, k=k_val, bs="cr")' for i in range(n_v)]
-    formula = f'y_r ~ {" + ".join(smooth_terms)}'
+        # Construct formula
+        smooth_terms = [f's(x{i+1}, k=k_val, bs="cr")' for i in range(n_v)]
+        formula = f'y_r ~ {" + ".join(smooth_terms)}'
 
-    ro.r(f'gam_fit_multi <- gam({formula}, method="REML")')
-    pred_r_multi = np.array(ro.r('predict(gam_fit_multi)'))
-    lambda_r_multi = np.array(ro.r('gam_fit_multi$sp'))
+        ro.r(f'gam_fit_multi <- gam({formula}, method="REML")')
+        pred_r_multi = np.array(ro.r('predict(gam_fit_multi)'))
+        lambda_r_multi = np.array(ro.r('gam_fit_multi$sp'))
 
     # Format lambda comparison
     lambda_table = "| Variable | λ (Rust) | λ (R) | Ratio |\n|----------|----------|-------|-------|\n"
@@ -292,7 +300,7 @@ def _(mo, np, plt, pred_r_multi, pred_rust_multi):
 
 
 @app.cell
-def _(gam_rust_multi, mo, n_v, np, ro):
+def _(gam_rust_multi, localconverter, mo, n_v, np, numpy2ri, ro):
     mo.md("## Extrapolation Test")
 
     # Generate test points with some values outside [0, 1]
@@ -303,13 +311,14 @@ def _(gam_rust_multi, mo, n_v, np, ro):
     pred_rust_extrap_multi = gam_rust_multi.predict(X_extrap)
 
     # Predict with R mgcv
-    for i in range(n_v):
-        ro.globalenv[f'x{i+1}_new'] = X_extrap[:, i]
+    with localconverter(ro.default_converter + numpy2ri.converter):
+        for i in range(n_v):
+            ro.globalenv[f'x{i+1}_new'] = X_extrap[:, i]
 
-    # Create newdata frame
-    newdata_str = ", ".join([f'x{i+1}=x{i+1}_new' for i in range(n_v)])
-    ro.r(f'pred_r_extrap_multi <- predict(gam_fit_multi, newdata=data.frame({newdata_str}))')
-    pred_r_extrap_multi = np.array(ro.r('pred_r_extrap_multi'))
+        # Create newdata frame
+        newdata_str = ", ".join([f'x{i+1}=x{i+1}_new' for i in range(n_v)])
+        ro.r(f'pred_r_extrap_multi <- predict(gam_fit_multi, newdata=data.frame({newdata_str}))')
+        pred_r_extrap_multi = np.array(ro.r('pred_r_extrap_multi'))
 
     # Compute true values
     y_true_extrap = np.zeros(n_test)
@@ -408,7 +417,7 @@ def _(mo, np, plt, pred_r_extrap_multi, pred_rust_extrap_multi):
 
 
 @app.cell
-def _(X_data, k_list, mgcv_rust, mo, n_v, np, plt, ro, y_data):
+def _(X_data, k_list, localconverter, mgcv_rust, mo, n_v, np, numpy2ri, plt, ro, y_data):
     mo.md("## Performance Benchmark")
 
     import time
@@ -427,19 +436,20 @@ def _(X_data, k_list, mgcv_rust, mo, n_v, np, plt, ro, y_data):
 
     # Time R mgcv
     times_r_multi = []
-    for i in range(n_v):
-        ro.globalenv[f'x{i+1}'] = X_data[:, i]
-    ro.globalenv['y_r'] = y_data
-    ro.globalenv['k_val'] = k_list[0]
+    with localconverter(ro.default_converter + numpy2ri.converter):
+        for i in range(n_v):
+            ro.globalenv[f'x{i+1}'] = X_data[:, i]
+        ro.globalenv['y_r'] = y_data
+        ro.globalenv['k_val'] = k_list[0]
 
-    smooth_terms_bench = [f's(x{i+1}, k=k_val, bs="cr")' for i in range(n_v)]
-    formula_bench = f'y_r ~ {" + ".join(smooth_terms_bench)}'
+        smooth_terms_bench = [f's(x{i+1}, k=k_val, bs="cr")' for i in range(n_v)]
+        formula_bench = f'y_r ~ {" + ".join(smooth_terms_bench)}'
 
-    for _ in range(n_iters):
-        start = time.perf_counter()
-        ro.r(f'gam_fit_speed <- gam({formula_bench}, method="REML")')
-        end = time.perf_counter()
-        times_r_multi.append(end - start)
+        for _ in range(n_iters):
+            start = time.perf_counter()
+            ro.r(f'gam_fit_speed <- gam({formula_bench}, method="REML")')
+            end = time.perf_counter()
+            times_r_multi.append(end - start)
 
     # Compute statistics
     mean_rust_multi = np.mean(times_rust_multi) * 1000  # Convert to ms
