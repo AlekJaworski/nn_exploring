@@ -234,17 +234,14 @@ impl GAM {
             design_matrices.push(basis_matrix);
         }
 
-        // Combine all design matrices
+        // Combine all design matrices efficiently using ndarray slicing
         let mut full_design = Array2::zeros((n, total_basis));
         let mut col_offset = 0;
 
         for design in &design_matrices {
             let num_cols = design.ncols();
-            for i in 0..n {
-                for j in 0..num_cols {
-                    full_design[[i, col_offset + j]] = design[[i, j]];
-                }
-            }
+            full_design.slice_mut(ndarray::s![.., col_offset..col_offset + num_cols])
+                .assign(design);
             col_offset += num_cols;
         }
 
@@ -441,11 +438,8 @@ impl GAM {
 
         for design in &design_matrices {
             let num_cols = design.ncols();
-            for i in 0..n {
-                for j in 0..num_cols {
-                    full_design[[i, col_offset + j]] = design[[i, j]];
-                }
-            }
+            full_design.slice_mut(ndarray::s![.., col_offset..col_offset + num_cols])
+                .assign(design);
             col_offset += num_cols;
         }
 

@@ -343,8 +343,9 @@ impl PyGAM {
         let result = pyo3::types::PyDict::new_bound(py);
 
         if let Some(ref params) = self.inner.smoothing_params {
-            result.set_item("lambda", params.lambda[0])?;
+            // Return all lambdas as array (consistent with fit_auto)
             let all_lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            result.set_item("lambda", all_lambdas.clone())?;
             result.set_item("all_lambdas", all_lambdas)?;
         }
 
