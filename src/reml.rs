@@ -63,13 +63,9 @@ pub fn reml_criterion(
     let p = x.ncols();
 
     // Compute weighted design matrix: sqrt(W) * X
-    let mut x_weighted = x.clone();
-    for i in 0..n {
-        let weight_sqrt = w[i].sqrt();
-        for j in 0..p {
-            x_weighted[[i, j]] *= weight_sqrt;
-        }
-    }
+    // Use broadcasting: multiply each row of X by corresponding sqrt(w_i)
+    let w_sqrt: Array1<f64> = w.iter().map(|wi| wi.sqrt()).collect();
+    let x_weighted = x * &w_sqrt.view().insert_axis(ndarray::Axis(1));
 
     // Compute coefficients if not provided
     let beta_computed;
@@ -246,13 +242,9 @@ pub fn reml_criterion_multi(
     let p = x.ncols();
 
     // Compute weighted design matrix: sqrt(W) * X
-    let mut x_weighted = x.clone();
-    for i in 0..n {
-        let weight_sqrt = w[i].sqrt();
-        for j in 0..p {
-            x_weighted[[i, j]] *= weight_sqrt;
-        }
-    }
+    // Use broadcasting: multiply each row of X by corresponding sqrt(w_i)
+    let w_sqrt: Array1<f64> = w.iter().map(|wi| wi.sqrt()).collect();
+    let x_weighted = x * &w_sqrt.view().insert_axis(ndarray::Axis(1));
 
     // Compute X'WX
     let xtw = x_weighted.t().to_owned();
@@ -261,7 +253,8 @@ pub fn reml_criterion_multi(
     // Compute A = X'WX + Σλᵢ·Sᵢ
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
-        a = a + &(penalty * *lambda);
+        // Add in-place instead of creating temporary
+        a.scaled_add(*lambda, penalty);
     }
 
     // Compute coefficients if not provided
@@ -276,16 +269,11 @@ pub fn reml_criterion_multi(
         let b = xtw.dot(&y_weighted);
 
         // Add ridge for numerical stability when solving
-        let mut max_diag: f64 = 1.0;
-        for i in 0..p {
-            max_diag = max_diag.max(a[[i, i]].abs());
-        }
+        let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
         let ridge_scale = 1e-5 * (1.0 + (lambdas.len() as f64).sqrt());
         let ridge = ridge_scale * max_diag;
         let mut a_solve = a.clone();
-        for i in 0..p {
-            a_solve[[i, i]] += ridge;
-        }
+        a_solve.diag_mut().iter_mut().for_each(|x| *x += ridge);
 
         beta_computed = solve(a_solve, b)?;
         &beta_computed
@@ -319,17 +307,12 @@ pub fn reml_criterion_multi(
     // Compute log|X'WX + Σλᵢ·Sᵢ|
     // Add adaptive ridge term to ensure numerical stability
     // Scale by problem size and matrix magnitude for robustness
-    let mut max_diag: f64 = 1.0;
-    for i in 0..p {
-        max_diag = max_diag.max(a[[i, i]].abs());
-    }
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     // Use stronger ridge for multidimensional cases (more penalties = more potential for ill-conditioning)
     let ridge_scale = 1e-5 * (1.0 + (lambdas.len() as f64).sqrt());
     let ridge = ridge_scale * max_diag;
     let mut a_reg = a.clone();
-    for i in 0..p {
-        a_reg[[i, i]] += ridge;
-    }
+    a_reg.diag_mut().iter_mut().for_each(|x| *x += ridge);
     let log_det_a = determinant(&a_reg)?.ln();
 
     // Compute total rank and -Σrank(Sᵢ)·log(λᵢ)
@@ -397,7 +380,8 @@ pub fn reml_gradient_multi(
     // Compute A = X'WX + Σλᵢ·Sᵢ
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
-        a = a + &(penalty * *lambda);
+        // Add in-place instead of creating temporary
+        a.scaled_add(*lambda, penalty);
     }
 
     // Solve for coefficients
@@ -517,7 +501,8 @@ pub fn reml_hessian_multi(
     // Compute A = X'WX + Σλᵢ·Sᵢ
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
-        a = a + &(penalty * *lambda);
+        // Add in-place instead of creating temporary
+        a.scaled_add(*lambda, penalty);
     }
 
     // Compute A^(-1)

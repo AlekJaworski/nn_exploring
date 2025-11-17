@@ -126,10 +126,20 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    fn new() -> Self {
-        PyGAM {
-            inner: GAM::new(Family::Gaussian),
-        }
+    #[pyo3(signature = (family=None))]
+    fn new(family: Option<&str>) -> PyResult<Self> {
+        let fam = match family {
+            Some("gaussian") | None => Family::Gaussian,
+            Some("binomial") => Family::Binomial,
+            Some("poisson") => Family::Poisson,
+            Some("gamma") => Family::Gamma,
+            Some(f) => return Err(PyValueError::new_err(
+                format!("Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', or 'gamma'", f)
+            )),
+        };
+        Ok(PyGAM {
+            inner: GAM::new(fam),
+        })
     }
 
     fn add_cubic_spline(
@@ -343,8 +353,9 @@ impl PyGAM {
         let result = pyo3::types::PyDict::new_bound(py);
 
         if let Some(ref params) = self.inner.smoothing_params {
-            result.set_item("lambda", params.lambda[0])?;
+            // Return all lambdas as array (consistent with fit_auto)
             let all_lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            result.set_item("lambda", all_lambdas.clone())?;
             result.set_item("all_lambdas", all_lambdas)?;
         }
 
@@ -445,6 +456,16 @@ impl PyGAM {
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
         Ok(PyArray1::from_vec_bound(py, fitted.to_vec()))
+    }
+
+    /// Get the family (distribution) used by this GAM
+    fn get_family(&self) -> &str {
+        match self.inner.family {
+            Family::Gaussian => "gaussian",
+            Family::Binomial => "binomial",
+            Family::Poisson => "poisson",
+            Family::Gamma => "gamma",
+        }
     }
 }
 

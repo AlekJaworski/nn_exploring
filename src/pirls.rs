@@ -38,9 +38,21 @@ impl Family {
     pub fn inverse_link(&self, eta: f64) -> f64 {
         match self {
             Family::Gaussian => eta,
-            Family::Binomial => 1.0 / (1.0 + (-eta).exp()),
-            Family::Poisson => eta.exp(),
-            Family::Gamma => 1.0 / eta,
+            Family::Binomial => {
+                // Clamp eta to avoid overflow in exp
+                let eta_safe = eta.max(-20.0).min(20.0);
+                1.0 / (1.0 + (-eta_safe).exp())
+            },
+            Family::Poisson => {
+                // Clamp to avoid overflow
+                let eta_safe = eta.min(20.0);
+                eta_safe.exp()
+            },
+            Family::Gamma => {
+                // Ensure eta is not too close to zero
+                let eta_safe = if eta.abs() < 1e-10 { 1e-10 } else { eta };
+                1.0 / eta_safe
+            },
         }
     }
 
@@ -107,9 +119,14 @@ pub fn fit_pirls(
     let mut beta = Array1::zeros(p);
     let mut eta = x.dot(&beta);
 
-    // Add small offset to avoid issues with log-link
+    // Initialize eta based on family
     for i in 0..n {
-        eta[i] = family.link(y[i].max(0.1));
+        let safe_y = match family {
+            Family::Binomial => y[i].max(0.01).min(0.99),  // Avoid 0 and 1
+            Family::Poisson | Family::Gamma => y[i].max(0.1),  // Avoid 0
+            Family::Gaussian => y[i],
+        };
+        eta[i] = family.link(safe_y);
     }
 
     let mut converged = false;
