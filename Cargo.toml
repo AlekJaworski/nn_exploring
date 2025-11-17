@@ -13,10 +13,26 @@ approx = "0.5"
 thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
+ndarray-linalg = { version = "0.16", optional = true, features = ["openblas-static"] }
 
 [features]
 default = []
 python = ["pyo3", "numpy"]
+blas = ["ndarray-linalg"]  # Enable optimized BLAS/LAPACK backend
 
 [dev-dependencies]
 approx = "0.5"
+
+[profile.release]
+# Aggressive optimization flags for maximum performance
+opt-level = 3              # Maximum optimization
+lto = "fat"                # Link-time optimization across all crates
+codegen-units = 1          # Better optimization at cost of compile time
+panic = "abort"            # Smaller binaries, slightly faster
+strip = true               # Strip symbols for smaller binaries
+
+# Enable CPU-specific optimizations (requires nightly or RUSTFLAGS)
+# To use: RUSTFLAGS="-C target-cpu=native" cargo build --release
+
+[profile.dev]
+opt-level = 1              # Some optimization in dev mode for faster iteration
