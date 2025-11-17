@@ -165,6 +165,8 @@ pub struct GAM {
     pub weights: Option<Array1<f64>>,
     /// Deviance
     pub deviance: Option<f64>,
+    /// Design matrix (predictor matrix)
+    pub design_matrix: Option<Array2<f64>>,
     /// Whether model has been fitted
     pub fitted: bool,
 }
@@ -181,6 +183,7 @@ impl GAM {
             smoothing_params: None,
             weights: None,
             deviance: None,
+            design_matrix: None,
             fitted: false,
         }
     }
@@ -347,6 +350,7 @@ impl GAM {
                 self.fitted_values = Some(final_result.fitted_values.clone());
                 self.linear_predictor = Some(final_result.linear_predictor.clone());
                 self.weights = Some(final_result.weights.clone());
+                self.design_matrix = Some(full_design.clone());
 
                 // Recompute deviance from fitted values to ensure consistency
                 // Note: fit_pirls may return incorrect deviance due to penalty scaling
@@ -379,6 +383,7 @@ impl GAM {
         self.fitted_values = Some(final_result.fitted_values.clone());
         self.linear_predictor = Some(final_result.linear_predictor.clone());
         self.weights = Some(final_result.weights.clone());
+        self.design_matrix = Some(full_design.clone());
 
         // Recompute deviance from fitted values to ensure consistency
         let fitted = &final_result.fitted_values;
@@ -463,11 +468,13 @@ impl GAM {
         pirls_result: crate::pirls::PiRLSResult,
         smoothing_params: SmoothingParameter,
         y: &Array1<f64>,
+        design_matrix: &Array2<f64>,
     ) {
         self.coefficients = Some(pirls_result.coefficients.clone());
         self.fitted_values = Some(pirls_result.fitted_values.clone());
         self.linear_predictor = Some(pirls_result.linear_predictor.clone());
         self.weights = Some(pirls_result.weights.clone());
+        self.design_matrix = Some(design_matrix.clone());
 
         // Recompute deviance for consistency
         let fitted = &pirls_result.fitted_values;

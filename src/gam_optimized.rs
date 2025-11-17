@@ -242,7 +242,7 @@ impl GAM {
                     tolerance,
                 )?;
 
-                self.store_results(final_result, smoothing_params, y);
+                self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
                 return Ok(());
             }
             // Note: Could also check if REML/GCV score is plateauing for additional early stopping
@@ -259,7 +259,7 @@ impl GAM {
             tolerance,
         )?;
 
-        self.store_results(final_result, smoothing_params, y);
+        self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
         Ok(())
     }
 }
