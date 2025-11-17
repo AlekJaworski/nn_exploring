@@ -126,10 +126,20 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    fn new() -> Self {
-        PyGAM {
-            inner: GAM::new(Family::Gaussian),
-        }
+    #[pyo3(signature = (family=None))]
+    fn new(family: Option<&str>) -> PyResult<Self> {
+        let fam = match family {
+            Some("gaussian") | None => Family::Gaussian,
+            Some("binomial") => Family::Binomial,
+            Some("poisson") => Family::Poisson,
+            Some("gamma") => Family::Gamma,
+            Some(f) => return Err(PyValueError::new_err(
+                format!("Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', or 'gamma'", f)
+            )),
+        };
+        Ok(PyGAM {
+            inner: GAM::new(fam),
+        })
     }
 
     fn add_cubic_spline(
@@ -446,6 +456,16 @@ impl PyGAM {
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
         Ok(PyArray1::from_vec_bound(py, fitted.to_vec()))
+    }
+
+    /// Get the family (distribution) used by this GAM
+    fn get_family(&self) -> &str {
+        match self.inner.family {
+            Family::Gaussian => "gaussian",
+            Family::Binomial => "binomial",
+            Family::Poisson => "poisson",
+            Family::Gamma => "gamma",
+        }
     }
 }
 
