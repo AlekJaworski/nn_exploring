@@ -261,23 +261,16 @@ impl GAM {
             // S_rescaled = S / maS = S * maXX / ||S||_inf
 
             // Compute infinity norm of design matrix (max absolute row sum)
-            let mut inf_norm_X = 0.0;
-            for i in 0..design.nrows() {
-                let row_sum: f64 = design.row(i).iter().map(|x| x.abs()).sum();
-                if row_sum > inf_norm_X {
-                    inf_norm_X = row_sum;
-                }
-            }
+            let inf_norm_X = design.rows()
+                .into_iter()
+                .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+                .fold(0.0f64, f64::max);
             let maXX = inf_norm_X * inf_norm_X;
 
             // Compute infinity norm of penalty matrix (max absolute row sum)
-            let mut inf_norm_S = 0.0;
-            for i in 0..num_basis {
-                let row_sum: f64 = (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum();
-                if row_sum > inf_norm_S {
-                    inf_norm_S = row_sum;
-                }
-            }
+            let inf_norm_S = (0..num_basis)
+                .map(|i| (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
+                .fold(0.0f64, f64::max);
 
             // Apply normalization: maS = ||S||_inf / maXX, S_new = S / maS
             let scale_factor = if inf_norm_S > 1e-10 {
@@ -289,12 +282,9 @@ impl GAM {
 
             let mut penalty_full = Array2::zeros((total_basis, total_basis));
 
-            // Place this smooth's normalized penalty in the appropriate block
-            for i in 0..num_basis {
-                for j in 0..num_basis {
-                    penalty_full[[col_offset + i, col_offset + j]] = smooth.penalty[[i, j]] * scale_factor;
-                }
-            }
+            // Place this smooth's normalized penalty in the appropriate block using slicing
+            penalty_full.slice_mut(ndarray::s![col_offset..col_offset + num_basis, col_offset..col_offset + num_basis])
+                .assign(&(&smooth.penalty * scale_factor));
 
             penalties.push(penalty_full);
             col_offset += num_basis;
