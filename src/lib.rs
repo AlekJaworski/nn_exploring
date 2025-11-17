@@ -467,6 +467,26 @@ impl PyGAM {
             Family::Gamma => "gamma",
         }
     }
+
+    /// Get the fitted coefficients
+    fn get_coefficients<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let coefficients = self.inner.coefficients
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+
+        Ok(PyArray1::from_vec_bound(py, coefficients.to_vec()))
+    }
+
+    /// Get the design matrix (predictor matrix)
+    fn get_design_matrix<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+        use numpy::PyArray2;
+
+        let design_matrix = self.inner.design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+
+        Ok(PyArray2::from_owned_array_bound(py, design_matrix.clone()))
+    }
 }
 
 /// Compute penalty matrix for debugging/comparison
