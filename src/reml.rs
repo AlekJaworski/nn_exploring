@@ -1,8 +1,9 @@
 //! REML (Restricted Maximum Likelihood) criterion for smoothing parameter selection
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis, s};
 use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
+use crate::GAMError;
 
 /// Estimate the rank of a matrix using row norms as approximation to singular values
 /// For symmetric matrices like penalty matrices, this gives a reasonable estimate
@@ -341,6 +342,231 @@ pub fn reml_criterion_multi(
                 - log_lambda_sum) / 2.0;
 
     Ok(reml)
+}
+
+/// Compute square root of a penalty matrix using eigenvalue decomposition
+///
+/// For a symmetric positive semi-definite matrix S, computes L such that S = L'L
+/// Uses eigenvalue decomposition: S = Q Λ Q', so L = Q Λ^{1/2} Q' (taking transpose)
+fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
+    use ndarray_linalg::Eigh;
+
+    let n = penalty.nrows();
+    if n != penalty.ncols() {
+        return Err(GAMError::InvalidParameter(
+            "Penalty matrix must be square".to_string()
+        ));
+    }
+
+    // Compute eigenvalue decomposition: S = Q Λ Q'
+    let (eigenvalues, eigenvectors) = penalty.eigh(ndarray_linalg::UPLO::Upper)
+        .map_err(|e| GAMError::InvalidParameter(format!("Eigenvalue decomposition failed: {:?}", e)))?;
+
+    // Threshold for considering eigenvalue as zero
+    let max_eigenvalue = eigenvalues.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let threshold = 1e-10 * max_eigenvalue.max(1.0);
+
+    // Count non-zero eigenvalues
+    let non_zero_eigs: Vec<(usize, f64)> = eigenvalues.iter().copied().enumerate()
+        .filter(|&(_, e)| e > threshold)
+        .collect();
+
+    let rank = non_zero_eigs.len();
+
+    if rank == 0 {
+        // Penalty is zero, return empty matrix
+        return Ok(Array2::<f64>::zeros((n, 0)));
+    }
+
+    // Create thin square root: L is n × rank
+    // Only keep eigenvectors corresponding to non-zero eigenvalues
+    let mut sqrt_penalty = Array2::<f64>::zeros((n, rank));
+    for (out_j, &(in_j, eigenvalue)) in non_zero_eigs.iter().enumerate() {
+        let sqrt_eval = eigenvalue.sqrt();
+        for i in 0..n {
+            sqrt_penalty[[i, out_j]] = eigenvectors[[i, in_j]] * sqrt_eval;
+        }
+    }
+
+    Ok(sqrt_penalty)
+}
+
+/// Compute the gradient of REML using QR-based approach (matching mgcv's gdi.c)
+///
+/// Following Wood (2011) and mgcv's gdi.c (get_ddetXWXpS function), this uses:
+/// 1. QR decomposition of augmented matrix [sqrt(W)X; sqrt(λ_0)L_0; ...]
+/// 2. R such that R'R = X'WX + Σλᵢ·Sᵢ
+/// 3. P = R^{-1}
+/// 4. Gradient: ∂log|R'R|/∂log(λ_m) = λ_m·tr(P'·S_m·P)
+///
+/// This avoids explicit formation of A^{-1} and cross-coupling issues.
+pub fn reml_gradient_multi_qr(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+) -> Result<Array1<f64>> {
+    use ndarray_linalg::Inverse;
+    use ndarray_linalg::QR;
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Compute sqrt(W) * X
+    let mut sqrt_w_x = x.clone();
+    for i in 0..n {
+        let weight_sqrt = w[i].sqrt();
+        for j in 0..p {
+            sqrt_w_x[[i, j]] *= weight_sqrt;
+        }
+    }
+
+    // Compute square root penalties and their ranks
+    let mut sqrt_penalties = Vec::new();
+    let mut penalty_ranks = Vec::new();
+    for penalty in penalties.iter() {
+        let sqrt_pen = penalty_sqrt(penalty)?;
+        let rank = estimate_rank(penalty);
+        sqrt_penalties.push(sqrt_pen);
+        penalty_ranks.push(rank);
+    }
+
+    // Build augmented matrix Z = [sqrt(W)X; sqrt(λ_0)L_0'; sqrt(λ_1)L_1'; ...]
+    // Determine total rows (n + sum of ranks)
+    let mut total_rows = n;
+    for sqrt_pen in sqrt_penalties.iter() {
+        total_rows += sqrt_pen.ncols();  // Number of columns = rank
+    }
+
+    let mut z = Array2::<f64>::zeros((total_rows, p));
+
+    // Fill in sqrt(W)X
+    for i in 0..n {
+        for j in 0..p {
+            z[[i, j]] = sqrt_w_x[[i, j]];
+        }
+    }
+
+    // Fill in scaled square root penalties (transposed)
+    // sqrt_pen is p × rank, we need rank × p for augmented matrix
+    let mut row_offset = n;
+    for (sqrt_pen, &lambda) in sqrt_penalties.iter().zip(lambdas.iter()) {
+        let sqrt_lambda = lambda.sqrt();
+        let rank = sqrt_pen.ncols();  // Number of non-zero eigenvalues
+        for i in 0..rank {
+            for j in 0..p {
+                z[[row_offset + i, j]] = sqrt_lambda * sqrt_pen[[j, i]];  // Transpose!
+            }
+        }
+        row_offset += rank;
+    }
+
+    // QR decomposition: Z = QR
+    let (_, r) = z.qr()
+        .map_err(|e| GAMError::InvalidParameter(format!("QR decomposition failed: {:?}", e)))?;
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[QR_DEBUG] Z dimensions: {}×{}", z.nrows(), z.ncols());
+        eprintln!("[QR_DEBUG] R dimensions: {}×{}", r.nrows(), r.ncols());
+        eprintln!("[QR_DEBUG] total_rows={}, n={}, p={}", total_rows, n, p);
+    }
+
+    // Extract upper triangular part (first p rows)
+    let mut r_upper = Array2::<f64>::zeros((p, p));
+    for i in 0..p {
+        for j in i..p {
+            r_upper[[i, j]] = r[[i, j]];
+        }
+    }
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        // Check R'R to see if it matches X'WX + S
+        let rtr = r_upper.t().dot(&r_upper);
+        eprintln!("[QR_DEBUG] R'R diagonal: [{:.6}, {:.6}, ..., {:.6}]",
+                 rtr[[0,0]], rtr[[1,1]], rtr[[p-1,p-1]]);
+    }
+
+    // Compute P = R^{-1}
+    let p_matrix = r_upper.inv()
+        .map_err(|e| GAMError::InvalidParameter(format!("Matrix inversion failed: {:?}", e)))?;
+
+    // Compute coefficients for penalty term
+    let xtw = sqrt_w_x.t().to_owned();
+    let xtwx = xtw.dot(&sqrt_w_x);
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a.scaled_add(*lambda, penalty);
+    }
+
+    let y_weighted: Array1<f64> = y.iter().zip(w.iter())
+        .map(|(yi, wi)| yi * wi)
+        .collect();
+    let b = xtw.dot(&y_weighted);
+
+    // Add small ridge for stability
+    let ridge = 1e-7 * (1.0 + (m as f64).sqrt());
+    for i in 0..p {
+        a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+    }
+
+    let beta = solve(a, b)?;
+
+    // Compute RSS and φ
+    let fitted = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(r, wi)| r * r * wi)
+        .sum();
+
+    let total_rank: usize = penalty_ranks.iter().sum();
+    let phi = rss / (n - total_rank) as f64;
+
+    // Compute gradient for each penalty
+    let mut gradient = Array1::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = penalty_ranks[i];
+        let sqrt_pen_i = &sqrt_penalties[i];
+
+        // Compute tr(P'·S_i·P) using thin square root: tr(P'·L·L'·P)
+        // Following mgcv's approach: PtrSm = P' * L, then tr(PtrSm * PtrSm')
+        let p_t_l = p_matrix.t().dot(sqrt_pen_i);  // p × rank_i
+
+        // Compute tr(P'L * (P'L)') = tr(P'LL'P) = tr(P'SP)
+        let mut trace = 0.0;
+        for k in 0..p {
+            for r in 0..sqrt_pen_i.ncols() {
+                trace += p_t_l[[k, r]] * p_t_l[[k, r]];
+            }
+        }
+
+        // Scale by λ_i (derivative w.r.t. log(λ_i))
+        trace *= lambda_i;
+
+        // Compute penalty term: λᵢ·β'·Sᵢ·β
+        let s_beta = penalty_i.dot(&beta);
+        let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        let penalty_term = lambda_i * beta_s_beta;
+
+        // Gradient formula: [tr(P'SP)·λ - rank + penalty_term/φ] / 2
+        gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
+
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            eprintln!("[QR_GRAD_DEBUG] lambda_i={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}",
+                     lambda_i, trace, rank_i, penalty_term, phi);
+            eprintln!("[QR_GRAD_DEBUG]   gradient[{}] = {:.6}", i, gradient[i]);
+        }
+    }
+
+    Ok(gradient)
 }
 
 /// Compute the gradient of REML with respect to log(λᵢ)

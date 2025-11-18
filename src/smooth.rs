@@ -2,7 +2,7 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_hessian_multi};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_hessian_multi};
 use crate::linalg::solve;
 
 /// Smoothing parameter optimization method
@@ -201,7 +201,8 @@ impl SmoothingParameter {
             let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
 
             // Compute gradient and Hessian
-            let gradient = reml_gradient_multi(y, x, w, &lambdas, penalties)?;
+            // Use QR-based gradient computation to match mgcv and avoid cross-coupling issues
+            let gradient = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 
             // ===================================================================
@@ -384,7 +385,7 @@ impl SmoothingParameter {
 
                 // Steepest descent: step = -gradient (scaled very small)
                 // Recompute gradient since it was moved earlier
-                let gradient_sd = reml_gradient_multi(y, x, w, &lambdas, penalties)?;
+                let gradient_sd = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
 
                 // Try progressively smaller steepest descent steps
                 let mut sd_worked = false;

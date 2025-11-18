@@ -17,5 +17,5 @@ dependencies = [
 ]
 
 [tool.maturin]
-features = ["python"]
+features = ["python", "blas"]
 module-name = "mgcv_rust"
