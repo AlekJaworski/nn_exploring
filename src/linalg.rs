@@ -3,8 +3,71 @@
 use ndarray::{Array1, Array2, s};
 use crate::{Result, GAMError};
 
-/// Solve linear system Ax = b using Gaussian elimination with partial pivoting
+#[cfg(feature = "blas")]
+use ndarray_linalg::*;
+
+/// Solve linear system Ax = b
+/// Uses BLAS/LAPACK when available, falls back to Gaussian elimination otherwise
 pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
+    #[cfg(feature = "blas")]
+    {
+        // Use BLAS/LAPACK for optimal performance
+        solve_blas(a, b)
+    }
+
+    #[cfg(not(feature = "blas"))]
+    {
+        // Fall back to Gaussian elimination
+        solve_gaussian(a, b)
+    }
+}
+
+#[cfg(feature = "blas")]
+fn solve_blas(a: Array2<f64>, b: Array1<f64>) -> Result<Array1<f64>> {
+    let n = a.nrows();
+
+    if a.ncols() != n || b.len() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square and match RHS".to_string()
+        ));
+    }
+
+    // Check if matrix is symmetric (for Cholesky)
+    // This is common for X'WX + λS type matrices in GAM fitting
+    let is_symmetric = {
+        let mut sym = true;
+        for i in 0..n {
+            for j in (i+1)..n {
+                if (a[[i, j]] - a[[j, i]]).abs() > 1e-10 {
+                    sym = false;
+                    break;
+                }
+            }
+            if !sym { break; }
+        }
+        sym
+    };
+
+    if is_symmetric {
+        // Try Cholesky decomposition (fastest for SPD matrices)
+        match a.cholesky(ndarray_linalg::UPLO::Upper) {
+            Ok(chol) => {
+                return chol.solve_into(b)
+                    .map_err(|_| GAMError::SingularMatrix);
+            },
+            Err(_) => {
+                // Not positive definite, fall through to general solver
+            }
+        }
+    }
+
+    // Use general LU solver
+    a.solve_into(b)
+        .map_err(|_| GAMError::SingularMatrix)
+}
+
+#[cfg(not(feature = "blas"))]
+fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
     let n = a.nrows();
 
     if a.ncols() != n || b.len() != n {
@@ -73,8 +136,35 @@ pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
     Ok(x)
 }
 
-/// Compute matrix determinant using LU decomposition
+/// Compute matrix determinant
+/// Uses BLAS/LAPACK when available, falls back to LU decomposition otherwise
 pub fn determinant(a: &Array2<f64>) -> Result<f64> {
+    #[cfg(feature = "blas")]
+    {
+        determinant_blas(a)
+    }
+
+    #[cfg(not(feature = "blas"))]
+    {
+        determinant_lu(a)
+    }
+}
+
+#[cfg(feature = "blas")]
+fn determinant_blas(a: &Array2<f64>) -> Result<f64> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square".to_string()
+        ));
+    }
+
+    a.det()
+        .map_err(|_| GAMError::SingularMatrix)
+}
+
+#[cfg(not(feature = "blas"))]
+fn determinant_lu(a: &Array2<f64>) -> Result<f64> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
@@ -139,8 +229,35 @@ pub fn determinant(a: &Array2<f64>) -> Result<f64> {
     Ok(det)
 }
 
-/// Compute matrix inverse using Gauss-Jordan elimination
+/// Compute matrix inverse
+/// Uses BLAS/LAPACK when available, falls back to Gauss-Jordan elimination otherwise
 pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
+    #[cfg(feature = "blas")]
+    {
+        inverse_blas(a)
+    }
+
+    #[cfg(not(feature = "blas"))]
+    {
+        inverse_gauss_jordan(a)
+    }
+}
+
+#[cfg(feature = "blas")]
+fn inverse_blas(a: &Array2<f64>) -> Result<Array2<f64>> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square".to_string()
+        ));
+    }
+
+    a.inv()
+        .map_err(|_| GAMError::SingularMatrix)
+}
+
+#[cfg(not(feature = "blas"))]
+fn inverse_gauss_jordan(a: &Array2<f64>) -> Result<Array2<f64>> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
