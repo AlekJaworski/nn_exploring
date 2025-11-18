@@ -579,7 +579,7 @@ pub fn reml_gradient_multi_qr(
         // Compute square root of the block
         let sqrt_pen_block = penalty_sqrt(&penalty_block)?;
 
-        // Extract corresponding rows from P matrix
+        // Extract corresponding rows AND columns from P matrix
         let mut p_block = Array2::<f64>::zeros((block_size, p));
         for ii in 0..block_size {
             for jj in 0..p {
@@ -587,14 +587,28 @@ pub fn reml_gradient_multi_qr(
             }
         }
 
-        // Compute tr(P_block'·S_block·P_block) using thin square root
-        let p_block_t_l = p_block.t().dot(&sqrt_pen_block);  // p × rank_i
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            let pen_trace: f64 = (0..block_size).map(|i| penalty_block[[i, i]]).sum();
+            let pen_frob: f64 = penalty_block.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            let sqrt_pen_frob: f64 = sqrt_pen_block.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            let p_block_frob: f64 = p_block.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            eprintln!("[QR_GRAD_DEBUG] penalty_block trace={:.6}, frob_norm={:.6}", pen_trace, pen_frob);
+            eprintln!("[QR_GRAD_DEBUG] sqrt_pen_block shape={}x{}, frob={:.6}", sqrt_pen_block.nrows(), sqrt_pen_block.ncols(), sqrt_pen_frob);
+            eprintln!("[QR_GRAD_DEBUG] p_block shape={}x{}, frob={:.6}", p_block.nrows(), p_block.ncols(), p_block_frob);
+        }
 
-        // Compute tr(P_block'L * (P_block'L)') = tr(P_block'LL'P_block) = tr(P_block'S_block·P_block)
+        // Compute tr(P'·S·P) where P is full matrix and S is block diagonal
+        // Since S has non-zero block [block_start:block_end, block_start:block_end]:
+        // tr(P'·S·P) = tr(P[block,:] ' * S_block * P[block,:])
+        //            = tr(L' * P_block * P_block' * L) where L*L' = S_block
+        //            = ||L' * P_block||_F^2
+        let l_t_p_block = sqrt_pen_block.t().dot(&p_block);  // rank × p
+
+        // Compute Frobenius norm squared
         let mut trace = 0.0;
-        for k in 0..p {
-            for r in 0..sqrt_pen_block.ncols() {
-                trace += p_block_t_l[[k, r]] * p_block_t_l[[k, r]];
+        for r in 0..l_t_p_block.nrows() {
+            for k in 0..l_t_p_block.ncols() {
+                trace += l_t_p_block[[r, k]] * l_t_p_block[[r, k]];
             }
         }
 
