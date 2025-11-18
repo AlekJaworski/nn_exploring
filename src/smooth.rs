@@ -211,12 +211,6 @@ impl SmoothingParameter {
                 // No improvement found - converged or stuck
                 break;
             }
-
-            // Print progress (optional)
-            if iter % 5 == 0 {
-                eprintln!("REML Newton iter {}: REML={:.6}, grad_norm={:.6}",
-                         iter, best_reml, grad_norm);
-            }
         }
 
         // Update final lambdas
