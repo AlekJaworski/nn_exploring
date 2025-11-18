@@ -23,12 +23,12 @@ impl SmoothingParameter {
     /// Create new smoothing parameters with initial values
     pub fn new(num_smooths: usize, method: OptimizationMethod) -> Self {
         Self {
-            lambda: vec![0.1; num_smooths],  // Better starting point than 1.0
+            lambda: vec![0.1; num_smooths],  // Will be refined in optimize()
             method,
         }
     }
 
-    /// Optimize smoothing parameters using REML or GCV
+    /// Optimize smoothing parameters using REML or GCV with adaptive initialization
     pub fn optimize(
         &mut self,
         y: &Array1<f64>,
@@ -44,6 +44,10 @@ impl SmoothingParameter {
             ));
         }
 
+        // Adaptive initialization: lambda_i = 0.1 * trace(S_i) / trace(X'WX)
+        // This scales initialization based on problem characteristics
+        self.initialize_lambda_adaptive(x, w, penalties);
+
         match self.method {
             OptimizationMethod::REML => {
                 self.optimize_reml(y, x, w, penalties, max_iter, tolerance)
@@ -51,6 +55,52 @@ impl SmoothingParameter {
             OptimizationMethod::GCV => {
                 self.optimize_gcv(y, x, w, penalties, max_iter, tolerance)
             },
+        }
+    }
+
+    /// Initialize lambda values adaptively based on penalty and design matrix scales
+    fn initialize_lambda_adaptive(
+        &mut self,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[Array2<f64>],
+    ) {
+        let n = x.nrows();
+        let p = x.ncols();
+
+        // Compute trace(X'WX) as reference scale
+        let mut xtwx_trace = 0.0;
+        for j in 0..p {
+            let mut col_weighted_sq = 0.0;
+            for i in 0..n {
+                col_weighted_sq += x[[i, j]] * x[[i, j]] * w[i];
+            }
+            xtwx_trace += col_weighted_sq;
+        }
+
+        // Fallback if matrix is degenerate
+        if xtwx_trace < 1e-10 {
+            xtwx_trace = 1.0;
+        }
+
+        // Initialize each lambda based on its penalty matrix scale
+        for (i, penalty) in penalties.iter().enumerate() {
+            let mut penalty_trace = 0.0;
+            let penalty_size = penalty.nrows().min(penalty.ncols());
+            for j in 0..penalty_size {
+                penalty_trace += penalty[[j, j]];
+            }
+
+            // R's mgcv heuristic: lambda ~ 0.1 * trace(S) / trace(X'WX)
+            // This ensures lambdas are scaled appropriately for the problem
+            if penalty_trace > 1e-10 {
+                self.lambda[i] = 0.1 * penalty_trace / xtwx_trace;
+            } else {
+                self.lambda[i] = 0.1;  // Fallback for near-zero penalty
+            }
+
+            // Clamp to reasonable range [1e-6, 1e6]
+            self.lambda[i] = self.lambda[i].max(1e-6).min(1e6);
         }
     }
 
@@ -138,20 +188,36 @@ impl SmoothingParameter {
         let max_step = 4.0;  // Maximum step size in log space (Wood 2011)
         let max_half = 30;   // Maximum step halvings
 
-        for iter in 0..max_iter {
+        let mut prev_reml = f64::INFINITY;
+
+        for _iter in 0..max_iter {
             // Current lambdas
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+
+            // Compute current REML value for convergence check
+            let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
 
             // Compute gradient and Hessian
             let gradient = reml_gradient_multi(y, x, w, &lambdas, penalties)?;
             let hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 
-            // Check for convergence
+            // Check for convergence using multiple criteria
             let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-            if grad_norm < tolerance {
+            let reml_change = if prev_reml.is_finite() {
+                ((current_reml - prev_reml) / prev_reml.abs().max(1e-10)).abs()
+            } else {
+                f64::INFINITY
+            };
+
+            // Converged if either:
+            // 1. Gradient norm is small (gradient convergence)
+            // 2. REML value change is tiny (value convergence)
+            if grad_norm < tolerance || reml_change < tolerance * 0.1 {
                 self.lambda = lambdas;
                 return Ok(());
             }
+
+            prev_reml = current_reml;
 
             // Compute Newton step: step = -H^(-1) · g
             let mut step = solve(hessian.clone(), -gradient.clone())?;
@@ -165,8 +231,7 @@ impl SmoothingParameter {
                 }
             }
 
-            // Line search with step halving
-            let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
+            // Line search with step halving (reuse current_reml from above)
             let mut best_reml = current_reml;
             let mut best_step_scale = 0.0;
 
