@@ -528,21 +528,73 @@ pub fn reml_gradient_multi_qr(
     // Compute gradient for each penalty
     let mut gradient = Array1::zeros(m);
 
+    eprintln!("[QR_GRAD_DEBUG] UNCONDITIONAL: About to compute {} gradients", m);
+
     for i in 0..m {
         let lambda_i = lambdas[i];
         let penalty_i = &penalties[i];
         let rank_i = penalty_ranks[i];
         let sqrt_pen_i = &sqrt_penalties[i];
 
-        // Compute tr(P'·S_i·P) using thin square root: tr(P'·L·L'·P)
-        // Following mgcv's approach: PtrSm = P' * L, then tr(PtrSm * PtrSm')
-        let p_t_l = p_matrix.t().dot(sqrt_pen_i);  // p × rank_i
+        eprintln!("[QR_GRAD_DEBUG] UNCONDITIONAL: Computing gradient for penalty {}", i);
 
-        // Compute tr(P'L * (P'L)') = tr(P'LL'P) = tr(P'SP)
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            eprintln!("[QR_GRAD_DEBUG] Starting penalty {} gradient computation", i);
+        }
+
+        // CRITICAL FIX: Extract non-zero block from block-diagonal penalty
+        // Our penalties are p×p but only a block is non-zero
+        // We need to find that block and use only the corresponding rows of P
+
+        // Find the non-zero block by checking row sums
+        let mut block_start = 0;
+        let mut block_end = p;
+        let mut found_start = false;
+
+        for row in 0..p {
+            let row_sum: f64 = (0..p).map(|col| penalty_i[[row, col]].abs()).sum();
+            if row_sum > 1e-10 {
+                if !found_start {
+                    block_start = row;
+                    found_start = true;
+                }
+                block_end = row + 1;
+            }
+        }
+
+        let block_size = block_end - block_start;
+
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            eprintln!("[QR_GRAD_DEBUG] Found block: start={}, end={}, size={}", block_start, block_end, block_size);
+        }
+
+        // Extract the non-zero block from the penalty
+        let mut penalty_block = Array2::<f64>::zeros((block_size, block_size));
+        for ii in 0..block_size {
+            for jj in 0..block_size {
+                penalty_block[[ii, jj]] = penalty_i[[block_start + ii, block_start + jj]];
+            }
+        }
+
+        // Compute square root of the block
+        let sqrt_pen_block = penalty_sqrt(&penalty_block)?;
+
+        // Extract corresponding rows from P matrix
+        let mut p_block = Array2::<f64>::zeros((block_size, p));
+        for ii in 0..block_size {
+            for jj in 0..p {
+                p_block[[ii, jj]] = p_matrix[[block_start + ii, jj]];
+            }
+        }
+
+        // Compute tr(P_block'·S_block·P_block) using thin square root
+        let p_block_t_l = p_block.t().dot(&sqrt_pen_block);  // p × rank_i
+
+        // Compute tr(P_block'L * (P_block'L)') = tr(P_block'LL'P_block) = tr(P_block'S_block·P_block)
         let mut trace = 0.0;
         for k in 0..p {
-            for r in 0..sqrt_pen_i.ncols() {
-                trace += p_t_l[[k, r]] * p_t_l[[k, r]];
+            for r in 0..sqrt_pen_block.ncols() {
+                trace += p_block_t_l[[k, r]] * p_block_t_l[[k, r]];
             }
         }
 
@@ -560,8 +612,8 @@ pub fn reml_gradient_multi_qr(
         gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
-            eprintln!("[QR_GRAD_DEBUG] lambda_i={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}",
-                     lambda_i, trace, rank_i, penalty_term, phi);
+            eprintln!("[QR_GRAD_DEBUG] lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}, block_size={}",
+                     lambda_i, trace, rank_i, penalty_term, phi, block_size);
             eprintln!("[QR_GRAD_DEBUG]   gradient[{}] = {:.6}", i, gradient[i]);
         }
     }
@@ -587,6 +639,7 @@ pub fn reml_gradient_multi(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
+    eprintln!("[GRAD_DEBUG] OLD reml_gradient_multi called!");
     let n = y.len();
     let p = x.ncols();
     let m = lambdas.len();
