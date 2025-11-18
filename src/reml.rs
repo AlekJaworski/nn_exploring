@@ -60,12 +60,17 @@ pub fn reml_criterion(
     beta: Option<&Array1<f64>>,
 ) -> Result<f64> {
     let n = y.len();
-    let p = x.ncols();
+    let _p = x.ncols();
 
     // Compute weighted design matrix: sqrt(W) * X
-    // Use broadcasting: multiply each row of X by corresponding sqrt(w_i)
-    let w_sqrt: Array1<f64> = w.iter().map(|wi| wi.sqrt()).collect();
-    let x_weighted = x * &w_sqrt.view().insert_axis(ndarray::Axis(1));
+    // Optimized: avoid intermediate allocation, compute directly
+    let mut x_weighted = x.to_owned();
+    for (i, mut row) in x_weighted.rows_mut().into_iter().enumerate() {
+        let w_sqrt = w[i].sqrt();
+        for val in row.iter_mut() {
+            *val *= w_sqrt;
+        }
+    }
 
     // Compute coefficients if not provided
     let beta_computed;
@@ -76,11 +81,13 @@ pub fn reml_criterion(
         let xtw = x_weighted.t().to_owned();
         let xtwx = xtw.dot(&x_weighted);
 
-        let mut a = xtwx + &(penalty * lambda);
+        let a = xtwx + &(penalty * lambda);
 
-        let y_weighted: Array1<f64> = y.iter().zip(w.iter())
-            .map(|(yi, wi)| yi * wi)
-            .collect();
+        // Optimized: compute y_weighted in-place to avoid allocation
+        let mut y_weighted = Array1::zeros(n);
+        for i in 0..n {
+            y_weighted[i] = y[i] * w[i];
+        }
 
         let b = xtw.dot(&y_weighted);
 
@@ -91,20 +98,19 @@ pub fn reml_criterion(
     // Compute fitted values
     let fitted = x.dot(beta);
 
-    // Compute residuals and RSS
-    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
-        .map(|(yi, fi)| yi - fi)
-        .collect();
+    // Compute residuals and RSS (optimized to avoid intermediate allocation)
+    let mut rss = 0.0;
+    for i in 0..n {
+        let residual = y[i] - fitted[i];
+        rss += residual * residual * w[i];
+    }
 
-    let rss: f64 = residuals.iter().zip(w.iter())
-        .map(|(r, wi)| r * r * wi)
-        .sum();
-
-    // Compute penalty term: β'Sβ
+    // Compute penalty term: β'Sβ (optimized dot product)
     let s_beta = penalty.dot(beta);
-    let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
-        .map(|(bi, sbi)| bi * sbi)
-        .sum();
+    let mut beta_s_beta = 0.0;
+    for i in 0..s_beta.len() {
+        beta_s_beta += beta[i] * s_beta[i];
+    }
 
     // Compute RSS + λβ'Sβ (this is what mgcv calls rss.bSb)
     let rss_bsb = rss + lambda * beta_s_beta;
@@ -158,7 +164,7 @@ pub fn gcv_criterion(
     let n = y.len();
     let p = x.ncols();
 
-    // Compute weighted design matrix
+    // Compute weighted design matrix (optimized)
     let mut x_weighted = x.clone();
     for i in 0..n {
         let weight_sqrt = w[i].sqrt();
@@ -170,26 +176,26 @@ pub fn gcv_criterion(
     // Solve for coefficients
     let xtw = x_weighted.t().to_owned();
     let xtwx = xtw.dot(&x_weighted);
-    let mut a = xtwx + &(penalty * lambda);
+    let a = xtwx + &(penalty * lambda);
 
-    let y_weighted: Array1<f64> = y.iter().zip(w.iter())
-        .map(|(yi, wi)| yi * wi)
-        .collect();
+    // Optimized y_weighted computation
+    let mut y_weighted = Array1::zeros(n);
+    for i in 0..n {
+        y_weighted[i] = y[i] * w[i];
+    }
 
     let b = xtw.dot(&y_weighted);
 
     let a_for_solve = a.clone();
     let beta = solve(a_for_solve, b)?;
 
-    // Compute fitted values and residuals
+    // Compute fitted values and residuals (optimized)
     let fitted = x.dot(&beta);
-    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
-        .map(|(yi, fi)| yi - fi)
-        .collect();
-
-    let rss: f64 = residuals.iter().zip(w.iter())
-        .map(|(r, wi)| r * r * wi)
-        .sum();
+    let mut rss = 0.0;
+    for i in 0..n {
+        let residual = y[i] - fitted[i];
+        rss += residual * residual * w[i];
+    }
 
     // Compute effective degrees of freedom (trace of influence matrix)
     // EDF = tr(H) where H = X(X'WX + λS)^(-1)X'W
