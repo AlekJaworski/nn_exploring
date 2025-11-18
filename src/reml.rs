@@ -510,16 +510,7 @@ pub fn reml_gradient_multi_qr(
     }
 
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-        eprintln!("[QR_DEBUG] Before QR: Z dimensions: {}×{}", z.nrows(), z.ncols());
-        eprintln!("[QR_DEBUG] Before QR: total_rows={}, n={}, p={}", total_rows, n, p);
-        // Check Z matrix for problematic columns at block boundaries
-        let block_cols = vec![0, 15, 16, 31, 32, 47, 48, 63];
-        for &j in &block_cols {
-            if j < p {
-                let col_norm: f64 = (0..total_rows).map(|i| z[[i, j]] * z[[i, j]]).sum::<f64>().sqrt();
-                eprintln!("[QR_DEBUG] Z column {} norm: {:.6e}", j, col_norm);
-            }
-        }
+        eprintln!("[QR_DEBUG] Before conditioning: Z dimensions: {}×{}", z.nrows(), z.ncols());
         // Find minimum column norm
         let min_col_norm = (0..p).map(|j| {
             (0..total_rows).map(|i| z[[i, j]] * z[[i, j]]).sum::<f64>().sqrt()
@@ -527,8 +518,32 @@ pub fn reml_gradient_multi_qr(
         eprintln!("[QR_DEBUG] Z minimum column norm: {:.6e}", min_col_norm);
     }
 
-    // QR decomposition: Z = QR
-    let (_, r) = z.qr()
+    // CRITICAL FIX: Add small diagonal ridge rows to improve conditioning
+    // This ensures R has no tiny diagonal elements by making Z full rank
+    let mut z_extended = Array2::<f64>::zeros((total_rows + p, p));
+
+    // Copy original Z
+    for i in 0..total_rows {
+        for j in 0..p {
+            z_extended[[i, j]] = z[[i, j]];
+        }
+    }
+
+    // Add small diagonal ridge rows at the bottom
+    // This is equivalent to adding λ·I to X'X + penalties
+    // Ridge should be comparable to typical column norms (~1)
+    let ridge_scale = 0.1; // Regularization to ensure full rank
+    for j in 0..p {
+        z_extended[[total_rows + j, j]] = ridge_scale;
+    }
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[QR_DEBUG] After conditioning: Z_extended dimensions: {}×{}", z_extended.nrows(), z_extended.ncols());
+        eprintln!("[QR_DEBUG] Added {} ridge rows with scale {:.6e}", p, ridge_scale);
+    }
+
+    // QR decomposition: Z_extended = QR
+    let (_, r) = z_extended.qr()
         .map_err(|e| GAMError::InvalidParameter(format!("QR decomposition failed: {:?}", e)))?;
 
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
@@ -626,11 +641,14 @@ pub fn reml_gradient_multi_qr(
         let block_size = block_info.block_size;
         let sqrt_pen_block = &block_info.sqrt_pen_block;
 
-        // Extract corresponding rows from P matrix
-        let mut p_block = Array2::<f64>::zeros((block_size, p));
-        for ii in 0..block_size {
-            for jj in 0..p {
-                p_block[[ii, jj]] = p_matrix[[block_start + ii, jj]];
+        // Extract corresponding COLUMNS from P matrix (not rows!)
+        // For tr(P'·S·P) where S has non-zero block at [block_start:block_end, block_start:block_end]:
+        // tr(P'·S·P) = tr(P'[:,block] · S_block · P[block,:])
+        //            = tr(P[:,block]' · S_block · P[:,block])  (since P is symmetric in this context)
+        let mut p_block = Array2::<f64>::zeros((p, block_size));
+        for ii in 0..p {
+            for jj in 0..block_size {
+                p_block[[ii, jj]] = p_matrix[[ii, block_start + jj]];
             }
         }
 
@@ -643,21 +661,28 @@ pub fn reml_gradient_multi_qr(
 
         // Compute tr(P'·S·P) where P is full matrix and S is block diagonal
         // Since S has non-zero block [block_start:block_end, block_start:block_end]:
-        // tr(P'·S·P) = tr(P[block,:] ' * S_block * P[block,:])
-        //            = tr(L' * P_block * P_block' * L) where L*L' = S_block
-        //            = ||L' * P_block||_F^2
-        let l_t_p_block = sqrt_pen_block.t().dot(&p_block);  // rank × p
+        // tr(P'·S·P) = tr(P[:,block]' · S_block · P[:,block])
+        //            = tr(P[:,block]' · L·L' · P[:,block]) where L*L' = S_block
+        //            = tr(L'·P[:,block] · P[:,block]'·L)
+        //            = ||L'·P[:,block]||_F^2
+        // sqrt_pen_block: block_size × rank, p_block: p × block_size
+        // So: sqrt_pen_block.t(): rank × block_size, p_block.t(): block_size × p
+        let l_t_p_block = sqrt_pen_block.t().dot(&p_block.t());  // rank × p
 
         // Compute Frobenius norm squared
-        let mut trace = 0.0;
+        let mut trace_unscaled = 0.0;
         for r in 0..l_t_p_block.nrows() {
             for k in 0..l_t_p_block.ncols() {
-                trace += l_t_p_block[[r, k]] * l_t_p_block[[r, k]];
+                trace_unscaled += l_t_p_block[[r, k]] * l_t_p_block[[r, k]];
             }
         }
 
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+            eprintln!("[QR_GRAD_DEBUG] penalty {}: trace_unscaled={:.6}, lambda={:.6}", i, trace_unscaled, lambda_i);
+        }
+
         // Scale by λ_i (derivative w.r.t. log(λ_i))
-        trace *= lambda_i;
+        let trace = trace_unscaled * lambda_i;
 
         // Compute penalty term: λᵢ·β'·Sᵢ·β
         let s_beta = penalty_i.dot(&beta);
