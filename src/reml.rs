@@ -531,8 +531,8 @@ pub fn reml_gradient_multi_qr(
 
     // Add small diagonal ridge rows at the bottom
     // This is equivalent to adding λ·I to X'X + penalties
-    // Ridge should be comparable to typical column norms (~1)
-    let ridge_scale = 0.1; // Regularization to ensure full rank
+    // Balance numerical stability vs gradient bias
+    let ridge_scale = 0.01; // Ridge to prevent singular R matrix
     for j in 0..p {
         z_extended[[total_rows + j, j]] = ridge_scale;
     }
