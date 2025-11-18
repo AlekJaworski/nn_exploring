@@ -190,7 +190,7 @@ impl SmoothingParameter {
 
         let mut prev_reml = f64::INFINITY;
 
-        for _iter in 0..max_iter {
+        for iter in 0..max_iter {
             // Current lambdas
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
@@ -209,11 +209,20 @@ impl SmoothingParameter {
                 f64::INFINITY
             };
 
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE] Newton iter {}: grad_norm={:.6}, REML={:.6}",
+                         iter + 1, grad_norm, current_reml);
+            }
+
             // Converged if either:
-            // 1. Gradient norm is small (gradient convergence)
+            // 1. Gradient norm is small (gradient convergence) - use R's threshold
             // 2. REML value change is tiny (value convergence)
-            if grad_norm < tolerance || reml_change < tolerance * 0.1 {
+            // R uses grad_norm < 0.01 based on profiling output
+            if grad_norm < 0.01 || reml_change < tolerance * 0.1 {
                 self.lambda = lambdas;
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Converged after {} iterations", iter + 1);
+                }
                 return Ok(());
             }
 
@@ -235,6 +244,11 @@ impl SmoothingParameter {
             let mut best_reml = current_reml;
             let mut best_step_scale = 0.0;
 
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE]   Line search: step_norm={:.6}, current_REML={:.6}",
+                         step_size, current_reml);
+            }
+
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
 
@@ -251,17 +265,27 @@ impl SmoothingParameter {
                 // Evaluate REML
                 match reml_criterion_multi(y, x, w, &new_lambdas, penalties, None) {
                     Ok(new_reml) => {
+                        if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
+                            eprintln!("[PROFILE]     half={}: scale={:.4}, REML={:.6}, improvement={}",
+                                     half, step_scale, new_reml, new_reml < best_reml);
+                        }
                         if new_reml < best_reml {
                             best_reml = new_reml;
                             best_step_scale = step_scale;
                         } else if best_step_scale > 0.0 {
                             // Found an improvement earlier, no further improvement now - stop
+                            if std::env::var("MGCV_PROFILE").is_ok() {
+                                eprintln!("[PROFILE]   Best step scale: {:.4}", best_step_scale);
+                            }
                             break;
                         }
                         // If no improvement yet (best_step_scale == 0), keep trying smaller steps
                     },
                     Err(_) => {
                         // Numerical issue - try smaller step
+                        if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
+                            eprintln!("[PROFILE]     half={}: ERROR (numerical issue)", half);
+                        }
                         continue;
                     }
                 }
@@ -280,6 +304,10 @@ impl SmoothingParameter {
 
         // Update final lambdas
         self.lambda = log_lambda.iter().map(|l| l.exp()).collect();
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Reached max iterations ({}) without convergence", max_iter);
+        }
 
         Ok(())
     }
