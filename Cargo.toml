@@ -13,7 +13,7 @@ approx = "0.5"
 thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
-ndarray-linalg = { version = "0.16", optional = true, features = ["openblas-system"] }
+ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-system"] }
 
 [features]
 default = []
@@ -36,3 +36,12 @@ strip = true               # Strip symbols for smaller binaries
 
 [profile.dev]
 opt-level = 1              # Some optimization in dev mode for faster iteration
+
+[[example]]
+name = "test_blas_api"
+path = "test_ndarray_linalg_api.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "bench_solve"
+path = "benches/bench_solve.rs"

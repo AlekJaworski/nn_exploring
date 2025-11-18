@@ -4,15 +4,22 @@ use ndarray::{Array1, Array2, s};
 use crate::{Result, GAMError};
 
 #[cfg(feature = "blas")]
-use ndarray_linalg::*;
+use ndarray_linalg::{Solve, Determinant, Inverse};
 
 /// Solve linear system Ax = b
-/// Uses BLAS/LAPACK when available, falls back to Gaussian elimination otherwise
+/// Uses BLAS/LAPACK when available for large matrices (n >= 1000)
+/// Falls back to Gaussian elimination for small matrices (BLAS overhead dominates for n < 1000)
 pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
     #[cfg(feature = "blas")]
     {
-        // Use BLAS/LAPACK for optimal performance
-        solve_blas(a, b)
+        let n = a.nrows();
+        // BLAS crossover point is around n=1000
+        // Below this, Gaussian elimination is faster due to BLAS overhead
+        if n >= 1000 {
+            solve_blas(a, b)
+        } else {
+            solve_gaussian(a, b)
+        }
     }
 
     #[cfg(not(feature = "blas"))]
@@ -32,41 +39,15 @@ fn solve_blas(a: Array2<f64>, b: Array1<f64>) -> Result<Array1<f64>> {
         ));
     }
 
-    // Check if matrix is symmetric (for Cholesky)
-    // This is common for X'WX + λS type matrices in GAM fitting
-    let is_symmetric = {
-        let mut sym = true;
-        for i in 0..n {
-            for j in (i+1)..n {
-                if (a[[i, j]] - a[[j, i]]).abs() > 1e-10 {
-                    sym = false;
-                    break;
-                }
-            }
-            if !sym { break; }
-        }
-        sym
-    };
-
-    if is_symmetric {
-        // Try Cholesky decomposition (fastest for SPD matrices)
-        match a.cholesky(ndarray_linalg::UPLO::Upper) {
-            Ok(chol) => {
-                return chol.solve_into(b)
-                    .map_err(|_| GAMError::SingularMatrix);
-            },
-            Err(_) => {
-                // Not positive definite, fall through to general solver
-            }
-        }
+    // Use general LU solver via Solve trait
+    // In ndarray-linalg 0.17, solve() works directly with 1D arrays
+    match Solve::solve(&a, &b) {
+        Ok(x) => Ok(x),
+        Err(_) => Err(GAMError::SingularMatrix)
     }
-
-    // Use general LU solver
-    a.solve_into(b)
-        .map_err(|_| GAMError::SingularMatrix)
 }
 
-#[cfg(not(feature = "blas"))]
+// Always available for hybrid BLAS approach (used for small matrices even when BLAS is enabled)
 fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
     let n = a.nrows();
 
@@ -137,11 +118,16 @@ fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>>
 }
 
 /// Compute matrix determinant
-/// Uses BLAS/LAPACK when available, falls back to LU decomposition otherwise
+/// Uses BLAS/LAPACK for large matrices (n >= 1000), LU decomposition for small matrices
 pub fn determinant(a: &Array2<f64>) -> Result<f64> {
     #[cfg(feature = "blas")]
     {
-        determinant_blas(a)
+        let n = a.nrows();
+        if n >= 1000 {
+            determinant_blas(a)
+        } else {
+            determinant_lu(a)
+        }
     }
 
     #[cfg(not(feature = "blas"))]
@@ -159,11 +145,11 @@ fn determinant_blas(a: &Array2<f64>) -> Result<f64> {
         ));
     }
 
-    a.det()
+    Determinant::det(&a.to_owned())
         .map_err(|_| GAMError::SingularMatrix)
 }
 
-#[cfg(not(feature = "blas"))]
+// Always available for hybrid BLAS approach
 fn determinant_lu(a: &Array2<f64>) -> Result<f64> {
     let n = a.nrows();
     if a.ncols() != n {
@@ -230,11 +216,16 @@ fn determinant_lu(a: &Array2<f64>) -> Result<f64> {
 }
 
 /// Compute matrix inverse
-/// Uses BLAS/LAPACK when available, falls back to Gauss-Jordan elimination otherwise
+/// Uses BLAS/LAPACK for large matrices (n >= 1000), Gauss-Jordan for small matrices
 pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
     #[cfg(feature = "blas")]
     {
-        inverse_blas(a)
+        let n = a.nrows();
+        if n >= 1000 {
+            inverse_blas(a)
+        } else {
+            inverse_gauss_jordan(a)
+        }
     }
 
     #[cfg(not(feature = "blas"))]
@@ -252,11 +243,11 @@ fn inverse_blas(a: &Array2<f64>) -> Result<Array2<f64>> {
         ));
     }
 
-    a.inv()
+    Inverse::inv(&a.to_owned())
         .map_err(|_| GAMError::SingularMatrix)
 }
 
-#[cfg(not(feature = "blas"))]
+// Always available for hybrid BLAS approach
 fn inverse_gauss_jordan(a: &Array2<f64>) -> Result<Array2<f64>> {
     let n = a.nrows();
     if a.ncols() != n {
