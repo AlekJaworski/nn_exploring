@@ -212,27 +212,35 @@ impl SmoothingParameter {
             let min_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(f64::INFINITY, f64::min);
             let max_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(0.0f64, f64::max);
 
-            // Add small ridge for numerical stability
-            // Increase slightly in later iterations when Hessian gets more ill-conditioned
-            let ridge = if iter < 5 {
-                1e-8 * max_diag_orig.max(1.0)
-            } else if min_diag_orig <= 0.0 || min_diag_orig < max_diag_orig * 1e-6 {
-                // More aggressive ridge if clearly ill-conditioned
-                (1e-6 + (iter - 5) as f64 * 1e-7) * max_diag_orig.max(1.0)
-            } else {
-                // Gentle ridge in later iterations
-                (iter - 4) as f64 * 1e-8 * max_diag_orig.max(1.0)
-            };
+            // CRITICAL: Diagonal preconditioning like mgcv (fast-REML.r)
+            // This handles ill-conditioning from vastly different smoothing parameter scales
+            // Transform: H_new = D^-1 * H * D^-1 where D = diag(sqrt(diag(H)))
 
-            if ridge > 1e-10 * max_diag_orig {
-                if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE]   Adding ridge={:.6e} (iter={}, min/max_diag={:.6}/{:.6})",
-                             ridge, iter, min_diag_orig, max_diag_orig);
-                }
+            let mut diag_precond = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                let d = hessian[[i, i]];
+                // If diagonal is negative or tiny, use 1.0 (don't precondition that component)
+                diag_precond[i] = if d > 1e-10 { d.sqrt() } else { 1.0 };
+            }
 
-                for i in 0..m {
-                    hessian[[i, i]] += ridge;
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                let cond_est = max_diag_orig / min_diag_orig.max(1e-10);
+                eprintln!("[PROFILE]   Hessian diag range: [{:.6e}, {:.6e}], condition: {:.2e}",
+                         min_diag_orig, max_diag_orig, cond_est);
+                eprintln!("[PROFILE]   Preconditioner: {:?}", diag_precond.as_slice().unwrap_or(&[]));
+            }
+
+            // Apply preconditioning to Hessian: H_ij = H_ij / (d_i * d_j)
+            for i in 0..m {
+                for j in 0..m {
+                    hessian[[i, j]] /= diag_precond[i] * diag_precond[j];
                 }
+            }
+
+            // Add small ridge for numerical stability (after preconditioning)
+            let ridge = 1e-7;
+            for i in 0..m {
+                hessian[[i, i]] += ridge;
             }
 
             // Check for convergence using multiple criteria
@@ -267,7 +275,23 @@ impl SmoothingParameter {
             prev_reml = current_reml;
 
             // Compute Newton step: step = -H^(-1) · g
-            let mut step = solve(hessian.clone(), -gradient)?;
+            // With preconditioning: solve (D^-1 H D^-1) step_precond = -(D^-1 g)
+            // Then back-transform: step = D^-1 step_precond
+
+            // Precondition gradient: g_precond = D^-1 * g
+            let mut gradient_precond = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                gradient_precond[i] = gradient[i] / diag_precond[i];
+            }
+
+            // Solve preconditioned system
+            let step_precond = solve(hessian.clone(), -gradient_precond)?;
+
+            // Back-transform: step = D^-1 * step_precond
+            let mut step = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                step[i] = step_precond[i] / diag_precond[i];
+            }
 
             // Limit step size (Wood 2011: max step = 4-5 in log space)
             let step_size: f64 = step.iter().map(|s| s * s).sum::<f64>().sqrt();

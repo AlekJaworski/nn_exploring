@@ -446,8 +446,14 @@ pub fn reml_gradient_multi(
         let rank_i = estimate_rank(penalty_i);
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            eprintln!("[GRAD_DEBUG] ALL lambdas: {:?}", lambdas);
             eprintln!("[GRAD_DEBUG] penalty matrix size: {}x{}, estimated rank: {}",
                      penalty_i.nrows(), penalty_i.ncols(), rank_i);
+
+            // Check A and A_inv
+            let a_max = a_inv.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+            let a_trace = (0..p).map(|j| a_inv[[j,j]]).sum::<f64>();
+            eprintln!("[GRAD_DEBUG] A_inv: max_element={:.6e}, trace={:.6}", a_max, a_trace);
         }
 
         // Term 1: tr(A⁻¹·λᵢ·Sᵢ)
@@ -456,6 +462,12 @@ pub fn reml_gradient_multi(
         let mut trace = 0.0;
         for j in 0..p {
             trace += temp[[j, j]];
+        }
+
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            // Also compute trace a different way to verify
+            let temp_max = temp.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+            eprintln!("[GRAD_DEBUG] A^(-1)*lambda*S: trace={:.6}, max_element={:.6e}", trace, temp_max);
         }
 
         // Term 2: λᵢ·β'·Sᵢ·β
