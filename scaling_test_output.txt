@@ -1,0 +1,175 @@
+✓ mgcv_rust available
+======================================================================
+MULTIDIMENSIONAL GAM SCALING TEST
+======================================================================
+
+Configuration:
+  Sample sizes: [500, 1500, 2500, 5000]
+  Basis functions: k=16 per dimension
+  Dimensions: 4
+  Iterations per size: 10
+
+======================================================================
+SCALING TEST: k=16 basis functions per dimension
+======================================================================
+
+
+======================================================================
+Sample size: n=500
+======================================================================
+Warming up...
+Running 10 iterations for timing...
+  5/10 complete...
+  10/10 complete...
+
+Results for n=500:
+  Timing:
+    Mean:    324.55 ms
+    Std:       5.42 ms
+    Min:     312.98 ms
+    Max:     332.02 ms
+  Accuracy:
+    RMSE (vs data):  0.1916
+    RMSE (vs truth): 0.0351
+    R²:              0.9430
+  Model:
+    Deviance: 18.36
+    Lambdas:  [29.5911, 4921.8843, 9795.1712, 7921.2379]
+
+======================================================================
+Sample size: n=1500
+======================================================================
+Warming up...
+Running 10 iterations for timing...
+  5/10 complete...
+  10/10 complete...
+
+Results for n=1500:
+  Timing:
+    Mean:    908.94 ms
+    Std:      28.12 ms
+    Min:     867.95 ms
+    Max:     947.93 ms
+  Accuracy:
+    RMSE (vs data):  0.1994
+    RMSE (vs truth): 0.0220
+    R²:              0.9392
+  Model:
+    Deviance: 59.62
+    Lambdas:  [35.9019, 4177.0273, 25439.0426, 23505.6921]
+
+======================================================================
+Sample size: n=2500
+======================================================================
+Warming up...
+Running 10 iterations for timing...
+  5/10 complete...
+  10/10 complete...
+
+Results for n=2500:
+  Timing:
+    Mean:   1440.99 ms
+    Std:      61.00 ms
+    Min:    1363.13 ms
+    Max:    1554.74 ms
+  Accuracy:
+    RMSE (vs data):  0.1963
+    RMSE (vs truth): 0.0193
+    R²:              0.9391
+  Model:
+    Deviance: 96.29
+    Lambdas:  [37.7803, 5684.0775, 37419.7345, 35921.0625]
+
+======================================================================
+Sample size: n=5000
+======================================================================
+Warming up...
+Running 10 iterations for timing...
+  5/10 complete...
+  10/10 complete...
+
+Results for n=5000:
+  Timing:
+    Mean:   1957.81 ms
+    Std:      39.74 ms
+    Min:    1894.44 ms
+    Max:    2025.38 ms
+  Accuracy:
+    RMSE (vs data):  0.1999
+    RMSE (vs truth): 0.0157
+    R²:              0.9357
+  Model:
+    Deviance: 199.78
+    Lambdas:  [48.4343, 2861.2004, 67651.1455, 69176.0887]
+
+======================================================================
+SCALING ANALYSIS
+======================================================================
+
+Time complexity: T ≈ 2.42 * n^0.80
+(Theoretical for dense matrices: n^3)
+
+Time per sample:
+  n=  500:  0.6491 ms/sample
+  n= 1500:  0.6060 ms/sample
+  n= 2500:  0.5764 ms/sample
+  n= 5000:  0.3916 ms/sample
+
+Accuracy vs sample size:
+  n=  500: RMSE=0.0351, R²=0.9430
+  n= 1500: RMSE=0.0220, R²=0.9392
+  n= 2500: RMSE=0.0193, R²=0.9391
+  n= 5000: RMSE=0.0157, R²=0.9357
+
+Lambda estimates (should be similar across sample sizes):
+  n=  500: [29.5911, 4921.8843, 9795.1712, 7921.2379]
+  n= 1500: [35.9019, 4177.0273, 25439.0426, 23505.6921]
+  n= 2500: [37.7803, 5684.0775, 37419.7345, 35921.0625]
+  n= 5000: [48.4343, 2861.2004, 67651.1455, 69176.0887]
+
+======================================================================
+Creating visualizations...
+======================================================================
+✓ Saved visualization to scaling_test_results.png
+
+======================================================================
+COMPREHENSIVE REPORT
+======================================================================
+
+Test Configuration:
+  Basis functions: k=16 per dimension
+  Dimensions: 4
+  Sample sizes: [500, 1500, 2500, 5000]
+  Iterations per size: 10
+
+Performance Summary:
+       n     Time (ms)    Std (ms)     ms/sample
+  ------  ------------  ----------  ------------
+     500        324.55        5.42        0.6491
+    1500        908.94       28.12        0.6060
+    2500       1440.99       61.00        0.5764
+    5000       1957.81       39.74        0.3916
+
+Scaling Ratios:
+  n=500 → n=1500: 2.80x time for 3.00x data
+  n=1500 → n=2500: 1.59x time for 1.67x data
+  n=2500 → n=5000: 1.36x time for 2.00x data
+
+Accuracy Summary:
+       n   RMSE (pred)   RMSE (true)        R²
+  ------  ------------  ------------  --------
+     500        0.1916        0.0351    0.9430
+    1500        0.1994        0.0220    0.9392
+    2500        0.1963        0.0193    0.9391
+    5000        0.1999        0.0157    0.9357
+
+Key Findings:
+  Best R²: 0.9430 at n=500
+  Most efficient: 0.3916 ms/sample at n=5000
+  Empirical complexity: O(n^0.80)
+
+======================================================================
+TEST COMPLETE
+======================================================================
+
+✓ Results saved to scaling_test_results.png
