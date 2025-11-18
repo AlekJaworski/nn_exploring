@@ -254,20 +254,31 @@ impl SmoothingParameter {
             };
 
             if std::env::var("MGCV_PROFILE").is_ok() {
-                eprintln!("[PROFILE] Newton iter {}: grad_L2={:.6}, grad_Linf={:.6}, REML={:.6}",
-                         iter + 1, grad_norm_l2, grad_norm_linf, current_reml);
+                eprintln!("[PROFILE] Newton iter {}: grad_L2={:.6}, grad_Linf={:.6}, REML={:.6}, REML_change={:.6e}",
+                         iter + 1, grad_norm_l2, grad_norm_linf, current_reml, reml_change);
                 eprintln!("[PROFILE]   lambda={:?}", lambdas);
                 eprintln!("[PROFILE]   log_lambda={:?}", log_lambda);
                 eprintln!("[PROFILE]   gradient={:?}", gradient.as_slice().unwrap_or(&[]));
             }
 
-            // Converged if gradient L-infinity norm is small
-            // Don't use REML change alone - can stop in flat regions before true optimum
-            // mgcv uses max(abs(gradient)) < tolerance (typically 1e-7 or adaptive)
+            // Converged if EITHER:
+            // 1. Gradient L-infinity norm is small (gradient convergence)
+            // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
+            // mgcv uses both criteria to handle different convergence scenarios
             if grad_norm_linf < 0.01 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] Converged after {} iterations", iter + 1);
+                    eprintln!("[PROFILE] Converged after {} iterations (gradient criterion)", iter + 1);
+                }
+                return Ok(());
+            }
+
+            // REML change convergence: handles asymptotic cases (e.g., linear smooths with λ→∞)
+            if iter > 5 && reml_change < tolerance * 0.1 {
+                self.lambda = lambdas;
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Converged after {} iterations (REML change criterion: {:.2e} < {:.2e})",
+                             iter + 1, reml_change, tolerance * 0.1);
                 }
                 return Ok(());
             }
