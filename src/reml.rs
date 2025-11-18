@@ -423,21 +423,62 @@ pub fn reml_gradient_multi_qr(
         }
     }
 
-    // Compute square root penalties and their ranks
-    let mut sqrt_penalties = Vec::new();
+    // Extract non-zero blocks from penalties, compute square roots, and track block positions
+    struct PenaltyBlockInfo {
+        sqrt_pen_block: Array2<f64>,  // block_size × rank
+        block_start: usize,
+        block_size: usize,
+        rank: usize,
+    }
+
+    let mut penalty_blocks = Vec::new();
     let mut penalty_ranks = Vec::new();
+
     for penalty in penalties.iter() {
-        let sqrt_pen = penalty_sqrt(penalty)?;
-        let rank = estimate_rank(penalty);
-        sqrt_penalties.push(sqrt_pen);
+        // Find non-zero block
+        let mut block_start = 0;
+        let mut block_end = p;
+        let mut found_start = false;
+
+        for row in 0..p {
+            let row_sum: f64 = (0..p).map(|col| penalty[[row, col]].abs()).sum();
+            if row_sum > 1e-10 {
+                if !found_start {
+                    block_start = row;
+                    found_start = true;
+                }
+                block_end = row + 1;
+            }
+        }
+
+        let block_size = block_end - block_start;
+
+        // Extract the non-zero block
+        let mut penalty_block = Array2::<f64>::zeros((block_size, block_size));
+        for ii in 0..block_size {
+            for jj in 0..block_size {
+                penalty_block[[ii, jj]] = penalty[[block_start + ii, block_start + jj]];
+            }
+        }
+
+        // Compute square root of the block only
+        let sqrt_pen_block = penalty_sqrt(&penalty_block)?;
+        let rank = estimate_rank(&penalty_block);
+
+        penalty_blocks.push(PenaltyBlockInfo {
+            sqrt_pen_block,
+            block_start,
+            block_size,
+            rank,
+        });
         penalty_ranks.push(rank);
     }
 
     // Build augmented matrix Z = [sqrt(W)X; sqrt(λ_0)L_0'; sqrt(λ_1)L_1'; ...]
     // Determine total rows (n + sum of ranks)
     let mut total_rows = n;
-    for sqrt_pen in sqrt_penalties.iter() {
-        total_rows += sqrt_pen.ncols();  // Number of columns = rank
+    for block_info in penalty_blocks.iter() {
+        total_rows += block_info.rank;
     }
 
     let mut z = Array2::<f64>::zeros((total_rows, p));
@@ -449,18 +490,41 @@ pub fn reml_gradient_multi_qr(
         }
     }
 
-    // Fill in scaled square root penalties (transposed)
-    // sqrt_pen is p × rank, we need rank × p for augmented matrix
+    // Fill in scaled square root penalty blocks
     let mut row_offset = n;
-    for (sqrt_pen, &lambda) in sqrt_penalties.iter().zip(lambdas.iter()) {
+    for (block_info, &lambda) in penalty_blocks.iter().zip(lambdas.iter()) {
         let sqrt_lambda = lambda.sqrt();
-        let rank = sqrt_pen.ncols();  // Number of non-zero eigenvalues
+        let rank = block_info.rank;
+        let block_start = block_info.block_start;
+        let block_size = block_info.block_size;
+
+        // Add sqrt(λ)·L' where L is from the block
+        // sqrt_pen_block is block_size × rank
+        // We need to place this in the correct columns of Z
         for i in 0..rank {
-            for j in 0..p {
-                z[[row_offset + i, j]] = sqrt_lambda * sqrt_pen[[j, i]];  // Transpose!
+            for j in 0..block_size {
+                z[[row_offset + i, block_start + j]] = sqrt_lambda * block_info.sqrt_pen_block[[j, i]];
             }
         }
         row_offset += rank;
+    }
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[QR_DEBUG] Before QR: Z dimensions: {}×{}", z.nrows(), z.ncols());
+        eprintln!("[QR_DEBUG] Before QR: total_rows={}, n={}, p={}", total_rows, n, p);
+        // Check Z matrix for problematic columns at block boundaries
+        let block_cols = vec![0, 15, 16, 31, 32, 47, 48, 63];
+        for &j in &block_cols {
+            if j < p {
+                let col_norm: f64 = (0..total_rows).map(|i| z[[i, j]] * z[[i, j]]).sum::<f64>().sqrt();
+                eprintln!("[QR_DEBUG] Z column {} norm: {:.6e}", j, col_norm);
+            }
+        }
+        // Find minimum column norm
+        let min_col_norm = (0..p).map(|j| {
+            (0..total_rows).map(|i| z[[i, j]] * z[[i, j]]).sum::<f64>().sqrt()
+        }).fold(f64::INFINITY, f64::min);
+        eprintln!("[QR_DEBUG] Z minimum column norm: {:.6e}", min_col_norm);
     }
 
     // QR decomposition: Z = QR
@@ -468,9 +532,7 @@ pub fn reml_gradient_multi_qr(
         .map_err(|e| GAMError::InvalidParameter(format!("QR decomposition failed: {:?}", e)))?;
 
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-        eprintln!("[QR_DEBUG] Z dimensions: {}×{}", z.nrows(), z.ncols());
-        eprintln!("[QR_DEBUG] R dimensions: {}×{}", r.nrows(), r.ncols());
-        eprintln!("[QR_DEBUG] total_rows={}, n={}, p={}", total_rows, n, p);
+        eprintln!("[QR_DEBUG] After QR: R dimensions: {}×{}", r.nrows(), r.ncols());
     }
 
     // Extract upper triangular part (first p rows)
@@ -486,11 +548,26 @@ pub fn reml_gradient_multi_qr(
         let rtr = r_upper.t().dot(&r_upper);
         eprintln!("[QR_DEBUG] R'R diagonal: [{:.6}, {:.6}, ..., {:.6}]",
                  rtr[[0,0]], rtr[[1,1]], rtr[[p-1,p-1]]);
+        eprintln!("[QR_DEBUG] r_upper diagonal: [{:.6}, {:.6}, ..., {:.6}]",
+                 r_upper[[0,0]], r_upper[[1,1]], r_upper[[p-1,p-1]]);
+        // Check for small diagonal elements
+        let min_diag = (0..p).map(|i| r_upper[[i,i]].abs()).fold(f64::INFINITY, f64::min);
+        let max_diag = (0..p).map(|i| r_upper[[i,i]].abs()).fold(0.0, f64::max);
+        eprintln!("[QR_DEBUG] r_upper diagonal range: [{:.6e}, {:.6e}]", min_diag, max_diag);
     }
 
     // Compute P = R^{-1}
     let p_matrix = r_upper.inv()
         .map_err(|e| GAMError::InvalidParameter(format!("Matrix inversion failed: {:?}", e)))?;
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        let p_frob: f64 = p_matrix.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        let r_frob: f64 = r_upper.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        eprintln!("[QR_DEBUG] r_upper Frobenius norm: {:.6}", r_frob);
+        eprintln!("[QR_DEBUG] p_matrix Frobenius norm: {:.6}", p_frob);
+        eprintln!("[QR_DEBUG] p_matrix diagonal: [{:.6}, {:.6}, ..., {:.6}]",
+                 p_matrix[[0,0]], p_matrix[[1,1]], p_matrix[[p-1,p-1]]);
+    }
 
     // Compute coefficients for penalty term
     let xtw = sqrt_w_x.t().to_owned();
@@ -534,52 +611,22 @@ pub fn reml_gradient_multi_qr(
         let lambda_i = lambdas[i];
         let penalty_i = &penalties[i];
         let rank_i = penalty_ranks[i];
-        let sqrt_pen_i = &sqrt_penalties[i];
+        let block_info = &penalty_blocks[i];
 
         eprintln!("[QR_GRAD_DEBUG] UNCONDITIONAL: Computing gradient for penalty {}", i);
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
             eprintln!("[QR_GRAD_DEBUG] Starting penalty {} gradient computation", i);
+            eprintln!("[QR_GRAD_DEBUG] Using block: start={}, size={}, rank={}",
+                     block_info.block_start, block_info.block_size, block_info.rank);
         }
 
-        // CRITICAL FIX: Extract non-zero block from block-diagonal penalty
-        // Our penalties are p×p but only a block is non-zero
-        // We need to find that block and use only the corresponding rows of P
+        // Use the pre-computed block information
+        let block_start = block_info.block_start;
+        let block_size = block_info.block_size;
+        let sqrt_pen_block = &block_info.sqrt_pen_block;
 
-        // Find the non-zero block by checking row sums
-        let mut block_start = 0;
-        let mut block_end = p;
-        let mut found_start = false;
-
-        for row in 0..p {
-            let row_sum: f64 = (0..p).map(|col| penalty_i[[row, col]].abs()).sum();
-            if row_sum > 1e-10 {
-                if !found_start {
-                    block_start = row;
-                    found_start = true;
-                }
-                block_end = row + 1;
-            }
-        }
-
-        let block_size = block_end - block_start;
-
-        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
-            eprintln!("[QR_GRAD_DEBUG] Found block: start={}, end={}, size={}", block_start, block_end, block_size);
-        }
-
-        // Extract the non-zero block from the penalty
-        let mut penalty_block = Array2::<f64>::zeros((block_size, block_size));
-        for ii in 0..block_size {
-            for jj in 0..block_size {
-                penalty_block[[ii, jj]] = penalty_i[[block_start + ii, block_start + jj]];
-            }
-        }
-
-        // Compute square root of the block
-        let sqrt_pen_block = penalty_sqrt(&penalty_block)?;
-
-        // Extract corresponding rows AND columns from P matrix
+        // Extract corresponding rows from P matrix
         let mut p_block = Array2::<f64>::zeros((block_size, p));
         for ii in 0..block_size {
             for jj in 0..p {
@@ -588,11 +635,8 @@ pub fn reml_gradient_multi_qr(
         }
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
-            let pen_trace: f64 = (0..block_size).map(|i| penalty_block[[i, i]]).sum();
-            let pen_frob: f64 = penalty_block.iter().map(|&x| x * x).sum::<f64>().sqrt();
             let sqrt_pen_frob: f64 = sqrt_pen_block.iter().map(|&x| x * x).sum::<f64>().sqrt();
             let p_block_frob: f64 = p_block.iter().map(|&x| x * x).sum::<f64>().sqrt();
-            eprintln!("[QR_GRAD_DEBUG] penalty_block trace={:.6}, frob_norm={:.6}", pen_trace, pen_frob);
             eprintln!("[QR_GRAD_DEBUG] sqrt_pen_block shape={}x{}, frob={:.6}", sqrt_pen_block.nrows(), sqrt_pen_block.ncols(), sqrt_pen_frob);
             eprintln!("[QR_GRAD_DEBUG] p_block shape={}x{}, frob={:.6}", p_block.nrows(), p_block.ncols(), p_block_frob);
         }
