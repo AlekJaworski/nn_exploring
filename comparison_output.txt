@@ -1,0 +1,127 @@
+✓ mgcv_rust available
+======================================================================
+MGCV_RUST vs R'S MGCV - PERFORMANCE COMPARISON
+======================================================================
+
+Configuration:
+  Sample sizes: [500, 1500, 2500, 5000]
+  Basis functions: k=16 per dimension
+  Dimensions: 4
+  Iterations: 10
+
+
+======================================================================
+Sample size: n=500
+======================================================================
+  Benchmarking mgcv_rust...
+  Benchmarking R's mgcv...
+
+  Comparison:
+    R mgcv:       192.88 ±  5.72 ms
+    mgcv_rust:    130.21 ±  6.41 ms
+    Speedup:     1.48x (Rust faster)
+
+    Prediction correlation: 0.99989023
+    Prediction RMSE diff:   0.01152379
+
+    Rust RMSE (vs truth): 0.035149
+    R RMSE (vs truth):    0.032551
+
+    Lambda comparison:
+      x1: R=     22.23, Rust=     29.59, ratio=1.331
+      x2: R=   2815.75, Rust=   4921.88, ratio=1.748
+      x3: R=534422741.74, Rust=   9795.17, ratio=0.000
+      x4: R=  28192.80, Rust=   7921.24, ratio=0.281
+
+======================================================================
+Sample size: n=1500
+======================================================================
+  Benchmarking mgcv_rust...
+  Benchmarking R's mgcv...
+
+  Comparison:
+    R mgcv:       605.04 ± 40.43 ms
+    mgcv_rust:    587.88 ± 213.05 ms
+    Speedup:     1.03x (Rust faster)
+
+    Prediction correlation: 0.99998481
+    Prediction RMSE diff:   0.00431867
+
+    Rust RMSE (vs truth): 0.022031
+    R RMSE (vs truth):    0.021525
+
+    Lambda comparison:
+      x1: R=     28.84, Rust=     35.90, ratio=1.245
+      x2: R=   2619.53, Rust=   4177.03, ratio=1.595
+      x3: R=  72405.20, Rust=  25439.04, ratio=0.351
+      x4: R=614589727.08, Rust=  23505.69, ratio=0.000
+
+======================================================================
+Sample size: n=2500
+======================================================================
+  Benchmarking mgcv_rust...
+  Benchmarking R's mgcv...
+
+  Comparison:
+    R mgcv:       607.84 ± 43.85 ms
+    mgcv_rust:   1458.24 ± 33.84 ms
+    Speedup:     0.42x (R faster)
+
+    Prediction correlation: 0.99998935
+    Prediction RMSE diff:   0.00355528
+
+    Rust RMSE (vs truth): 0.019310
+    R RMSE (vs truth):    0.018306
+
+    Lambda comparison:
+      x1: R=     31.15, Rust=     37.78, ratio=1.213
+      x2: R=   3655.03, Rust=   5684.08, ratio=1.555
+      x3: R= 336483.75, Rust=  37419.73, ratio=0.111
+      x4: R= 141647.11, Rust=  35921.06, ratio=0.254
+
+======================================================================
+Sample size: n=5000
+======================================================================
+  Benchmarking mgcv_rust...
+  Benchmarking R's mgcv...
+
+  Comparison:
+    R mgcv:      1945.54 ± 85.32 ms
+    mgcv_rust:   1909.80 ± 32.96 ms
+    Speedup:     1.02x (Rust faster)
+
+    Prediction correlation: 0.99999519
+    Prediction RMSE diff:   0.00236632
+
+    Rust RMSE (vs truth): 0.015695
+    R RMSE (vs truth):    0.016071
+
+    Lambda comparison:
+      x1: R=     41.20, Rust=     48.43, ratio=1.176
+      x2: R=   1711.89, Rust=   2861.20, ratio=1.671
+      x3: R=1541557874.72, Rust=  67651.15, ratio=0.000
+      x4: R=3109375299.61, Rust=  69176.09, ratio=0.000
+
+======================================================================
+DETAILED COMPARISON REPORT
+======================================================================
+
+     n      R (ms)   Rust (ms)     Speedup           Status
+----------------------------------------------------------------------
+   500      192.88      130.21        1.48   ✓ 1.48x faster
+  1500      605.04      587.88        1.03   ✓ 1.03x faster
+  2500      607.84     1458.24        0.42   ✗ 2.40x slower
+  5000     1945.54     1909.80        1.02   ✓ 1.02x faster
+
+======================================================================
+SUMMARY
+======================================================================
+  Average speedup:           0.99x
+  Average correlation:       0.99996489
+
+  ✗ mgcv_rust is 1.01x SLOWER than R's mgcv on average
+
+  📊 Performance Gap Analysis:
+     Current gap: 1.4% slower
+     Estimated with BLAS: 3-5x faster than current
+     Projected speedup vs R: 3.0-4.9x

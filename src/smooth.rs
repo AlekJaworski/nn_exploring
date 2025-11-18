@@ -2,7 +2,7 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_hessian_multi};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_hessian_multi};
 use crate::linalg::solve;
 
 /// Smoothing parameter optimization method
@@ -23,12 +23,12 @@ impl SmoothingParameter {
     /// Create new smoothing parameters with initial values
     pub fn new(num_smooths: usize, method: OptimizationMethod) -> Self {
         Self {
-            lambda: vec![0.1; num_smooths],  // Better starting point than 1.0
+            lambda: vec![0.1; num_smooths],  // Will be refined in optimize()
             method,
         }
     }
 
-    /// Optimize smoothing parameters using REML or GCV
+    /// Optimize smoothing parameters using REML or GCV with adaptive initialization
     pub fn optimize(
         &mut self,
         y: &Array1<f64>,
@@ -44,6 +44,10 @@ impl SmoothingParameter {
             ));
         }
 
+        // Adaptive initialization: lambda_i = 0.1 * trace(S_i) / trace(X'WX)
+        // This scales initialization based on problem characteristics
+        self.initialize_lambda_adaptive(x, w, penalties);
+
         match self.method {
             OptimizationMethod::REML => {
                 self.optimize_reml(y, x, w, penalties, max_iter, tolerance)
@@ -51,6 +55,52 @@ impl SmoothingParameter {
             OptimizationMethod::GCV => {
                 self.optimize_gcv(y, x, w, penalties, max_iter, tolerance)
             },
+        }
+    }
+
+    /// Initialize lambda values adaptively based on penalty and design matrix scales
+    fn initialize_lambda_adaptive(
+        &mut self,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[Array2<f64>],
+    ) {
+        let n = x.nrows();
+        let p = x.ncols();
+
+        // Compute trace(X'WX) as reference scale
+        let mut xtwx_trace = 0.0;
+        for j in 0..p {
+            let mut col_weighted_sq = 0.0;
+            for i in 0..n {
+                col_weighted_sq += x[[i, j]] * x[[i, j]] * w[i];
+            }
+            xtwx_trace += col_weighted_sq;
+        }
+
+        // Fallback if matrix is degenerate
+        if xtwx_trace < 1e-10 {
+            xtwx_trace = 1.0;
+        }
+
+        // Initialize each lambda based on its penalty matrix scale
+        for (i, penalty) in penalties.iter().enumerate() {
+            let mut penalty_trace = 0.0;
+            let penalty_size = penalty.nrows().min(penalty.ncols());
+            for j in 0..penalty_size {
+                penalty_trace += penalty[[j, j]];
+            }
+
+            // R's mgcv heuristic: lambda ~ 0.1 * trace(S) / trace(X'WX)
+            // This ensures lambdas are scaled appropriately for the problem
+            if penalty_trace > 1e-10 {
+                self.lambda[i] = 0.1 * penalty_trace / xtwx_trace;
+            } else {
+                self.lambda[i] = 0.1;  // Fallback for near-zero penalty
+            }
+
+            // Clamp to reasonable range [1e-6, 1e6]
+            self.lambda[i] = self.lambda[i].max(1e-6).min(1e6);
         }
     }
 
@@ -135,26 +185,128 @@ impl SmoothingParameter {
             .map(|l| l.ln())
             .collect();
 
-        let max_step = 4.0;  // Maximum step size in log space (Wood 2011)
-        let max_half = 30;   // Maximum step halvings
+        // Maximum step size in log space (following Wood 2011 and mgcv)
+        // This prevents overly aggressive Newton steps that require excessive backtracking
+        // max_step=4 means we clamp λ_new/λ_old to [e^-4, e^4] = [0.018, 54.6]
+        let max_step = 4.0;    // Conservative step size to match mgcv
+        let max_half = 30;     // Maximum step halvings
+
+        let mut prev_reml = f64::INFINITY;
 
         for iter in 0..max_iter {
             // Current lambdas
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
-            // Compute gradient and Hessian
-            let gradient = reml_gradient_multi(y, x, w, &lambdas, penalties)?;
-            let hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+            // Compute current REML value for convergence check
+            let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
 
-            // Check for convergence
-            let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-            if grad_norm < tolerance {
+            // Compute gradient and Hessian
+            // Use QR-based gradient computation to match mgcv and avoid cross-coupling issues
+            let gradient = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
+            let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+
+            // ===================================================================
+            // CRITICAL: Condition Hessian like mgcv to ensure stable convergence
+            // ===================================================================
+            // mgcv uses ridge regularization + diagonal preconditioning
+            // This prevents ill-conditioning that causes tiny steps in late iterations
+
+            // 1. Add adaptive ridge FIRST (before preconditioning)
+            //    Ridge increases with iteration to handle increasing ill-conditioning
+            let min_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(f64::INFINITY, f64::min);
+            let max_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(0.0f64, f64::max);
+
+            // CRITICAL: Diagonal preconditioning like mgcv (fast-REML.r)
+            // This handles ill-conditioning from vastly different smoothing parameter scales
+            // Transform: H_new = D^-1 * H * D^-1 where D = diag(sqrt(diag(H)))
+
+            let mut diag_precond = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                let d = hessian[[i, i]];
+                // If diagonal is negative or tiny, use 1.0 (don't precondition that component)
+                diag_precond[i] = if d > 1e-10 { d.sqrt() } else { 1.0 };
+            }
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                let cond_est = max_diag_orig / min_diag_orig.max(1e-10);
+                eprintln!("[PROFILE]   Hessian diag range: [{:.6e}, {:.6e}], condition: {:.2e}",
+                         min_diag_orig, max_diag_orig, cond_est);
+                eprintln!("[PROFILE]   Preconditioner: {:?}", diag_precond.as_slice().unwrap_or(&[]));
+            }
+
+            // Apply preconditioning to Hessian: H_ij = H_ij / (d_i * d_j)
+            for i in 0..m {
+                for j in 0..m {
+                    hessian[[i, j]] /= diag_precond[i] * diag_precond[j];
+                }
+            }
+
+            // Add small ridge for numerical stability (after preconditioning)
+            let ridge = 1e-7;
+            for i in 0..m {
+                hessian[[i, i]] += ridge;
+            }
+
+            // Check for convergence using multiple criteria
+            // Use L-infinity norm (max absolute value) like mgcv, not L2 norm
+            let grad_norm_l2: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+            let grad_norm_linf: f64 = gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
+            let reml_change = if prev_reml.is_finite() {
+                ((current_reml - prev_reml) / prev_reml.abs().max(1e-10)).abs()
+            } else {
+                f64::INFINITY
+            };
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE] Newton iter {}: grad_L2={:.6}, grad_Linf={:.6}, REML={:.6}, REML_change={:.6e}",
+                         iter + 1, grad_norm_l2, grad_norm_linf, current_reml, reml_change);
+                eprintln!("[PROFILE]   lambda={:?}", lambdas);
+                eprintln!("[PROFILE]   log_lambda={:?}", log_lambda);
+                eprintln!("[PROFILE]   gradient={:?}", gradient.as_slice().unwrap_or(&[]));
+            }
+
+            // Converged if EITHER:
+            // 1. Gradient L-infinity norm is small (gradient convergence)
+            // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
+            // mgcv uses both criteria to handle different convergence scenarios
+            if grad_norm_linf < 0.01 {
                 self.lambda = lambdas;
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Converged after {} iterations (gradient criterion)", iter + 1);
+                }
                 return Ok(());
             }
 
+            // REML change convergence: handles asymptotic cases (e.g., linear smooths with λ→∞)
+            if iter > 5 && reml_change < tolerance * 0.1 {
+                self.lambda = lambdas;
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Converged after {} iterations (REML change criterion: {:.2e} < {:.2e})",
+                             iter + 1, reml_change, tolerance * 0.1);
+                }
+                return Ok(());
+            }
+
+            prev_reml = current_reml;
+
             // Compute Newton step: step = -H^(-1) · g
-            let mut step = solve(hessian.clone(), -gradient.clone())?;
+            // With preconditioning: solve (D^-1 H D^-1) step_precond = -(D^-1 g)
+            // Then back-transform: step = D^-1 step_precond
+
+            // Precondition gradient: g_precond = D^-1 * g
+            let mut gradient_precond = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                gradient_precond[i] = gradient[i] / diag_precond[i];
+            }
+
+            // Solve preconditioned system
+            let step_precond = solve(hessian.clone(), -gradient_precond)?;
+
+            // Back-transform: step = D^-1 * step_precond
+            let mut step = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                step[i] = step_precond[i] / diag_precond[i];
+            }
 
             // Limit step size (Wood 2011: max step = 4-5 in log space)
             let step_size: f64 = step.iter().map(|s| s * s).sum::<f64>().sqrt();
@@ -165,10 +317,15 @@ impl SmoothingParameter {
                 }
             }
 
-            // Line search with step halving
-            let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
+            // Line search with step halving (reuse current_reml from above)
             let mut best_reml = current_reml;
             let mut best_step_scale = 0.0;
+            let step_size_clamped = if step_size > max_step { max_step } else { step_size };
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE]   Line search: step_norm={:.6}, current_REML={:.6}",
+                         step_size_clamped, current_reml);
+            }
 
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
@@ -186,17 +343,27 @@ impl SmoothingParameter {
                 // Evaluate REML
                 match reml_criterion_multi(y, x, w, &new_lambdas, penalties, None) {
                     Ok(new_reml) => {
+                        if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
+                            eprintln!("[PROFILE]     half={}: scale={:.4}, REML={:.6}, improvement={}",
+                                     half, step_scale, new_reml, new_reml < best_reml);
+                        }
                         if new_reml < best_reml {
                             best_reml = new_reml;
                             best_step_scale = step_scale;
                         } else if best_step_scale > 0.0 {
                             // Found an improvement earlier, no further improvement now - stop
+                            if std::env::var("MGCV_PROFILE").is_ok() {
+                                eprintln!("[PROFILE]   Best step scale: {:.4}", best_step_scale);
+                            }
                             break;
                         }
                         // If no improvement yet (best_step_scale == 0), keep trying smaller steps
                     },
                     Err(_) => {
                         // Numerical issue - try smaller step
+                        if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
+                            eprintln!("[PROFILE]     half={}: ERROR (numerical issue)", half);
+                        }
                         continue;
                     }
                 }
@@ -204,23 +371,70 @@ impl SmoothingParameter {
 
             // Update log_lambda
             if best_step_scale > 0.0 {
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Accepted Newton step, scale={:.4}", best_step_scale);
+                }
                 for i in 0..m {
                     log_lambda[i] += step[i] * best_step_scale;
                 }
             } else {
-                // No improvement found - converged or stuck
-                break;
-            }
+                // Newton failed - try steepest descent as fallback
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Newton failed, trying steepest descent");
+                }
 
-            // Print progress (optional)
-            if iter % 5 == 0 {
-                eprintln!("REML Newton iter {}: REML={:.6}, grad_norm={:.6}",
-                         iter, best_reml, grad_norm);
+                // Steepest descent: step = -gradient (scaled very small)
+                // Recompute gradient since it was moved earlier
+                let gradient_sd = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
+
+                // Try progressively smaller steepest descent steps
+                let mut sd_worked = false;
+                for scale in &[0.01, 0.001, 0.0001] {
+                    let sd_step: Vec<f64> = gradient_sd.iter().map(|g| -g * scale).collect();
+
+                    let new_log_lambda_sd: Vec<f64> = log_lambda.iter()
+                        .zip(sd_step.iter())
+                        .map(|(l, s)| l + s)
+                        .collect();
+
+                    let new_lambdas_sd: Vec<f64> = new_log_lambda_sd.iter().map(|l| l.exp()).collect();
+
+                    if let Ok(new_reml_sd) = reml_criterion_multi(y, x, w, &new_lambdas_sd, penalties, None) {
+                        if std::env::var("MGCV_PROFILE").is_ok() {
+                            eprintln!("[PROFILE]     SD scale={}: REML={:.6} (current={:.6}, improvement={})",
+                                     scale, new_reml_sd, current_reml, new_reml_sd < current_reml);
+                        }
+                        if new_reml_sd < current_reml {
+                            for i in 0..m {
+                                log_lambda[i] = new_log_lambda_sd[i];
+                            }
+                            if std::env::var("MGCV_PROFILE").is_ok() {
+                                eprintln!("[PROFILE]   Steepest descent succeeded (scale={}): REML={:.6}", scale, new_reml_sd);
+                            }
+                            sd_worked = true;
+                            break;
+                        }
+                    } else if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE]     SD scale={}: REML computation failed", scale);
+                    }
+                }
+
+                if !sd_worked {
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE]   Steepest descent failed at all scales, stopping");
+                    }
+                    break;
+                }
+
             }
         }
 
         // Update final lambdas
         self.lambda = log_lambda.iter().map(|l| l.exp()).collect();
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Reached max iterations ({}) without convergence", max_iter);
+        }
 
         Ok(())
     }

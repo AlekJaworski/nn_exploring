@@ -247,10 +247,14 @@ impl PyGAM {
 
             let smooth = match basis_type {
                 "cr" => {
-                    SmoothTerm::cr_spline_quantile(
+                    // Use evenly-spaced knots (mgcv default) instead of quantile-based
+                    let x_min = col_owned.iter().copied().fold(f64::INFINITY, f64::min);
+                    let x_max = col_owned.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    SmoothTerm::cr_spline(
                         format!("x{}", i),
                         num_basis,
-                        &col_owned,
+                        x_min,
+                        x_max,
                     ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
                 },
                 "bs" => {
@@ -314,10 +318,14 @@ impl PyGAM {
 
             let smooth = match basis_type {
                 "cr" => {
-                    SmoothTerm::cr_spline_quantile(
+                    // Use evenly-spaced knots (mgcv default) instead of quantile-based
+                    let x_min = col_owned.iter().copied().fold(f64::INFINITY, f64::min);
+                    let x_max = col_owned.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    SmoothTerm::cr_spline(
                         format!("x{}", i),
                         num_basis,
-                        &col_owned,
+                        x_min,
+                        x_max,
                     ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
                 },
                 "bs" => {

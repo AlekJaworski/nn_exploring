@@ -3,8 +3,52 @@
 use ndarray::{Array1, Array2, s};
 use crate::{Result, GAMError};
 
-/// Solve linear system Ax = b using Gaussian elimination with partial pivoting
+#[cfg(feature = "blas")]
+use ndarray_linalg::{Solve, Determinant, Inverse};
+
+/// Solve linear system Ax = b
+/// Uses BLAS/LAPACK when available for large matrices (n >= 1000)
+/// Falls back to Gaussian elimination for small matrices (BLAS overhead dominates for n < 1000)
 pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
+    #[cfg(feature = "blas")]
+    {
+        let n = a.nrows();
+        // BLAS crossover point is around n=1000
+        // Below this, Gaussian elimination is faster due to BLAS overhead
+        if n >= 1000 {
+            solve_blas(a, b)
+        } else {
+            solve_gaussian(a, b)
+        }
+    }
+
+    #[cfg(not(feature = "blas"))]
+    {
+        // Fall back to Gaussian elimination
+        solve_gaussian(a, b)
+    }
+}
+
+#[cfg(feature = "blas")]
+fn solve_blas(a: Array2<f64>, b: Array1<f64>) -> Result<Array1<f64>> {
+    let n = a.nrows();
+
+    if a.ncols() != n || b.len() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square and match RHS".to_string()
+        ));
+    }
+
+    // Use general LU solver via Solve trait
+    // In ndarray-linalg 0.17, solve() works directly with 1D arrays
+    match Solve::solve(&a, &b) {
+        Ok(x) => Ok(x),
+        Err(_) => Err(GAMError::SingularMatrix)
+    }
+}
+
+// Always available for hybrid BLAS approach (used for small matrices even when BLAS is enabled)
+fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
     let n = a.nrows();
 
     if a.ncols() != n || b.len() != n {
@@ -33,23 +77,28 @@ pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
             return Err(GAMError::SingularMatrix);
         }
 
-        // Swap rows
+        // Swap rows (safe version using row cloning)
         if max_idx != k {
+            let temp_row = a.row(k).to_owned();
+            let max_row = a.row(max_idx).to_owned();
+
             for j in 0..n {
-                let temp = a[[k, j]];
-                a[[k, j]] = a[[max_idx, j]];
-                a[[max_idx, j]] = temp;
+                a[[k, j]] = max_row[j];
+                a[[max_idx, j]] = temp_row[j];
             }
-            let temp = b[k];
-            b[k] = b[max_idx];
-            b[max_idx] = temp;
+            b.swap(k, max_idx);
         }
 
-        // Eliminate
+        // Eliminate (optimized but safe)
+        let pivot = a[[k, k]];
+        let pivot_row = a.row(k).to_owned();  // Cache pivot row
+
         for i in (k + 1)..n {
-            let factor = a[[i, k]] / a[[k, k]];
+            let factor = a[[i, k]] / pivot;
+
+            // Update row i using cached pivot row
             for j in (k + 1)..n {
-                a[[i, j]] -= factor * a[[k, j]];
+                a[[i, j]] -= factor * pivot_row[j];
             }
             b[i] -= factor * b[k];
         }
@@ -68,8 +117,40 @@ pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
     Ok(x)
 }
 
-/// Compute matrix determinant using LU decomposition
+/// Compute matrix determinant
+/// Uses BLAS/LAPACK for large matrices (n >= 1000), LU decomposition for small matrices
 pub fn determinant(a: &Array2<f64>) -> Result<f64> {
+    #[cfg(feature = "blas")]
+    {
+        let n = a.nrows();
+        if n >= 1000 {
+            determinant_blas(a)
+        } else {
+            determinant_lu(a)
+        }
+    }
+
+    #[cfg(not(feature = "blas"))]
+    {
+        determinant_lu(a)
+    }
+}
+
+#[cfg(feature = "blas")]
+fn determinant_blas(a: &Array2<f64>) -> Result<f64> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square".to_string()
+        ));
+    }
+
+    Determinant::det(&a.to_owned())
+        .map_err(|_| GAMError::SingularMatrix)
+}
+
+// Always available for hybrid BLAS approach
+fn determinant_lu(a: &Array2<f64>) -> Result<f64> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
@@ -98,21 +179,29 @@ pub fn determinant(a: &Array2<f64>) -> Result<f64> {
             return Ok(0.0); // Singular matrix has det = 0
         }
 
-        // Swap rows
+        // Swap rows (safe version using row cloning)
         if max_idx != k {
+            let temp_row = lu.row(k).to_owned();
+            let max_row = lu.row(max_idx).to_owned();
+
             for j in 0..n {
-                let temp = lu[[k, j]];
-                lu[[k, j]] = lu[[max_idx, j]];
-                lu[[max_idx, j]] = temp;
+                lu[[k, j]] = max_row[j];
+                lu[[max_idx, j]] = temp_row[j];
             }
             sign = -sign;
         }
 
-        // Eliminate
+        // Eliminate (safe version with pivot row caching)
+        let pivot = lu[[k, k]];
+        let pivot_row = lu.row(k).to_owned();
+
         for i in (k + 1)..n {
-            lu[[i, k]] /= lu[[k, k]];
+            lu[[i, k]] /= pivot;
+            let multiplier = lu[[i, k]];
+
+            // Update row i
             for j in (k + 1)..n {
-                lu[[i, j]] -= lu[[i, k]] * lu[[k, j]];
+                lu[[i, j]] -= multiplier * pivot_row[j];
             }
         }
     }
@@ -126,8 +215,40 @@ pub fn determinant(a: &Array2<f64>) -> Result<f64> {
     Ok(det)
 }
 
-/// Compute matrix inverse using Gauss-Jordan elimination
+/// Compute matrix inverse
+/// Uses BLAS/LAPACK for large matrices (n >= 1000), Gauss-Jordan for small matrices
 pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
+    #[cfg(feature = "blas")]
+    {
+        let n = a.nrows();
+        if n >= 1000 {
+            inverse_blas(a)
+        } else {
+            inverse_gauss_jordan(a)
+        }
+    }
+
+    #[cfg(not(feature = "blas"))]
+    {
+        inverse_gauss_jordan(a)
+    }
+}
+
+#[cfg(feature = "blas")]
+fn inverse_blas(a: &Array2<f64>) -> Result<Array2<f64>> {
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square".to_string()
+        ));
+    }
+
+    Inverse::inv(&a.to_owned())
+        .map_err(|_| GAMError::SingularMatrix)
+}
+
+// Always available for hybrid BLAS approach
+fn inverse_gauss_jordan(a: &Array2<f64>) -> Result<Array2<f64>> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
@@ -137,11 +258,9 @@ pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
 
     let mut aug = Array2::zeros((n, 2 * n));
 
-    // Create augmented matrix [A | I]
+    // Create augmented matrix [A | I] (safe version using slicing)
+    aug.slice_mut(s![.., 0..n]).assign(a);
     for i in 0..n {
-        for j in 0..n {
-            aug[[i, j]] = a[[i, j]];
-        }
         aug[[i, n + i]] = 1.0;
     }
 
@@ -164,27 +283,32 @@ pub fn inverse(a: &Array2<f64>) -> Result<Array2<f64>> {
             return Err(GAMError::SingularMatrix);
         }
 
-        // Swap rows
+        // Swap rows (safe version using row cloning)
         if max_idx != k {
+            let temp_row = aug.row(k).to_owned();
+            let max_row = aug.row(max_idx).to_owned();
+
             for j in 0..(2 * n) {
-                let temp = aug[[k, j]];
-                aug[[k, j]] = aug[[max_idx, j]];
-                aug[[max_idx, j]] = temp;
+                aug[[k, j]] = max_row[j];
+                aug[[max_idx, j]] = temp_row[j];
             }
         }
 
-        // Scale pivot row
+        // Scale pivot row (safe)
         let pivot = aug[[k, k]];
+        let inv_pivot = 1.0 / pivot;
         for j in 0..(2 * n) {
-            aug[[k, j]] /= pivot;
+            aug[[k, j]] *= inv_pivot;
         }
 
-        // Eliminate column
+        // Eliminate column (safe with row caching)
+        let pivot_row = aug.row(k).to_owned();
+
         for i in 0..n {
             if i != k {
                 let factor = aug[[i, k]];
                 for j in 0..(2 * n) {
-                    aug[[i, j]] -= factor * aug[[k, j]];
+                    aug[[i, j]] -= factor * pivot_row[j];
                 }
             }
         }

@@ -1,0 +1,106 @@
+======================================================================
+n=2500 Performance Anomaly Diagnostic
+======================================================================
+
+======================================================================
+SCALING COMPARISON
+======================================================================
+Sample sizes: [500, 1500, 2500, 5000]
+Basis functions: k=16
+Iterations: 10
+
+
+Benchmarking n=500...
+  Time:   976.06 ±  27.18 ms
+  Time/sample:   1.9521 ms
+
+
+Benchmarking n=1500...
+  Time:  2373.18 ±  79.33 ms
+  Time/sample:   1.5821 ms
+
+
+Benchmarking n=2500...
+  Time:  3646.86 ± 122.37 ms
+  Time/sample:   1.4587 ms
+
+
+Benchmarking n=5000...
+  Time:  7481.14 ± 251.88 ms
+  Time/sample:   1.4962 ms
+
+======================================================================
+SUMMARY
+======================================================================
+     n     Time (ms)   Time/sample   Ratio to n=500
+----------------------------------------------------------------------
+   500        976.06        1.9521             1.00x
+  1500       2373.18        1.5821             2.43x
+  2500       3646.86        1.4587             3.74x
+  5000       7481.14        1.4962             7.66x
+
+======================================================================
+ANOMALY DETECTION
+======================================================================
+n=500 → n=1500:
+  Sample size ratio: 3.00x
+  Time ratio:        2.43x
+  Expected (O(n)):   3.00x
+  Anomaly factor:    0.81x  ✓ Normal
+
+n=1500 → n=2500:
+  Sample size ratio: 1.67x
+  Time ratio:        1.54x
+  Expected (O(n)):   1.67x
+  Anomaly factor:    0.92x  ✓ Normal
+
+n=2500 → n=5000:
+  Sample size ratio: 2.00x
+  Time ratio:        2.05x
+  Expected (O(n)):   2.00x
+  Anomaly factor:    1.03x  ✓ Normal
+
+
+
+======================================================================
+DETAILED PROFILE: n=2500
+======================================================================
+
+======================================================================
+Profiling n=2500, k=16
+======================================================================
+
+Accuracy:
+  RMSE: 0.097828
+
+Timing breakdown:
+  Fit time:      1689.30 ms
+  Predict time:    81.79 ms
+  Total time:    1771.10 ms
+  Time/sample:    0.6757 ms
+
+
+======================================================================
+RECOMMENDATIONS
+======================================================================
+
+Based on the analysis above:
+
+1. If n=2500 shows 2x+ slower time ratio vs expected:
+   → Likely REML convergence issue or memory allocation problem
+   → Check REML iteration count (add instrumentation to Rust code)
+   → Profile memory allocations
+
+2. If time/sample increases significantly at n=2500:
+   → Cache effects or memory bandwidth issue
+   → Check matrix operation sizes (2500 might exceed cache)
+
+3. If lambda estimates differ significantly from other sizes:
+   → REML optimization taking different path
+   → May need better initialization or convergence criteria
+
+Next steps:
+- Add REML iteration logging to src/smooth.rs
+- Run with RUST_LOG=debug to see internal timings
+- Consider profiling with `perf` or `flamegraph`
+

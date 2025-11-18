@@ -1,6 +1,7 @@
 //! Optimized GAM fitting with caching and improved matrix operations
 
 use ndarray::{Array1, Array2, s};
+use std::time::Instant;
 use crate::{
     Result, GAMError,
     gam::{GAM, SmoothTerm},
@@ -26,9 +27,11 @@ impl FitCache {
         x: &Array2<f64>,
         smooth_terms: &[SmoothTerm],
     ) -> Result<Self> {
+        let cache_start = Instant::now();
         let n = x.nrows();
 
         // Evaluate all basis functions (this is expensive, so cache it)
+        let basis_start = Instant::now();
         let mut design_matrices: Vec<Array2<f64>> = Vec::new();
         let mut total_basis = 0;
 
@@ -37,6 +40,10 @@ impl FitCache {
             let basis_matrix = smooth.evaluate(&x_col)?;
             total_basis += smooth.num_basis();
             design_matrices.push(basis_matrix);
+        }
+        let basis_time = basis_start.elapsed();
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Basis evaluation: {:.2}ms", basis_time.as_secs_f64() * 1000.0);
         }
 
         // Build full design matrix using efficient slicing (not loops!)
@@ -52,6 +59,7 @@ impl FitCache {
         }
 
         // Compute penalty normalizations (cache these!)
+        let penalty_start = Instant::now();
         let mut penalties = Vec::new();
         let mut penalty_scales = Vec::new();
         col_offset = 0;
@@ -91,6 +99,15 @@ impl FitCache {
 
             penalties.push(penalty_full);
             col_offset += num_basis;
+        }
+        let penalty_time = penalty_start.elapsed();
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Penalty computation: {:.2}ms", penalty_time.as_secs_f64() * 1000.0);
+        }
+
+        let cache_time = cache_start.elapsed();
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Total cache build: {:.2}ms", cache_time.as_secs_f64() * 1000.0);
         }
 
         Ok(FitCache {
@@ -189,9 +206,13 @@ impl GAM {
 
         let mut weights = Array1::ones(n);
 
+        let mut total_pirls_time = 0.0;
+        let mut total_reml_time = 0.0;
+
         // Outer loop: optimize smoothing parameters
         for outer_iter in 0..max_outer_iter {
             // Inner loop: PiRLS with current smoothing parameters
+            let pirls_start = Instant::now();
             let pirls_result = fit_pirls(
                 y,
                 &cache.design_matrix,
@@ -201,10 +222,12 @@ impl GAM {
                 max_inner_iter,
                 tolerance,
             )?;
+            total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
             weights = pirls_result.weights.clone();
 
             // Update smoothing parameters using REML/GCV
+            let reml_start = Instant::now();
             let old_lambda = smoothing_params.lambda.clone();
 
             smoothing_params.optimize(
@@ -212,9 +235,10 @@ impl GAM {
                 &cache.design_matrix,
                 &weights,
                 &cache.penalties,
-                10,
+                100,  // Very large to see if it eventually converges
                 tolerance,
             )?;
+            total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
 
             // Check convergence with adaptive tolerance
             let max_lambda_change = old_lambda.iter()
@@ -232,6 +256,7 @@ impl GAM {
             // Early stopping if converged
             if max_lambda_change < adaptive_tol {
                 // Do final fit
+                let pirls_start = Instant::now();
                 let final_result = fit_pirls(
                     y,
                     &cache.design_matrix,
@@ -241,6 +266,12 @@ impl GAM {
                     max_inner_iter,
                     tolerance,
                 )?;
+                total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
+
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
+                    eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+                }
 
                 self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
                 return Ok(());
@@ -249,6 +280,7 @@ impl GAM {
         }
 
         // Reached max iterations - use current fit
+        let pirls_start = Instant::now();
         let final_result = fit_pirls(
             y,
             &cache.design_matrix,
@@ -258,6 +290,12 @@ impl GAM {
             max_inner_iter,
             tolerance,
         )?;
+        total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
+            eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+        }
 
         self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
         Ok(())
