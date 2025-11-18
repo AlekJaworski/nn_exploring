@@ -185,7 +185,10 @@ impl SmoothingParameter {
             .map(|l| l.ln())
             .collect();
 
-        let max_step = 100.0;  // Maximum step size in log space - line search will handle if too large
+        // Maximum step size in log space (following Wood 2011 and mgcv)
+        // This prevents overly aggressive Newton steps that require excessive backtracking
+        // max_step=4 means we clamp λ_new/λ_old to [e^-4, e^4] = [0.018, 54.6]
+        let max_step = 4.0;    // Conservative step size to match mgcv
         let max_half = 30;     // Maximum step halvings
 
         let mut prev_reml = f64::INFINITY;
