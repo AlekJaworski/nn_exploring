@@ -9,35 +9,30 @@ use crate::linalg::{solve, determinant, inverse};
 fn estimate_rank(matrix: &Array2<f64>) -> usize {
     let n = matrix.nrows().min(matrix.ncols());
 
-    // For CR splines and similar penalty matrices with second derivative penalties,
-    // the rank is k-2 where k is the number of basis functions.
-    // We check if the matrix has near-zero rows/columns indicating rank deficiency.
-
-    // Count the number of near-zero rows (indicating null space)
-    let mut null_space_dim = 0;
+    // For block-diagonal penalty matrices (multi-smooth case), count non-zero rows
+    // Each block corresponds to one smooth, with rank = k-2 for CR splines
     let matrix_norm = matrix.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
-    let threshold = 1e-8 * matrix_norm.max(1.0);
+    let threshold = 1e-10 * matrix_norm.max(1.0);
 
+    let mut non_zero_rows = 0;
     for i in 0..n {
         let mut row_norm = 0.0;
         for j in 0..matrix.ncols() {
             row_norm += matrix[[i, j]].abs();
         }
-        if row_norm < threshold {
-            null_space_dim += 1;
+        if row_norm > threshold {
+            non_zero_rows += 1;
         }
     }
 
-    // Rank = n - nullity
-    let rank = n - null_space_dim;
-
-    // For standard penalty matrices (CR, cubic splines, etc.), the minimum rank is k-2
-    // If we got full rank or close to it, assume rank deficiency of 2
-    if rank >= n - 1 && n >= 2 {
-        return n - 2;
+    // For CR splines: rank = (non_zero_rows - 2).max(1)
+    // The null space dimension is 2 (constant and linear functions)
+    if non_zero_rows >= 2 {
+        return non_zero_rows - 2;
     }
 
-    rank.max(1) // At least rank 1
+    // Fallback for very small matrices
+    1
 }
 
 /// Compute the REML criterion for smoothing parameter selection
@@ -450,6 +445,11 @@ pub fn reml_gradient_multi(
         let penalty_i = &penalties[i];
         let rank_i = estimate_rank(penalty_i);
 
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            eprintln!("[GRAD_DEBUG] penalty matrix size: {}x{}, estimated rank: {}",
+                     penalty_i.nrows(), penalty_i.ncols(), rank_i);
+        }
+
         // Term 1: tr(A⁻¹·λᵢ·Sᵢ)
         let lambda_s_i = penalty_i * lambda_i;
         let temp = a_inv.dot(&lambda_s_i);
@@ -466,6 +466,12 @@ pub fn reml_gradient_multi(
         let penalty_term = lambda_i * beta_s_beta;
 
         // Gradient: [tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ) + (λᵢ·β'·Sᵢ·β)/φ] / 2
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
+            eprintln!("[GRAD_DEBUG] Component {}: lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}",
+                     i, lambda_i, trace, rank_i, penalty_term, phi);
+            eprintln!("[GRAD_DEBUG]   trace - rank = {:.6}, (trace - rank + penalty_term/phi)/2 = {:.6}",
+                     trace - (rank_i as f64), (trace - (rank_i as f64) + penalty_term / phi) / 2.0);
+        }
         gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
     }
 

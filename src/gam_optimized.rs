@@ -235,7 +235,7 @@ impl GAM {
                 &cache.design_matrix,
                 &weights,
                 &cache.penalties,
-                10,
+                100,  // Very large to see if it eventually converges
                 tolerance,
             )?;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;

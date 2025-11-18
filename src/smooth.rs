@@ -185,8 +185,8 @@ impl SmoothingParameter {
             .map(|l| l.ln())
             .collect();
 
-        let max_step = 4.0;  // Maximum step size in log space (Wood 2011)
-        let max_half = 30;   // Maximum step halvings
+        let max_step = 100.0;  // Maximum step size in log space - line search will handle if too large
+        let max_half = 30;     // Maximum step halvings
 
         let mut prev_reml = f64::INFINITY;
 
@@ -199,10 +199,46 @@ impl SmoothingParameter {
 
             // Compute gradient and Hessian
             let gradient = reml_gradient_multi(y, x, w, &lambdas, penalties)?;
-            let hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+            let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+
+            // ===================================================================
+            // CRITICAL: Condition Hessian like mgcv to ensure stable convergence
+            // ===================================================================
+            // mgcv uses ridge regularization + diagonal preconditioning
+            // This prevents ill-conditioning that causes tiny steps in late iterations
+
+            // 1. Add adaptive ridge FIRST (before preconditioning)
+            //    Ridge increases with iteration to handle increasing ill-conditioning
+            let min_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(f64::INFINITY, f64::min);
+            let max_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(0.0f64, f64::max);
+
+            // Add small ridge for numerical stability
+            // Increase slightly in later iterations when Hessian gets more ill-conditioned
+            let ridge = if iter < 5 {
+                1e-8 * max_diag_orig.max(1.0)
+            } else if min_diag_orig <= 0.0 || min_diag_orig < max_diag_orig * 1e-6 {
+                // More aggressive ridge if clearly ill-conditioned
+                (1e-6 + (iter - 5) as f64 * 1e-7) * max_diag_orig.max(1.0)
+            } else {
+                // Gentle ridge in later iterations
+                (iter - 4) as f64 * 1e-8 * max_diag_orig.max(1.0)
+            };
+
+            if ridge > 1e-10 * max_diag_orig {
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Adding ridge={:.6e} (iter={}, min/max_diag={:.6}/{:.6})",
+                             ridge, iter, min_diag_orig, max_diag_orig);
+                }
+
+                for i in 0..m {
+                    hessian[[i, i]] += ridge;
+                }
+            }
 
             // Check for convergence using multiple criteria
-            let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+            // Use L-infinity norm (max absolute value) like mgcv, not L2 norm
+            let grad_norm_l2: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+            let grad_norm_linf: f64 = gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
             let reml_change = if prev_reml.is_finite() {
                 ((current_reml - prev_reml) / prev_reml.abs().max(1e-10)).abs()
             } else {
@@ -210,15 +246,17 @@ impl SmoothingParameter {
             };
 
             if std::env::var("MGCV_PROFILE").is_ok() {
-                eprintln!("[PROFILE] Newton iter {}: grad_norm={:.6}, REML={:.6}",
-                         iter + 1, grad_norm, current_reml);
+                eprintln!("[PROFILE] Newton iter {}: grad_L2={:.6}, grad_Linf={:.6}, REML={:.6}",
+                         iter + 1, grad_norm_l2, grad_norm_linf, current_reml);
+                eprintln!("[PROFILE]   lambda={:?}", lambdas);
+                eprintln!("[PROFILE]   log_lambda={:?}", log_lambda);
+                eprintln!("[PROFILE]   gradient={:?}", gradient.as_slice().unwrap_or(&[]));
             }
 
-            // Converged if either:
-            // 1. Gradient norm is small (gradient convergence) - use R's threshold
-            // 2. REML value change is tiny (value convergence)
-            // R uses grad_norm < 0.01 based on profiling output
-            if grad_norm < 0.01 || reml_change < tolerance * 0.1 {
+            // Converged if gradient L-infinity norm is small
+            // Don't use REML change alone - can stop in flat regions before true optimum
+            // mgcv uses max(abs(gradient)) < tolerance (typically 1e-7 or adaptive)
+            if grad_norm_linf < 0.01 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE] Converged after {} iterations", iter + 1);
@@ -229,7 +267,7 @@ impl SmoothingParameter {
             prev_reml = current_reml;
 
             // Compute Newton step: step = -H^(-1) · g
-            let mut step = solve(hessian.clone(), -gradient.clone())?;
+            let mut step = solve(hessian.clone(), -gradient)?;
 
             // Limit step size (Wood 2011: max step = 4-5 in log space)
             let step_size: f64 = step.iter().map(|s| s * s).sum::<f64>().sqrt();
@@ -243,10 +281,11 @@ impl SmoothingParameter {
             // Line search with step halving (reuse current_reml from above)
             let mut best_reml = current_reml;
             let mut best_step_scale = 0.0;
+            let step_size_clamped = if step_size > max_step { max_step } else { step_size };
 
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!("[PROFILE]   Line search: step_norm={:.6}, current_REML={:.6}",
-                         step_size, current_reml);
+                         step_size_clamped, current_reml);
             }
 
             for half in 0..=max_half {
@@ -293,12 +332,61 @@ impl SmoothingParameter {
 
             // Update log_lambda
             if best_step_scale > 0.0 {
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Accepted Newton step, scale={:.4}", best_step_scale);
+                }
                 for i in 0..m {
                     log_lambda[i] += step[i] * best_step_scale;
                 }
             } else {
-                // No improvement found - converged or stuck
-                break;
+                // Newton failed - try steepest descent as fallback
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Newton failed, trying steepest descent");
+                }
+
+                // Steepest descent: step = -gradient (scaled very small)
+                // Recompute gradient since it was moved earlier
+                let gradient_sd = reml_gradient_multi(y, x, w, &lambdas, penalties)?;
+
+                // Try progressively smaller steepest descent steps
+                let mut sd_worked = false;
+                for scale in &[0.01, 0.001, 0.0001] {
+                    let sd_step: Vec<f64> = gradient_sd.iter().map(|g| -g * scale).collect();
+
+                    let new_log_lambda_sd: Vec<f64> = log_lambda.iter()
+                        .zip(sd_step.iter())
+                        .map(|(l, s)| l + s)
+                        .collect();
+
+                    let new_lambdas_sd: Vec<f64> = new_log_lambda_sd.iter().map(|l| l.exp()).collect();
+
+                    if let Ok(new_reml_sd) = reml_criterion_multi(y, x, w, &new_lambdas_sd, penalties, None) {
+                        if std::env::var("MGCV_PROFILE").is_ok() {
+                            eprintln!("[PROFILE]     SD scale={}: REML={:.6} (current={:.6}, improvement={})",
+                                     scale, new_reml_sd, current_reml, new_reml_sd < current_reml);
+                        }
+                        if new_reml_sd < current_reml {
+                            for i in 0..m {
+                                log_lambda[i] = new_log_lambda_sd[i];
+                            }
+                            if std::env::var("MGCV_PROFILE").is_ok() {
+                                eprintln!("[PROFILE]   Steepest descent succeeded (scale={}): REML={:.6}", scale, new_reml_sd);
+                            }
+                            sd_worked = true;
+                            break;
+                        }
+                    } else if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE]     SD scale={}: REML computation failed", scale);
+                    }
+                }
+
+                if !sd_worked {
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE]   Steepest descent failed at all scales, stopping");
+                    }
+                    break;
+                }
+
             }
         }
 
