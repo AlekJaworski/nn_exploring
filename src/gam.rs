@@ -283,23 +283,28 @@ impl GAM {
                 .map(|i| (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
 
-            // EXPERIMENTAL: Try NO penalty normalization to check if it helps gradients
-            // Original formula: maXX / inf_norm_S gave tiny values (0.01) vs mgcv's 70-170
-            // This causes catastrophic gradients. Try scale_factor = 1.0 (no normalization)
-            let scale_factor = 1.0;
+            // Compute S.scale using mgcv's formula: S.scale = ||S||_inf / ||X||_inf^2
+            // This matches mgcv's smoothCon with scale.penalty=TRUE
+            let s_scale = if inf_norm_S > 1e-10 {
+                inf_norm_S / maXX
+            } else {
+                1.0  // Avoid division by zero for degenerate penalties
+            };
 
             // Store S.scale for sp parameterization (λ = sp × S.scale)
-            // With scale_factor=1.0, sp and lambda are equivalent
-            s_scales.push(scale_factor);
+            s_scales.push(s_scale);
 
             if std::env::var("MGCV_PROFILE").is_ok() {
-                eprintln!("[PENALTY_SCALE] Smooth {}: maXX={:.6e}, inf_norm_S={:.6e}, S.scale={:.6e} [UNNORMALIZED]",
-                         idx, maXX, inf_norm_S, scale_factor);
+                eprintln!("[PENALTY_SCALE] Smooth {}: maXX={:.6e}, inf_norm_S={:.6e}, S.scale={:.6e}",
+                         idx, maXX, inf_norm_S, s_scale);
             }
 
+            // Store the RAW penalty (not normalized)
+            // mgcv uses raw penalties for gradient computation
+            // The S.scale is stored separately for sp parameterization
             let mut penalty_full = Array2::zeros((total_basis, total_basis));
 
-            // Place this smooth's unnormalized penalty in the appropriate block
+            // Place this smooth's RAW penalty in the appropriate block
             penalty_full.slice_mut(ndarray::s![col_offset..col_offset + num_basis, col_offset..col_offset + num_basis])
                 .assign(&smooth.penalty);
 

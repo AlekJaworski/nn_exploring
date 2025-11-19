@@ -755,6 +755,20 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
     // Step 5: Compute S = D' B^{-1} D
     let S = D.t().dot(&B_inv_D);
 
+    // Debug: check raw penalty values
+    if std::env::var("MGCV_PROFILE").is_ok() {
+        let inf_norm_S = (0..S.nrows())
+            .map(|i| (0..S.ncols()).map(|j| S[[i, j]].abs()).sum::<f64>())
+            .fold(0.0f64, f64::max);
+        let trace_S: f64 = (0..S.nrows().min(S.ncols())).map(|i| S[[i,i]]).sum();
+        eprintln!("[PENALTY_RAW] cr_spline: num_basis={}, ||S||_inf={:.6e}, trace(S)={:.6e}",
+                  num_basis, inf_norm_S, trace_S);
+        if num_basis >= 3 {
+            eprintln!("[PENALTY_RAW]   S[1,1]={:.6e}, S[1,2]={:.6e}, S[2,2]={:.6e}",
+                     S[[1,1]], S[[1,2]], S[[2,2]]);
+        }
+    }
+
     // Note: Penalty normalization is now handled in gam.rs after the basis matrix
     // is evaluated, using mgcv's data-dependent normalization:
     // S_rescaled = S * ||X||_inf^2 / ||S||_inf

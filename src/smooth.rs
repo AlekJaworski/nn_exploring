@@ -221,7 +221,7 @@ impl SmoothingParameter {
             let sp_values: Vec<f64> = log_sp.iter().map(|l| l.exp()).collect();
             let lambdas: Vec<f64> = sp_values.iter()
                 .zip(self.s_scales.iter())
-                .map(|(sp, s_scale)| (sp * s_scale).max(0.1))  // CRITICAL: Enforce minimum λ=0.1 for numerical stability
+                .map(|(sp, s_scale)| sp * s_scale)  // No minimum - let optimization find natural value
                 .collect();
 
             // Compute current REML value for convergence check
