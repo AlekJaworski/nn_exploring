@@ -99,8 +99,10 @@ impl SmoothingParameter {
                 self.lambda[i] = 0.1;  // Fallback for near-zero penalty
             }
 
-            // Clamp to reasonable range [1e-6, 1e6]
-            self.lambda[i] = self.lambda[i].max(1e-6).min(1e6);
+            // Clamp to reasonable range [0.1, 1e6]
+            // CRITICAL: Minimum 0.1 ensures R matrix is well-conditioned
+            // At λ < 0.01, penalties don't provide enough regularization → R diagonal ~1e-14
+            self.lambda[i] = self.lambda[i].max(0.1).min(1e6);
         }
     }
 
