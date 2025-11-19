@@ -608,8 +608,9 @@ pub fn reml_gradient_multi_qr(
             .sum();
         let penalty_term = lambda_i * beta_s_beta;
 
-        // Gradient formula: [tr(M_i·A) - rank(S_i) + β'·M_i·β/φ] / 2
-        // where M_i = λ_i·S_i (already computed via trace *= lambda_i above)
+        // Gradient formula: Wood (2011) formula AS IS
+        // ∂REML/∂ρ = [tr(M·A) - r + β'·M·β/φ] / 2
+        // where M = λ·S, ρ = log(λ)
         gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
@@ -894,9 +895,24 @@ pub fn reml_hessian_multi(
                 .sum();
             let term3 = -2.0 * beta_m_i_beta * beta_m_j_beta / (phi * phi);
 
-            // TEMPORARY: Try just the trace term to see if it's positive
-            // Complete formula: (-trace_term + term2 + term3) / 2.0
-            hessian[[i, j]] = trace_term / 2.0;  // POSITIVE trace term only
+            // Based on mgcv source (gdi.c:get_ddetXWXpS):
+            // Hessian in ρ-space needs λ_i·λ_j scaling from chain rule
+            // Plus diagonal gradient term when i==j
+            // Try: H[i,j] = λ_i·λ_j·trace_term / 2 + δ_{ij}·λ_i·gradient[i]
+            let mut h_val = lambda_i * lambda_j * trace_term / 2.0;
+
+            // Add diagonal gradient term (chain rule correction)
+            if i == j {
+                // Need gradient[i] - compute from trace and penalty terms
+                let rank_i = estimate_rank(penalty_i);
+                let penalty_term_i = lambda_i * beta_m_i_beta;
+                // Gradient with respect to λ (before chain rule)
+                let grad_lambda_i = (trace_term - (rank_i as f64) + penalty_term_i / phi) / 2.0;
+                h_val += lambda_i * grad_lambda_i;
+            }
+
+            // TEMPORARY: Try negative Hessian to flip Newton direction
+            hessian[[i, j]] = -h_val;
 
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 && j == 0 {
                 eprintln!("[HESS_DEBUG] Hessian[{},{}]:", i, j);
