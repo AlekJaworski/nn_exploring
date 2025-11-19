@@ -269,7 +269,12 @@ impl SmoothingParameter {
             // 1. Gradient L-infinity norm is small (gradient convergence)
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
             // mgcv uses both criteria to handle different convergence scenarios
-            if grad_norm_linf < 0.01 {
+            //
+            // NOTE: After gradient scaling fix, gradients are scaled by (n-total_rank)/rank_i
+            // For n=500, this is ~60x, so threshold needs to be correspondingly higher
+            // mgcv converges at gradient ~0.05 unscaled, which is ~3.0 scaled
+            // We use 10.0 to be conservative
+            if grad_norm_linf < 10.0 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE] Converged after {} iterations (gradient criterion)", iter + 1);
