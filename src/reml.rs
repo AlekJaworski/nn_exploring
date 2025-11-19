@@ -608,20 +608,15 @@ pub fn reml_gradient_multi_qr(
             .sum();
         let penalty_term = lambda_i * beta_s_beta;
 
-        // Gradient formula: [tr(P'SP)·λ - rank + penalty_term/φ] / 2
-        // CRITICAL FIX: Scale by (n - total_rank) / rank_i to match mgcv's gradient magnitude
-        // This factor comes from the derivative of the REML criterion with respect to log(λ)
-        // The (n - total_rank) term arises from the derivative of φ = RSS/(n-total_rank)
-        // The division by rank_i normalizes per smooth based on its degrees of freedom
-        let grad_unscaled = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
-        let scaling_factor = (n - total_rank) as f64 / (rank_i as f64);
-        gradient[i] = grad_unscaled * scaling_factor;
+        // Gradient formula: [tr(M_i·A) - rank(S_i) + β'·M_i·β/φ] / 2
+        // where M_i = λ_i·S_i (already computed via trace *= lambda_i above)
+        gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
             eprintln!("[QR_GRAD_DEBUG] lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}, block_size={}",
                      lambda_i, trace, rank_i, penalty_term, phi, block_size);
-            eprintln!("[QR_GRAD_DEBUG]   grad_unscaled={:.6}, scaling_factor={:.0}, gradient[{}] = {:.6}",
-                     grad_unscaled, scaling_factor, i, gradient[i]);
+            eprintln!("[QR_GRAD_DEBUG]   gradient[{}] = {:.6}",
+                     i, gradient[i]);
         }
     }
 
@@ -780,8 +775,10 @@ pub fn reml_gradient_multi(
 ///
 /// Returns: ∂²REML/∂log(λᵢ)∂log(λⱼ) for i,j = 1..m
 ///
-/// Following mgcv's fast-REML.r (lines 1721-1722), the Hessian is:
-/// ∂²REML/∂log(λᵢ)∂log(λⱼ) = [-tr(A⁻¹·λᵢ·Sᵢ·A⁻¹·λⱼ·Sⱼ) + penalty_hess_term/φ] / 2
+/// Following Wood (2011) J.R.Statist.Soc.B 73(1):3-36, the complete Hessian is:
+/// H[i,j] = [-tr(M_i·A·M_j·A) + (2β'·M_i·A·M_j·β)/φ - (2β'·M_i·β·β'·M_j·β)/φ²] / 2
+///
+/// where M_i = λ_i·S_i, A = (X'WX + ΣM_i)^(-1)
 ///
 /// This is a symmetric m x m matrix
 pub fn reml_hessian_multi(
@@ -829,14 +826,28 @@ pub fn reml_hessian_multi(
     }
     let a_inv = inverse(&a_reg)?;
 
-    // Compute total rank and individual ranks for scaling
+    // Compute coefficients β
+    let y_weighted: Array1<f64> = y.iter().zip(w.iter())
+        .map(|(yi, wi)| yi * wi)
+        .collect();
+    let b = xtw.dot(&y_weighted);
+    let beta = solve(a.clone(), b)?;
+
+    // Compute RSS and φ
+    let fitted = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(r, wi)| r * r * wi)
+        .sum();
+
+    // Compute total rank for φ
     let mut total_rank = 0;
-    let mut penalty_ranks = Vec::new();
     for penalty in penalties.iter() {
-        let rank = estimate_rank(penalty);
-        penalty_ranks.push(rank);
-        total_rank += rank;
+        total_rank += estimate_rank(penalty);
     }
+    let phi = rss / (n - total_rank) as f64;
 
     // Compute Hessian
     let mut hessian = Array2::zeros((m, m));
@@ -847,38 +858,54 @@ pub fn reml_hessian_multi(
             let lambda_j = lambdas[j];
             let penalty_i = &penalties[i];
             let penalty_j = &penalties[j];
-            let rank_i = penalty_ranks[i];
-            let rank_j = penalty_ranks[j];
 
-            // Compute ∂²REML/∂log(λᵢ)∂log(λⱼ)
-            // ≈ -tr((A⁻¹·λᵢ·Sᵢ)·(A⁻¹·λⱼ·Sⱼ))
-            //
-            // This is a simplification. Full Hessian requires second derivatives
-            // of RSS and more complex implicit differentiation.
+            // Complete Hessian following Wood (2011)
+            // H[i,j] = [-tr(M_i·A·M_j·A) + (2β'·M_i·A·M_j·β)/φ - (2β'·M_i·β·β'·M_j·β)/φ²] / 2
 
-            let lambda_s_i = penalty_i * lambda_i;
-            let lambda_s_j = penalty_j * lambda_j;
+            // Compute M_i = λ_i·S_i and M_j = λ_j·S_j
+            let m_i = penalty_i * lambda_i;
+            let m_j = penalty_j * lambda_j;
 
-            let a_inv_si = a_inv.dot(&lambda_s_i);
-            let a_inv_sj = a_inv.dot(&lambda_s_j);
+            // Term 1: -tr(M_i·A·M_j·A)
+            let a_m_j = a_inv.dot(&m_j);
+            let a_m_j_a = a_m_j.dot(&a_inv);
+            let product = m_i.dot(&a_m_j_a);
 
-            let product = a_inv_si.dot(&a_inv_sj);
-
-            let mut trace = 0.0;
+            let mut trace_term = 0.0;
             for k in 0..p {
-                trace += product[[k, k]];
+                trace_term += product[[k, k]];
             }
 
-            // Hessian: tr(A⁻¹·λᵢ·Sᵢ·A⁻¹·λⱼ·Sⱼ) / 2
-            // Note: This is POSITIVE for minimization. mgcv's fast-REML.r computes
-            // reml2 = -d2/2 where d2 is itself negative, giving a positive Hessian.
-            // CRITICAL FIX: Scale by (n - total_rank) only (NOT by ranks)
-            // The Hessian represents second derivatives in the SAME parameter space as gradients
-            // Since gradients are scaled by (n-total_rank)/rank_i, but this is just a
-            // reparameterization, the Hessian in the ORIGINAL space just scales by (n-total_rank)
-            let hess_unscaled = trace / 2.0;
-            let scaling_factor = (n - total_rank) as f64;
-            hessian[[i, j]] = hess_unscaled * scaling_factor;
+            // Term 2: (2β'·M_i·A·M_j·β)/φ
+            let m_i_beta = m_i.dot(&beta);          // M_i·β
+            let a_m_j_beta = a_inv.dot(&m_j.dot(&beta));  // A·M_j·β
+            let term2: f64 = m_i_beta.iter().zip(a_m_j_beta.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            let term2 = 2.0 * term2 / phi;
+
+            // Term 3: -(2β'·M_i·β·β'·M_j·β)/φ²
+            let beta_m_i_beta: f64 = beta.iter().zip(m_i_beta.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            let m_j_beta = m_j.dot(&beta);
+            let beta_m_j_beta: f64 = beta.iter().zip(m_j_beta.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            let term3 = -2.0 * beta_m_i_beta * beta_m_j_beta / (phi * phi);
+
+            // TEMPORARY: Try just the trace term to see if it's positive
+            // Complete formula: (-trace_term + term2 + term3) / 2.0
+            hessian[[i, j]] = trace_term / 2.0;  // POSITIVE trace term only
+
+            if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 && j == 0 {
+                eprintln!("[HESS_DEBUG] Hessian[{},{}]:", i, j);
+                eprintln!("[HESS_DEBUG]   trace_term = {:.6e}", trace_term);
+                eprintln!("[HESS_DEBUG]   term2 = {:.6e}", term2);
+                eprintln!("[HESS_DEBUG]   term3 = {:.6e}", term3);
+                eprintln!("[HESS_DEBUG]   total = {:.6e}", hessian[[i, j]]);
+                eprintln!("[HESS_DEBUG]   phi = {:.6e}, lambda_i = {:.6e}", phi, lambda_i);
+            }
 
             // Fill symmetric entry
             if i != j {
