@@ -21,18 +21,32 @@ x <- matrix(rnorm(n*2), n, 2)
 y <- sin(x[,1]) + 0.5*x[,2]^2 + rnorm(n)*0.1
 df <- data.frame(x1=x[,1], x2=x[,2], y=y)
 
-# Fit at specific sp
+# Fit with optimization
 fit <- gam(y ~ s(x1, k=10, bs="cr") + s(x2, k=10, bs="cr"),
-           data=df, method="REML", sp=c(0.1, 0.1))
+           data=df, method="REML")
 
-cat("\\nmgcv Hessian at λ=[0.1, 0.1]:\\n")
-print(fit$outer.info$hess[1:2, 1:2])
-cat("\\nDiagonal:", diag(fit$outer.info$hess)[1:2], "\\n")
-cat("Off-diagonal:", fit$outer.info$hess[1,2], "\\n")
-
-# Also get gradient for comparison
-cat("\\nGradient:", fit$outer.info$grad[1:2], "\\n")
+cat("\\nmgcv converged to:\\n")
+cat("Lambda:", fit$sp, "\\n")
 cat("REML:", fit$gcv.ubre, "\\n")
+
+# Check if Hessian was computed
+if (!is.null(fit$outer.info$hess)) {
+    cat("\\nmgcv Hessian:\\n")
+    print(fit$outer.info$hess)
+    cat("\\nDiagonal:", diag(fit$outer.info$hess), "\\n")
+    if (nrow(fit$outer.info$hess) >= 2) {
+        cat("Off-diagonal [1,2]:", fit$outer.info$hess[1,2], "\\n")
+    }
+} else {
+    cat("\\nNo Hessian in outer.info\\n")
+}
+
+# Check gradient
+if (!is.null(fit$outer.info$grad)) {
+    cat("\\nGradient:", fit$outer.info$grad, "\\n")
+} else {
+    cat("\\nNo gradient in outer.info\\n")
+}
 '''], capture_output=True, text=True, timeout=30)
 
 print(result.stdout)

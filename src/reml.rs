@@ -896,27 +896,51 @@ pub fn reml_hessian_multi(
                 .sum();
             let term3 = -2.0 * beta_m_i_beta * beta_m_j_beta / (phi * phi);
 
-            // Simplified Hessian that was working (from checkpoint)
-            // Use trace term with chain rule scaling
-            let mut h_val = lambda_i * lambda_j * trace_term / 2.0;
+            // det2 part: log-determinant Hessian from mgcv
+            // det2[k,m] = δ_{k,m}·tr(A^{-1}·M_m) - tr[(A^{-1}·M_k)·(A^{-1}·M_m)]
+            // where trace_term = tr[(A^{-1}·M_k)·(A^{-1}·M_m)] = tr(M_k·A^{-1}·M_m·A^{-1})
 
-            // Add diagonal gradient term (chain rule correction)
-            if i == j {
-                let rank_i = estimate_rank(penalty_i);
-                let penalty_term_i = lambda_i * beta_m_i_beta;
-                let grad_lambda_i = (trace_term - (rank_i as f64) + penalty_term_i / phi) / 2.0;
-                h_val += lambda_i * grad_lambda_i;
-            }
+            // For diagonal, need tr(A^{-1}·M_k)
+            let trace_a_inv_m_i = if i == j {
+                let a_m_i = a_inv.dot(&m_i);
+                let mut tr = 0.0;
+                for k in 0..p {
+                    tr += a_m_i[[k, k]];
+                }
+                tr
+            } else {
+                0.0
+            };
 
-            // Negate for correct Newton direction
-            hessian[[i, j]] = -h_val;
+            // det2[k,m] from C code (in ρ-space, before /2)
+            let det2 = if i == j {
+                trace_a_inv_m_i - trace_term
+            } else {
+                -trace_term
+            };
+
+            // Total Hessian = det2 + bSb2
+            // det2: log-determinant part (computed above)
+            // bSb2: penalty derivative part (term2 + term3)
+            // Both divided by 2 for REML formula
+
+            let bSb2 = term2 + term3;
+            let h_val = (det2 + bSb2) / 2.0;
+
+            // Newton's method: x_new = x - H^{-1}·grad
+            // For minimization, H = ∂²V/∂ρ² should be positive at minimum
+            // No negation needed - we computed the Hessian correctly
+            hessian[[i, j]] = h_val;
 
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 && j == 0 {
                 eprintln!("[HESS_DEBUG] Hessian[{},{}]:", i, j);
+                eprintln!("[HESS_DEBUG]   trace_a_inv_m = {:.6e}", trace_a_inv_m_i);
                 eprintln!("[HESS_DEBUG]   trace_term = {:.6e}", trace_term);
-                eprintln!("[HESS_DEBUG]   term2 = {:.6e}", term2);
-                eprintln!("[HESS_DEBUG]   term3 = {:.6e}", term3);
-                eprintln!("[HESS_DEBUG]   total = {:.6e}", hessian[[i, j]]);
+                eprintln!("[HESS_DEBUG]   det2 = {:.6e}", det2);
+                eprintln!("[HESS_DEBUG]   term2 (bSb2 part1) = {:.6e}", term2);
+                eprintln!("[HESS_DEBUG]   term3 (bSb2 part2) = {:.6e}", term3);
+                eprintln!("[HESS_DEBUG]   bSb2 = {:.6e}", bSb2);
+                eprintln!("[HESS_DEBUG]   total hessian = {:.6e}", hessian[[i, j]]);
                 eprintln!("[HESS_DEBUG]   phi = {:.6e}, lambda_i = {:.6e}", phi, lambda_i);
             }
 
