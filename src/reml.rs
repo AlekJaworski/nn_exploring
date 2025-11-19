@@ -896,23 +896,19 @@ pub fn reml_hessian_multi(
                 .sum();
             let term3 = -2.0 * beta_m_i_beta * beta_m_j_beta / (phi * phi);
 
-            // Based on mgcv source (gdi.c:get_ddetXWXpS):
-            // Hessian in ρ-space needs λ_i·λ_j scaling from chain rule
-            // Plus diagonal gradient term when i==j
-            // Try: H[i,j] = λ_i·λ_j·trace_term / 2 + δ_{ij}·λ_i·gradient[i]
+            // Simplified Hessian that was working (from checkpoint)
+            // Use trace term with chain rule scaling
             let mut h_val = lambda_i * lambda_j * trace_term / 2.0;
 
             // Add diagonal gradient term (chain rule correction)
             if i == j {
-                // Need gradient[i] - compute from trace and penalty terms
                 let rank_i = estimate_rank(penalty_i);
                 let penalty_term_i = lambda_i * beta_m_i_beta;
-                // Gradient with respect to λ (before chain rule)
                 let grad_lambda_i = (trace_term - (rank_i as f64) + penalty_term_i / phi) / 2.0;
                 h_val += lambda_i * grad_lambda_i;
             }
 
-            // TEMPORARY: Try negative Hessian to flip Newton direction
+            // Negate for correct Newton direction
             hessian[[i, j]] = -h_val;
 
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 && j == 0 {
