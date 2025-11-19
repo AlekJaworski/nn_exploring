@@ -280,11 +280,11 @@ impl SmoothingParameter {
                 return Ok(());
             }
 
-            // REML change convergence: handles asymptotic cases (e.g., linear smooths with λ→∞)
-            // Use relative change since REML values can be large (hundreds)
-            // Converge if relative change < 1e-6 (absolute change < 1e-6 * |REML|)
+            // REML change convergence: DISABLED for now to test gradient convergence
+            // The Hessian may be approximate, causing tiny REML steps even with large gradient
+            // Better to rely on gradient criterion
             let relative_reml_change = reml_change / current_reml.abs().max(1.0);
-            if iter > 5 && relative_reml_change < 1e-6 {
+            if false && iter > 5 && relative_reml_change < 1e-6 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE] Converged after {} iterations (REML relative change: {:.2e} < 1e-6)",
