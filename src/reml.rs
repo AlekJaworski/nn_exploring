@@ -609,12 +609,19 @@ pub fn reml_gradient_multi_qr(
         let penalty_term = lambda_i * beta_s_beta;
 
         // Gradient formula: [tr(P'SP)·λ - rank + penalty_term/φ] / 2
-        gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
+        // CRITICAL FIX: Scale by (n - total_rank) / rank_i to match mgcv's gradient magnitude
+        // This factor comes from the derivative of the REML criterion with respect to log(λ)
+        // The (n - total_rank) term arises from the derivative of φ = RSS/(n-total_rank)
+        // The division by rank_i normalizes per smooth based on its degrees of freedom
+        let grad_unscaled = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
+        let scaling_factor = (n - total_rank) as f64 / (rank_i as f64);
+        gradient[i] = grad_unscaled * scaling_factor;
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
             eprintln!("[QR_GRAD_DEBUG] lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}, block_size={}",
                      lambda_i, trace, rank_i, penalty_term, phi, block_size);
-            eprintln!("[QR_GRAD_DEBUG]   gradient[{}] = {:.6}", i, gradient[i]);
+            eprintln!("[QR_GRAD_DEBUG]   grad_unscaled={:.6}, scaling_factor={:.0}, gradient[{}] = {:.6}",
+                     grad_unscaled, scaling_factor, i, gradient[i]);
         }
     }
 
@@ -822,6 +829,15 @@ pub fn reml_hessian_multi(
     }
     let a_inv = inverse(&a_reg)?;
 
+    // Compute total rank and individual ranks for scaling
+    let mut total_rank = 0;
+    let mut penalty_ranks = Vec::new();
+    for penalty in penalties.iter() {
+        let rank = estimate_rank(penalty);
+        penalty_ranks.push(rank);
+        total_rank += rank;
+    }
+
     // Compute Hessian
     let mut hessian = Array2::zeros((m, m));
 
@@ -831,6 +847,8 @@ pub fn reml_hessian_multi(
             let lambda_j = lambdas[j];
             let penalty_i = &penalties[i];
             let penalty_j = &penalties[j];
+            let rank_i = penalty_ranks[i];
+            let rank_j = penalty_ranks[j];
 
             // Compute ∂²REML/∂log(λᵢ)∂log(λⱼ)
             // ≈ -tr((A⁻¹·λᵢ·Sᵢ)·(A⁻¹·λⱼ·Sⱼ))
@@ -854,7 +872,13 @@ pub fn reml_hessian_multi(
             // Hessian: tr(A⁻¹·λᵢ·Sᵢ·A⁻¹·λⱼ·Sⱼ) / 2
             // Note: This is POSITIVE for minimization. mgcv's fast-REML.r computes
             // reml2 = -d2/2 where d2 is itself negative, giving a positive Hessian.
-            hessian[[i, j]] = trace / 2.0;
+            // CRITICAL FIX: Scale by (n - total_rank) only (NOT by ranks)
+            // The Hessian represents second derivatives in the SAME parameter space as gradients
+            // Since gradients are scaled by (n-total_rank)/rank_i, but this is just a
+            // reparameterization, the Hessian in the ORIGINAL space just scales by (n-total_rank)
+            let hess_unscaled = trace / 2.0;
+            let scaling_factor = (n - total_rank) as f64;
+            hessian[[i, j]] = hess_unscaled * scaling_factor;
 
             // Fill symmetric entry
             if i != j {
