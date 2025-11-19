@@ -832,7 +832,8 @@ pub fn reml_hessian_multi(
         .map(|(yi, wi)| yi * wi)
         .collect();
     let b = xtw.dot(&y_weighted);
-    let beta = solve(a.clone(), b)?;
+    // Use regularized matrix for numerical stability
+    let beta = solve(a_reg.clone(), b)?;
 
     // Compute RSS and φ
     let fitted = x.dot(&beta);
