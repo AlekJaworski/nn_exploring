@@ -919,12 +919,19 @@ pub fn reml_hessian_multi(
                 -trace_term
             };
 
-            // Total Hessian = det2 + bSb2
-            // det2: log-determinant part (computed above)
-            // bSb2: penalty derivative part (term2 + term3)
-            // Both divided by 2 for REML formula
+            // TEMPORARY: Use det2 only (log-determinant Hessian)
+            // bSb2 requires explicit β derivatives (dβ/dρ, d²β/dρ²) which we haven't implemented yet
+            // term2 and term3 above are WRONG - they use β directly with huge 1/φ² factors
+            // causing Hessian to become negative!
+            //
+            // TODO: Implement proper bSb2 from mgcv's get_bSb function:
+            //   bSb2[k,m] = 2·(d²β'/dρ_k dρ_m · S · β)
+            //              + 2·(dβ'/dρ_k · S · dβ/dρ_m)
+            //              + 2·(dβ'/dρ_m · S_k · β · sp[k])
+            //              + 2·(dβ'/dρ_k · S_m · β · sp[m])
+            //              + δ_{k,m}·bSb1[k]
 
-            let bSb2 = term2 + term3;
+            let bSb2 = 0.0;  // Omit for now - det2 alone should work
             let h_val = (det2 + bSb2) / 2.0;
 
             // Newton's method: x_new = x - H^{-1}·grad
@@ -932,7 +939,7 @@ pub fn reml_hessian_multi(
             // No negation needed - we computed the Hessian correctly
             hessian[[i, j]] = h_val;
 
-            if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 && j == 0 {
+            if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
                 eprintln!("[HESS_DEBUG] Hessian[{},{}]:", i, j);
                 eprintln!("[HESS_DEBUG]   trace_a_inv_m = {:.6e}", trace_a_inv_m_i);
                 eprintln!("[HESS_DEBUG]   trace_term = {:.6e}", trace_term);
@@ -941,7 +948,7 @@ pub fn reml_hessian_multi(
                 eprintln!("[HESS_DEBUG]   term3 (bSb2 part2) = {:.6e}", term3);
                 eprintln!("[HESS_DEBUG]   bSb2 = {:.6e}", bSb2);
                 eprintln!("[HESS_DEBUG]   total hessian = {:.6e}", hessian[[i, j]]);
-                eprintln!("[HESS_DEBUG]   phi = {:.6e}, lambda_i = {:.6e}", phi, lambda_i);
+                eprintln!("[HESS_DEBUG]   phi = {:.6e}, lambda_{} = {:.6e}, lambda_{} = {:.6e}", phi, i, lambda_i, j, lambda_j);
             }
 
             // Fill symmetric entry

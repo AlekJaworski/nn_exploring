@@ -205,6 +205,18 @@ impl SmoothingParameter {
             let gradient = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 
+            // Debug output: show raw Hessian before conditioning
+            if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+                eprintln!("\n[SMOOTH_DEBUG] Raw Hessian at λ={:?}:", lambdas);
+                for i in 0..m {
+                    for j in 0..m {
+                        eprint!("  H[{},{}]={:.6e}", i, j, hessian[[i,j]]);
+                    }
+                    eprintln!();
+                }
+                eprintln!("[SMOOTH_DEBUG] Gradient: {:?}", gradient);
+            }
+
             // ===================================================================
             // CRITICAL: Condition Hessian like mgcv to ensure stable convergence
             // ===================================================================
