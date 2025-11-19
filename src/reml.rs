@@ -518,32 +518,8 @@ pub fn reml_gradient_multi_qr(
         eprintln!("[QR_DEBUG] Z minimum column norm: {:.6e}", min_col_norm);
     }
 
-    // CRITICAL FIX: Add small diagonal ridge rows to improve conditioning
-    // This ensures R has no tiny diagonal elements by making Z full rank
-    let mut z_extended = Array2::<f64>::zeros((total_rows + p, p));
-
-    // Copy original Z
-    for i in 0..total_rows {
-        for j in 0..p {
-            z_extended[[i, j]] = z[[i, j]];
-        }
-    }
-
-    // Add small diagonal ridge rows at the bottom
-    // This is equivalent to adding λ·I to X'X + penalties
-    // Balance numerical stability vs gradient bias
-    let ridge_scale = 0.01; // Ridge to prevent singular R matrix
-    for j in 0..p {
-        z_extended[[total_rows + j, j]] = ridge_scale;
-    }
-
-    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-        eprintln!("[QR_DEBUG] After conditioning: Z_extended dimensions: {}×{}", z_extended.nrows(), z_extended.ncols());
-        eprintln!("[QR_DEBUG] Added {} ridge rows with scale {:.6e}", p, ridge_scale);
-    }
-
-    // QR decomposition: Z_extended = QR
-    let (_, r) = z_extended.qr()
+    // QR decomposition: Z = QR (no ridge needed - penalties provide conditioning)
+    let (_, r) = z.qr()
         .map_err(|e| GAMError::InvalidParameter(format!("QR decomposition failed: {:?}", e)))?;
 
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
