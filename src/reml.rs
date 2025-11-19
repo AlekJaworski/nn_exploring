@@ -434,7 +434,7 @@ pub fn reml_gradient_multi_qr(
     let mut penalty_blocks = Vec::new();
     let mut penalty_ranks = Vec::new();
 
-    for penalty in penalties.iter() {
+    for (pen_idx, penalty) in penalties.iter().enumerate() {
         // Find non-zero block
         let mut block_start = 0;
         let mut block_end = p;
@@ -449,6 +449,11 @@ pub fn reml_gradient_multi_qr(
                 }
                 block_end = row + 1;
             }
+        }
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[BLOCK_DETECT] Penalty {}: detected block_start={}, block_end={}, size={}",
+                     pen_idx, block_start, block_end, block_end - block_start);
         }
 
         let block_size = block_end - block_start;

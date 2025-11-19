@@ -250,6 +250,7 @@ impl GAM {
 
         // Construct penalty matrices with mgcv-style normalization
         let mut penalties: Vec<Array2<f64>> = Vec::new();
+        let mut s_scales: Vec<f64> = Vec::new();  // S.scale values for sp parameterization
         col_offset = 0;
 
         for (idx, smooth) in self.smooth_terms.iter().enumerate() {
@@ -270,24 +271,54 @@ impl GAM {
                 .fold(0.0f64, f64::max);
             let maXX = inf_norm_X * inf_norm_X;
 
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                let design_mean = design.iter().map(|x| x.abs()).sum::<f64>() / (design.nrows() * design.ncols()) as f64;
+                let design_max = design.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+                eprintln!("[BASIS_DEBUG] Smooth {}: design shape={}x{}, mean_abs={:.6e}, max_abs={:.6e}, inf_norm={:.6e}",
+                         idx, design.nrows(), design.ncols(), design_mean, design_max, inf_norm_X);
+            }
+
             // Compute infinity norm of penalty matrix (max absolute row sum)
             let inf_norm_S = (0..num_basis)
                 .map(|i| (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
 
-            // Apply normalization: maS = ||S||_inf / maXX, S_new = S / maS
-            let scale_factor = if inf_norm_S > 1e-10 {
-                maXX / inf_norm_S
-            } else {
-                1.0 // Avoid division by zero for degenerate penalties
-            };
+            // EXPERIMENTAL: Try NO penalty normalization to check if it helps gradients
+            // Original formula: maXX / inf_norm_S gave tiny values (0.01) vs mgcv's 70-170
+            // This causes catastrophic gradients. Try scale_factor = 1.0 (no normalization)
+            let scale_factor = 1.0;
 
+            // Store S.scale for sp parameterization (λ = sp × S.scale)
+            // With scale_factor=1.0, sp and lambda are equivalent
+            s_scales.push(scale_factor);
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PENALTY_SCALE] Smooth {}: maXX={:.6e}, inf_norm_S={:.6e}, S.scale={:.6e} [UNNORMALIZED]",
+                         idx, maXX, inf_norm_S, scale_factor);
+            }
 
             let mut penalty_full = Array2::zeros((total_basis, total_basis));
 
-            // Place this smooth's normalized penalty in the appropriate block using slicing
+            // Place this smooth's unnormalized penalty in the appropriate block
             penalty_full.slice_mut(ndarray::s![col_offset..col_offset + num_basis, col_offset..col_offset + num_basis])
-                .assign(&(&smooth.penalty * scale_factor));
+                .assign(&smooth.penalty);
+
+            // Debug: check where non-zero block actually is
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                let mut actual_block_start = total_basis;
+                let mut actual_block_end = 0;
+                for row in 0..total_basis {
+                    let row_sum: f64 = (0..total_basis).map(|col| penalty_full[[row, col]].abs()).sum();
+                    if row_sum > 1e-10 {
+                        actual_block_start = actual_block_start.min(row);
+                        actual_block_end = actual_block_end.max(row + 1);
+                    }
+                }
+                let expected_start = penalties.len() * num_basis;  // Use how many penalties we've added so far
+                let expected_end = expected_start + num_basis;
+                eprintln!("[PENALTY_DEBUG] Penalty {}: expected block=[{}:{}], actual block=[{}:{}], col_offset={}",
+                         idx, expected_start, expected_end, actual_block_start, actual_block_end, col_offset);
+            }
 
             penalties.push(penalty_full);
             col_offset += num_basis;
@@ -298,6 +329,9 @@ impl GAM {
             self.smooth_terms.len(),
             opt_method
         );
+
+        // Set S.scale values for sp parameterization
+        smoothing_params.set_s_scales(s_scales);
 
         // Outer loop: optimize smoothing parameters
         let mut weights = Array1::ones(n);

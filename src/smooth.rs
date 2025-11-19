@@ -16,6 +16,7 @@ pub enum OptimizationMethod {
 #[derive(Debug, Clone)]
 pub struct SmoothingParameter {
     pub lambda: Vec<f64>,
+    pub s_scales: Vec<f64>,  // S.scale factors from mgcv (used to convert sp -> lambda)
     pub method: OptimizationMethod,
 }
 
@@ -24,8 +25,17 @@ impl SmoothingParameter {
     pub fn new(num_smooths: usize, method: OptimizationMethod) -> Self {
         Self {
             lambda: vec![0.1; num_smooths],  // Will be refined in optimize()
+            s_scales: vec![1.0; num_smooths],  // Default to 1.0, will be set by caller
             method,
         }
+    }
+
+    /// Set the S.scale values from mgcv penalty normalization
+    pub fn set_s_scales(&mut self, s_scales: Vec<f64>) {
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[SP_PARAM] Setting S.scales: {:?}", s_scales);
+        }
+        self.s_scales = s_scales;
     }
 
     /// Optimize smoothing parameters using REML or GCV with adaptive initialization
@@ -169,8 +179,9 @@ impl SmoothingParameter {
 
     /// Newton optimization for multiple smoothing parameters
     ///
-    /// Optimizes all λᵢ jointly using Newton's method on log(λᵢ)
-    /// Following Wood (2011) JRSS-B algorithm
+    /// Optimizes all sp_i jointly using Newton's method on log(sp_i)
+    /// Following Wood (2011) JRSS-B algorithm and mgcv's parameterization
+    /// where λ_i = sp_i × S.scale_i
     fn optimize_reml_newton_multi(
         &mut self,
         y: &Array1<f64>,
@@ -182,10 +193,20 @@ impl SmoothingParameter {
     ) -> Result<()> {
         let m = penalties.len();
 
-        // Work in log space for stability
-        let mut log_lambda: Vec<f64> = self.lambda.iter()
-            .map(|l| l.ln())
+        // Work in log space for stability, optimizing sp (not lambda directly)
+        // Initialize: sp_i = lambda_i / s_scale_i
+        let sp_init: Vec<f64> = self.lambda.iter()
+            .zip(self.s_scales.iter())
+            .map(|(l, s)| l / s)
             .collect();
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[SP_PARAM] Initial lambda: {:?}", self.lambda);
+            eprintln!("[SP_PARAM] S.scales: {:?}", self.s_scales);
+            eprintln!("[SP_PARAM] Initial sp = lambda / S.scale: {:?}", sp_init);
+        }
+
+        let mut log_sp: Vec<f64> = sp_init.iter().map(|s| s.ln()).collect();
 
         // Maximum step size in log space (following Wood 2011 and mgcv)
         // This prevents overly aggressive Newton steps that require excessive backtracking
@@ -196,8 +217,12 @@ impl SmoothingParameter {
         let mut prev_reml = f64::INFINITY;
 
         for iter in 0..max_iter {
-            // Current lambdas
-            let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+            // Current sp values and corresponding lambdas (λ = sp × S.scale)
+            let sp_values: Vec<f64> = log_sp.iter().map(|l| l.exp()).collect();
+            let lambdas: Vec<f64> = sp_values.iter()
+                .zip(self.s_scales.iter())
+                .map(|(sp, s_scale)| (sp * s_scale).max(0.1))  // CRITICAL: Enforce minimum λ=0.1 for numerical stability
+                .collect();
 
             // Compute current REML value for convergence check
             let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
@@ -262,8 +287,9 @@ impl SmoothingParameter {
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!("[PROFILE] Newton iter {}: grad_L2={:.6}, grad_Linf={:.6}, REML={:.6}, REML_change={:.6e}",
                          iter + 1, grad_norm_l2, grad_norm_linf, current_reml, reml_change);
+                eprintln!("[PROFILE]   sp={:?}", sp_values);
                 eprintln!("[PROFILE]   lambda={:?}", lambdas);
-                eprintln!("[PROFILE]   log_lambda={:?}", log_lambda);
+                eprintln!("[PROFILE]   log_sp={:?}", log_sp);
                 eprintln!("[PROFILE]   gradient={:?}", gradient.as_slice().unwrap_or(&[]));
             }
 
@@ -332,14 +358,16 @@ impl SmoothingParameter {
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
 
-                // Try new log_lambda values
-                let new_log_lambda: Vec<f64> = log_lambda.iter()
+                // Try new log_sp values and convert to lambdas
+                let new_log_sp: Vec<f64> = log_sp.iter()
                     .zip(step.iter())
                     .map(|(l, s)| l + s * step_scale)
                     .collect();
 
-                let new_lambdas: Vec<f64> = new_log_lambda.iter()
-                    .map(|l| l.exp())
+                let new_sp: Vec<f64> = new_log_sp.iter().map(|l| l.exp()).collect();
+                let new_lambdas: Vec<f64> = new_sp.iter()
+                    .zip(self.s_scales.iter())
+                    .map(|(sp, s_scale)| sp * s_scale)
                     .collect();
 
                 // Evaluate REML
@@ -371,13 +399,13 @@ impl SmoothingParameter {
                 }
             }
 
-            // Update log_lambda
+            // Update log_sp
             if best_step_scale > 0.0 {
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE]   Accepted Newton step, scale={:.4}", best_step_scale);
                 }
                 for i in 0..m {
-                    log_lambda[i] += step[i] * best_step_scale;
+                    log_sp[i] += step[i] * best_step_scale;
                 }
             } else {
                 // Newton failed - try steepest descent as fallback
@@ -394,12 +422,16 @@ impl SmoothingParameter {
                 for scale in &[0.01, 0.001, 0.0001] {
                     let sd_step: Vec<f64> = gradient_sd.iter().map(|g| -g * scale).collect();
 
-                    let new_log_lambda_sd: Vec<f64> = log_lambda.iter()
+                    let new_log_sp_sd: Vec<f64> = log_sp.iter()
                         .zip(sd_step.iter())
                         .map(|(l, s)| l + s)
                         .collect();
 
-                    let new_lambdas_sd: Vec<f64> = new_log_lambda_sd.iter().map(|l| l.exp()).collect();
+                    let new_sp_sd: Vec<f64> = new_log_sp_sd.iter().map(|l| l.exp()).collect();
+                    let new_lambdas_sd: Vec<f64> = new_sp_sd.iter()
+                        .zip(self.s_scales.iter())
+                        .map(|(sp, s_scale)| sp * s_scale)
+                        .collect();
 
                     if let Ok(new_reml_sd) = reml_criterion_multi(y, x, w, &new_lambdas_sd, penalties, None) {
                         if std::env::var("MGCV_PROFILE").is_ok() {
@@ -408,7 +440,7 @@ impl SmoothingParameter {
                         }
                         if new_reml_sd < current_reml {
                             for i in 0..m {
-                                log_lambda[i] = new_log_lambda_sd[i];
+                                log_sp[i] = new_log_sp_sd[i];
                             }
                             if std::env::var("MGCV_PROFILE").is_ok() {
                                 eprintln!("[PROFILE]   Steepest descent succeeded (scale={}): REML={:.6}", scale, new_reml_sd);
@@ -431,8 +463,12 @@ impl SmoothingParameter {
             }
         }
 
-        // Update final lambdas
-        self.lambda = log_lambda.iter().map(|l| l.exp()).collect();
+        // Update final lambdas from optimized sp values (λ = sp × S.scale)
+        let final_sp: Vec<f64> = log_sp.iter().map(|l| l.exp()).collect();
+        self.lambda = final_sp.iter()
+            .zip(self.s_scales.iter())
+            .map(|(sp, s_scale)| sp * s_scale)
+            .collect();
 
         if std::env::var("MGCV_PROFILE").is_ok() {
             eprintln!("[PROFILE] Reached max iterations ({}) without convergence", max_iter);
