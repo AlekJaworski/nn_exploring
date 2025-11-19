@@ -851,6 +851,44 @@ pub fn reml_hessian_multi(
     }
     let phi = rss / (n - total_rank) as f64;
 
+    // Compute first derivatives of β with respect to log(λ_i)
+    // dβ/dρ_i = -A^{-1}·M_i·β where M_i = λ_i·S_i
+    let mut dbeta_drho = Vec::with_capacity(m);
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let m_i = penalty_i * lambda_i;  // M_i = λ_i·S_i
+        let m_i_beta = m_i.dot(&beta);    // M_i·β
+        let dbeta_i = a_inv.dot(&m_i_beta).mapv(|x| -x);  // -A^{-1}·M_i·β
+        dbeta_drho.push(dbeta_i);
+    }
+
+    // Compute bSb1 (first derivatives of β'·S·β/φ with respect to log(λ_i))
+    // This is needed for diagonal correction in bSb2
+    let mut bsb1 = Vec::with_capacity(m);
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+
+        // β'·S_i·β
+        let s_i_beta = penalty_i.dot(&beta);
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter())
+            .map(|(b, sb)| b * sb)
+            .sum();
+
+        // 2·dβ/dρ_i'·S·β where S = Σλ_j·S_j
+        let mut s_beta_total = Array1::zeros(p);
+        for (lambda_j, penalty_j) in lambdas.iter().zip(penalties.iter()) {
+            let s_j_beta = penalty_j.dot(&beta);
+            s_beta_total.scaled_add(*lambda_j, &s_j_beta);
+        }
+        let dbeta_s_beta: f64 = dbeta_drho[i].iter().zip(s_beta_total.iter())
+            .map(|(db, sb)| db * sb)
+            .sum();
+
+        bsb1.push((lambda_i * beta_s_i_beta + 2.0 * dbeta_s_beta) / phi);
+    }
+
     // Compute Hessian
     let mut hessian = Array2::zeros((m, m));
 
@@ -919,20 +957,74 @@ pub fn reml_hessian_multi(
                 -trace_term
             };
 
-            // TEMPORARY: Use det2 only (log-determinant Hessian)
-            // bSb2 requires explicit β derivatives (dβ/dρ, d²β/dρ²) which we haven't implemented yet
-            // term2 and term3 above are WRONG - they use β directly with huge 1/φ² factors
-            // causing Hessian to become negative!
+            // bSb2: Penalty Hessian from mgcv's get_bSb function
+            // Following mgcv C code in gdi.c
             //
-            // TODO: Implement proper bSb2 from mgcv's get_bSb function:
-            //   bSb2[k,m] = 2·(d²β'/dρ_k dρ_m · S · β)
-            //              + 2·(dβ'/dρ_k · S · dβ/dρ_m)
-            //              + 2·(dβ'/dρ_m · S_k · β · sp[k])
-            //              + 2·(dβ'/dρ_k · S_m · β · sp[m])
-            //              + δ_{k,m}·bSb1[k]
+            // bSb2[k,m] = 2·(d²β'/dρ_k dρ_m · S · β)       [Term 1: second derivatives]
+            //            + 2·(dβ'/dρ_k · S · dβ/dρ_m)       [Term 2: mixed derivatives]
+            //            + 2·(dβ'/dρ_m · S_k · β · λ_k)     [Term 3: parameter-dependent]
+            //            + 2·(dβ'/dρ_k · S_m · β · λ_m)     [Term 4: parameter-dependent]
+            //            + δ_{k,m}·bSb1[k]                   [Diagonal correction]
 
-            let bSb2 = 0.0;  // Omit for now - det2 alone should work
-            let h_val = (det2 + bSb2) / 2.0;
+            // Term 1: d²β'/dρ_k dρ_m · S · β
+            // From implicit differentiation: d²β/dρ_i dρ_j = A^{-1}·(M_i·A^{-1}·M_j·β + M_j·A^{-1}·M_i·β)
+            let m_i_beta = m_i.dot(&beta);
+            let m_j_beta = m_j.dot(&beta);
+            let a_inv_m_i_beta = a_inv.dot(&m_i_beta);
+            let a_inv_m_j_beta = a_inv.dot(&m_j_beta);
+            let m_i_a_inv_m_j_beta = m_i.dot(&a_inv_m_j_beta);
+            let m_j_a_inv_m_i_beta = m_j.dot(&a_inv_m_i_beta);
+
+            let mut d2beta_term = Array1::zeros(p);
+            d2beta_term += &m_i_a_inv_m_j_beta;
+            d2beta_term += &m_j_a_inv_m_i_beta;
+            let d2beta = a_inv.dot(&d2beta_term);
+
+            // S·β where S = Σλ_k·S_k
+            let mut s_beta_total = Array1::zeros(p);
+            for (lambda_k, penalty_k) in lambdas.iter().zip(penalties.iter()) {
+                let s_k_beta = penalty_k.dot(&beta);
+                s_beta_total.scaled_add(*lambda_k, &s_k_beta);
+            }
+
+            let term1: f64 = d2beta.iter().zip(s_beta_total.iter())
+                .map(|(d2b, sb)| d2b * sb)
+                .sum();
+
+            // Term 2: dβ'/dρ_k · S · dβ/dρ_m
+            let s_dbeta_j = {
+                let mut result = Array1::zeros(p);
+                for (lambda_k, penalty_k) in lambdas.iter().zip(penalties.iter()) {
+                    let s_k_dbeta_j = penalty_k.dot(&dbeta_drho[j]);
+                    result.scaled_add(*lambda_k, &s_k_dbeta_j);
+                }
+                result
+            };
+
+            let term2: f64 = dbeta_drho[i].iter().zip(s_dbeta_j.iter())
+                .map(|(db_i, s_db_j)| db_i * s_db_j)
+                .sum();
+
+            // Term 3: dβ'/dρ_m · S_k · β · λ_k (when k=i)
+            let s_i_beta = penalty_i.dot(&beta);
+            let term3: f64 = dbeta_drho[j].iter().zip(s_i_beta.iter())
+                .map(|(db_j, s_i_b)| db_j * s_i_b)
+                .sum::<f64>() * lambda_i;
+
+            // Term 4: dβ'/dρ_k · S_m · β · λ_m (when m=j)
+            let s_j_beta = penalty_j.dot(&beta);
+            let term4: f64 = dbeta_drho[i].iter().zip(s_j_beta.iter())
+                .map(|(db_i, s_j_b)| db_i * s_j_b)
+                .sum::<f64>() * lambda_j;
+
+            // Diagonal correction
+            let diag_corr = if i == j { bsb1[i] } else { 0.0 };
+
+            // Combine all bSb2 terms
+            let bsb2 = 2.0 * (term1 + term2 + term3 + term4) + diag_corr;
+
+            // Total Hessian = (det2 + bSb2) / 2
+            let h_val = (det2 + bsb2) / 2.0;
 
             // Newton's method: x_new = x - H^{-1}·grad
             // For minimization, H = ∂²V/∂ρ² should be positive at minimum
@@ -941,13 +1033,14 @@ pub fn reml_hessian_multi(
 
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
                 eprintln!("[HESS_DEBUG] Hessian[{},{}]:", i, j);
-                eprintln!("[HESS_DEBUG]   trace_a_inv_m = {:.6e}", trace_a_inv_m_i);
-                eprintln!("[HESS_DEBUG]   trace_term = {:.6e}", trace_term);
-                eprintln!("[HESS_DEBUG]   det2 = {:.6e}", det2);
-                eprintln!("[HESS_DEBUG]   term2 (bSb2 part1) = {:.6e}", term2);
-                eprintln!("[HESS_DEBUG]   term3 (bSb2 part2) = {:.6e}", term3);
-                eprintln!("[HESS_DEBUG]   bSb2 = {:.6e}", bSb2);
-                eprintln!("[HESS_DEBUG]   total hessian = {:.6e}", hessian[[i, j]]);
+                eprintln!("[HESS_DEBUG]   det2 = {:.6e} (log-determinant)", det2);
+                eprintln!("[HESS_DEBUG]   bSb2 term1 (d2beta) = {:.6e}", term1);
+                eprintln!("[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = {:.6e}", term2);
+                eprintln!("[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = {:.6e}", term3);
+                eprintln!("[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = {:.6e}", term4);
+                eprintln!("[HESS_DEBUG]   bSb2 diag_corr = {:.6e}", diag_corr);
+                eprintln!("[HESS_DEBUG]   bSb2 total = {:.6e} (penalty)", bsb2);
+                eprintln!("[HESS_DEBUG]   (det2 + bSb2)/2 = {:.6e}", h_val);
                 eprintln!("[HESS_DEBUG]   phi = {:.6e}, lambda_{} = {:.6e}, lambda_{} = {:.6e}", phi, i, lambda_i, j, lambda_j);
             }
 
