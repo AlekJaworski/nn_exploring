@@ -586,75 +586,83 @@ pub fn reml_gradient_multi_qr(
     }
 
     // Compute gradient for each penalty
+    // CORRECT FORMULA including implicit dependencies via Implicit Function Theorem:
+    //
+    // ∂REML/∂ρᵢ = tr(A^{-1}·λᵢ·Sᵢ) + ∂edf/∂ρᵢ · (-log(φ) + 1) + ∂rss/∂ρᵢ / φ
+    //
+    // where:
+    //   ∂β/∂ρᵢ = -A^{-1}·λᵢ·Sᵢ·β  (from Implicit Function Theorem: A·β = X'y)
+    //   ∂rss/∂ρᵢ = -2·residuals'·X·∂β/∂ρᵢ
+    //   ∂edf/∂ρᵢ = -tr(A^{-1}·λᵢ·Sᵢ·A^{-1}·X'X)
+    //
+    // This differs from naive formula which omits implicit β dependence!
     let mut gradient = Array1::zeros(m);
 
-    eprintln!("[QR_GRAD_DEBUG] UNCONDITIONAL: About to compute {} gradients", m);
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[QR_GRAD_DEBUG] Computing gradient with IMPLICIT FUNCTION THEOREM");
+        eprintln!("[QR_GRAD_DEBUG] About to compute {} gradients", m);
+    }
 
     for i in 0..m {
         let lambda_i = lambdas[i];
         let penalty_i = &penalties[i];
-        let rank_i = penalty_ranks[i];
         let sqrt_pen_i = &sqrt_penalties[i];
 
-        eprintln!("[QR_GRAD_DEBUG] UNCONDITIONAL: Computing gradient for penalty {}", i);
-
-        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
-            eprintln!("[QR_GRAD_DEBUG] Starting penalty {} gradient computation", i);
-        }
-
-        // CRITICAL FIX: Use FULL matrices, not blocks!
-        // The gradient formula requires tr(A^{-1}·λ·S) = λ·tr(P'·S·P)
-        // where S is the FULL p×p penalty matrix (block-diagonal)
-        // and P is the FULL p×p matrix R^{-1}
-        //
-        // Previous bug: we extracted only the non-zero block, which gave
-        // tr(P_block'·S_block·P_block) ≠ tr(P'·S·P)
-        // This caused gradient to be ~10-40x too small!
-
-        // Use the pre-computed sqrt penalty for this smooth
-        let sqrt_pen_i = &sqrt_penalties[i];  // p × rank_i
-
-        // Compute P'·L where L = sqrt(S_i)
+        // Component 1: tr(A^{-1}·λᵢ·Sᵢ) = λᵢ·tr(P'·S·P)
         let p_t_l = p_matrix.t().dot(sqrt_pen_i);  // p × rank_i
-
-        // Compute tr(P'·L·L'·P) = tr(P'·S·P) = sum of squared elements of P'·L
         let trace_term: f64 = p_t_l.iter().map(|x| x * x).sum();
-
-        // Scale by λ_i (derivative w.r.t. log(λ_i))
         let trace = lambda_i * trace_term;
 
-        if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-            eprintln!("[QR_GRAD_DEBUG] smooth={}: P'·L shape: {}×{}",
-                     i, p_t_l.nrows(), p_t_l.ncols());
+        // Component 2: Implicit derivatives via IFT
+        // ∂β/∂ρᵢ = -A^{-1}·λᵢ·Sᵢ·β
+        let lambda_s_beta = penalty_i.dot(&beta);
+        let scaled_lambda_s_beta: Array1<f64> = lambda_s_beta.iter()
+            .map(|x| lambda_i * x)
+            .collect();
+        let dbeta_drho = a_inv.dot(&scaled_lambda_s_beta);
+        let dbeta_drho_neg: Array1<f64> = dbeta_drho.iter().map(|x| -x).collect();
 
-            // Show first few values to compare with Python
-            let sample_values: Vec<f64> = p_t_l.iter().take(5).copied().collect();
-            eprintln!("[QR_GRAD_DEBUG] smooth={}: P'·L first values: {:?}", i, sample_values);
-
-            // Show sum of squares computation
-            let sum_sq: f64 = p_t_l.iter().map(|x| x * x).sum();
-            eprintln!("[QR_GRAD_DEBUG] smooth={}: sum((P'·L)²) = {:.6}", i, sum_sq);
-            eprintln!("[QR_GRAD_DEBUG] smooth={}: λ_i={:.6}, trace_term={:.6}, trace={:.6}",
-                     i, lambda_i, trace_term, trace);
+        // ∂rss/∂ρᵢ = -2·residuals'·X·∂β/∂ρᵢ
+        // X is n×p, ∂β/∂ρᵢ is p×1, so X·∂β/∂ρᵢ is n×1
+        let x_dbeta = x.dot(&dbeta_drho_neg);  // n×p · p×1 = n×1
+        let mut drss_sum = 0.0;
+        for i in 0..residuals.len() {
+            drss_sum += residuals[i] * x_dbeta[i];
         }
+        let drss_drho = -2.0 * drss_sum;
 
-        // Compute penalty term: λᵢ·β'·Sᵢ·β
-        let s_beta = penalty_i.dot(&beta);
-        let beta_s_beta: f64 = beta.iter().zip(s_beta.iter())
-            .map(|(bi, sbi)| bi * sbi)
-            .sum();
-        let penalty_term = lambda_i * beta_s_beta;
+        // ∂edf/∂ρᵢ = -tr(A^{-1}·λᵢ·Sᵢ·A^{-1}·X'X)
+        // Using cyclic property: tr(A·B·C·D) = tr(D·A·B·C)
+        // = -tr(X'X·A^{-1}·λᵢ·Sᵢ·A^{-1})
+        //
+        // Compute efficiently:
+        // 1. A^{-1}·X'X (already computed as ainv_xtwx)
+        // 2. (A^{-1}·X'X)·A^{-1}
+        // 3. tr((A^{-1}·X'X·A^{-1})·λᵢ·Sᵢ) = sum_jk (A^{-1}·X'X·A^{-1})_jk · (λᵢ·Sᵢ)_kj
 
-        // Gradient formula: Wood (2011) formula AS IS
-        // ∂REML/∂ρ = [tr(M·A) - r + β'·M·β/φ] / 2
-        // where M = λ·S, ρ = log(λ)
-        gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
+        let ainv_xtx_ainv = ainv_xtwx.dot(&a_inv);
+        let mut trace_sum = 0.0;
+        for j in 0..p {
+            for k in 0..p {
+                trace_sum += ainv_xtx_ainv[[j, k]] * penalty_i[[k, j]] * lambda_i;
+            }
+        }
+        let dedf_drho = -trace_sum;
+
+        // Total gradient: trace + dedf·(-log(φ)+1) + drss/φ
+        let log_phi = phi.ln();
+        gradient[i] = trace + dedf_drho * (-log_phi + 1.0) + drss_drho / phi;
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-            eprintln!("[QR_GRAD_DEBUG] smooth={}: lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}",
-                     i, lambda_i, trace, rank_i, penalty_term, phi);
-            eprintln!("[QR_GRAD_DEBUG]   smooth={}: gradient = ({:.6} - {:.6} + {:.6}) / 2 = {:.6}",
-                     i, trace, rank_i as f64, penalty_term / phi, gradient[i]);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: trace (tr(A^{{-1}}·λ·S)) = {:.10}", i, trace);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: dedf/drho = {:.10}", i, dedf_drho);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: drss/drho = {:.10}", i, drss_drho);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: log(phi) = {:.10}", i, log_phi);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: component1 = trace = {:.10}", i, trace);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: component2 = dedf·(-log(φ)+1) = {:.10}",
+                     i, dedf_drho * (-log_phi + 1.0));
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: component3 = drss/φ = {:.10}", i, drss_drho / phi);
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: TOTAL gradient = {:.10}", i, gradient[i]);
         }
     }
 
