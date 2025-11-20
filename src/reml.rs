@@ -580,6 +580,10 @@ pub fn reml_gradient_multi_qr(
     let edf_total: f64 = (0..p).map(|i| ainv_xtwx[[i, i]]).sum();
     let phi = rss / (n as f64 - edf_total);
 
+    // Pre-compute A^{-1}·X'X·A^{-1} for ∂edf/∂ρ calculations
+    // This is O(p³) and independent of smooth index, so compute once
+    let ainv_xtx_ainv = ainv_xtwx.dot(&a_inv);
+
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
         eprintln!("[PHI_DEBUG] n={}, edf_total={:.6}, rss={:.6}, phi={:.6}",
                  n, edf_total, rss, phi);
@@ -635,12 +639,9 @@ pub fn reml_gradient_multi_qr(
         // Using cyclic property: tr(A·B·C·D) = tr(D·A·B·C)
         // = -tr(X'X·A^{-1}·λᵢ·Sᵢ·A^{-1})
         //
-        // Compute efficiently:
-        // 1. A^{-1}·X'X (already computed as ainv_xtwx)
-        // 2. (A^{-1}·X'X)·A^{-1}
-        // 3. tr((A^{-1}·X'X·A^{-1})·λᵢ·Sᵢ) = sum_jk (A^{-1}·X'X·A^{-1})_jk · (λᵢ·Sᵢ)_kj
+        // Compute efficiently using pre-computed ainv_xtx_ainv:
+        // tr((A^{-1}·X'X·A^{-1})·λᵢ·Sᵢ) = sum_jk (A^{-1}·X'X·A^{-1})_jk · (λᵢ·Sᵢ)_kj
 
-        let ainv_xtx_ainv = ainv_xtwx.dot(&a_inv);
         let mut trace_sum = 0.0;
         for j in 0..p {
             for k in 0..p {
