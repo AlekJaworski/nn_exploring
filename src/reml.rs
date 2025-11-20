@@ -844,12 +844,27 @@ pub fn reml_hessian_multi(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
-    // Compute total rank for φ
-    let mut total_rank = 0;
-    for penalty in penalties.iter() {
-        total_rank += estimate_rank(penalty);
+    // Compute effective degrees of freedom for φ
+    // edf = tr(A^{-1}·X'WX)
+    // For Gaussian case with W=I: edf = tr(A^{-1}·X'X)
+    let xtx = x.t().to_owned().dot(&x.to_owned());
+    let ainv_xtx = a_inv.dot(&xtx);
+    let edf: f64 = (0..ainv_xtx.nrows())
+        .map(|i| ainv_xtx[[i, i]])
+        .sum();
+
+    // Correct φ computation using effective df
+    let phi = rss / (n as f64 - edf);
+
+    // Debug: compare against old approach
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        let old_total_rank: usize = penalties.iter()
+            .map(|p| estimate_rank(p))
+            .sum();
+        let old_phi = rss / (n as f64 - old_total_rank as f64);
+        eprintln!("[PHI_DEBUG] edf (correct) = {:.3}, old total_rank = {}, φ_correct = {:.6e}, φ_old = {:.6e}, ratio = {:.3}",
+                  edf, old_total_rank, phi, old_phi, old_phi / phi);
     }
-    let phi = rss / (n - total_rank) as f64;
 
     // Compute first derivatives of β with respect to log(λ_i)
     // dβ/dρ_i = -A^{-1}·M_i·β where M_i = λ_i·S_i
@@ -967,7 +982,9 @@ pub fn reml_hessian_multi(
             //            + δ_{k,m}·bSb1[k]                   [Diagonal correction]
 
             // Term 1: d²β'/dρ_k dρ_m · S · β
-            // From implicit differentiation: d²β/dρ_i dρ_j = A^{-1}·(M_i·A^{-1}·M_j·β + M_j·A^{-1}·M_i·β)
+            // From implicit differentiation:
+            // d²β/dρ_i dρ_j = A^{-1}·[M_i·A^{-1}·M_j·β + M_j·A^{-1}·M_i·β] + δ_{ij}·dβ/dρ_i
+            // The diagonal term δ_{ij}·dβ/dρ_i is CRITICAL!
             let m_i_beta = m_i.dot(&beta);
             let m_j_beta = m_j.dot(&beta);
             let a_inv_m_i_beta = a_inv.dot(&m_i_beta);
@@ -978,7 +995,13 @@ pub fn reml_hessian_multi(
             let mut d2beta_term = Array1::zeros(p);
             d2beta_term += &m_i_a_inv_m_j_beta;
             d2beta_term += &m_j_a_inv_m_i_beta;
-            let d2beta = a_inv.dot(&d2beta_term);
+            let mut d2beta = a_inv.dot(&d2beta_term);
+
+            // Add diagonal correction: + δ_{ij}·dβ/dρ_i
+            // This term comes from ∂M_i/∂ρ_j = δ_{ij}·M_i in the derivation
+            if i == j {
+                d2beta += &dbeta_drho[i];
+            }
 
             // S·β where S = Σλ_k·S_k
             let mut s_beta_total = Array1::zeros(p);
