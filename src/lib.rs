@@ -614,11 +614,38 @@ fn reml_gradient_multi_qr_py<'py>(
 }
 
 #[cfg(feature = "python")]
+#[pyfunction]
+fn reml_hessian_multi_qr_py<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<f64>,
+    x: PyReadonlyArray2<f64>,
+    w: PyReadonlyArray1<f64>,
+    lambdas: Vec<f64>,
+    penalties: Vec<PyReadonlyArray2<f64>>,
+) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+    use numpy::PyArray2;
+
+    let y_array = y.as_array().to_owned();
+    let x_array = x.as_array().to_owned();
+    let w_array = w.as_array().to_owned();
+
+    let penalties_vec: Vec<_> = penalties.iter()
+        .map(|p| p.as_array().to_owned())
+        .collect();
+
+    let hessian = reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+        .map_err(|e| PyValueError::new_err(format!("Hessian computation failed: {}", e)))?;
+
+    Ok(PyArray2::from_owned_array_bound(py, hessian))
+}
+
+#[cfg(feature = "python")]
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGAM>()?;
     m.add_function(wrap_pyfunction!(compute_penalty_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(reml_gradient_multi_qr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
     Ok(())
 }

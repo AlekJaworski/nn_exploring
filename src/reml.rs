@@ -655,6 +655,290 @@ pub fn reml_gradient_multi_qr(
     Ok(gradient)
 }
 
+/// Compute the Hessian of REML with respect to log(λᵢ) using QR-based approach
+///
+/// Returns: ∂²REML/∂ρᵢ∂ρⱼ for i,j = 1..m, where ρᵢ = log(λᵢ)
+///
+/// This uses the CORRECTED formula with Implicit Function Theorem accounting for
+/// implicit β dependencies through A·β = X'y.
+///
+/// The Hessian has the form:
+/// H[i,j] = ∂/∂ρⱼ [∂REML/∂ρᵢ]
+///
+/// where ∂REML/∂ρᵢ = tr(A⁻¹·λᵢ·Sᵢ) + ∂edf/∂ρᵢ·(-log(φ)+1) + ∂rss/∂ρᵢ/φ
+pub fn reml_hessian_multi_qr(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+) -> Result<Array2<f64>> {
+    use ndarray_linalg::Inverse;
+    use ndarray_linalg::QR;
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Step 1: QR decomposition for efficient A^{-1} computation
+    let mut sqrt_penalties = Vec::with_capacity(m);
+    let mut penalty_ranks = Vec::with_capacity(m);
+
+    for penalty in penalties.iter() {
+        let sqrt_pen = penalty_sqrt(penalty)?;
+        let rank = sqrt_pen.ncols();
+        sqrt_penalties.push(sqrt_pen);
+        penalty_ranks.push(rank);
+    }
+
+    // Build augmented matrix Z = [X; √λ₁·L₁'; √λ₂·L₂'; ...]
+    let total_rows: usize = n + penalty_ranks.iter().sum::<usize>();
+    let mut z = Array2::zeros((total_rows, p));
+    z.slice_mut(s![0..n, ..]).assign(x);
+
+    let mut row_offset = n;
+    for (i, sqrt_pen) in sqrt_penalties.iter().enumerate() {
+        let rank = penalty_ranks[i];
+        let lambda_sqrt = lambdas[i].sqrt();
+        for j in 0..rank {
+            for k in 0..p {
+                z[[row_offset + j, k]] = lambda_sqrt * sqrt_pen[[k, j]];
+            }
+        }
+        row_offset += rank;
+    }
+
+    // QR decomposition using ndarray_linalg
+    let (_, r) = z.qr().map_err(|_| GAMError::LinAlgError("QR decomposition failed".to_string()))?;
+    let p_matrix = r.slice(s![0..p, 0..p]).inv().map_err(|_| GAMError::SingularMatrix)?;
+
+    // Step 2: Compute X'X and A^{-1}
+    let xtx = x.t().to_owned().dot(x);
+    let a_inv = p_matrix.dot(&p_matrix.t());
+
+    // Step 3: Solve for β = A^{-1}·X'·y
+    let xty = x.t().to_owned().dot(y);
+    let beta = a_inv.dot(&xty);
+
+    // Step 4: Compute residuals, RSS, edf, phi
+    let fitted = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+    let rss: f64 = residuals.iter().map(|r| r * r).sum();
+
+    let ainv_xtx = a_inv.dot(&xtx);
+    let edf_total: f64 = (0..p).map(|i| ainv_xtx[[i, i]]).sum();
+    let phi = rss / (n as f64 - edf_total);
+    let log_phi = phi.ln();
+    let inv_phi = 1.0 / phi;
+
+    // Pre-compute A^{-1}·X'X·A^{-1} for efficiency
+    let ainv_xtx_ainv = ainv_xtx.dot(&a_inv);
+
+    // Step 5: Compute first derivatives (gradient components)
+    let mut dbeta_drho = Vec::with_capacity(m);
+    let mut drss_drho = Vec::with_capacity(m);
+    let mut dedf_drho = Vec::with_capacity(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+
+        // ∂β/∂ρᵢ = -A^{-1}·λᵢ·Sᵢ·β
+        let s_beta = penalty_i.dot(&beta);
+        let mut lambda_s_beta = Array1::zeros(p);
+        for j in 0..p {
+            lambda_s_beta[j] = -lambda_i * s_beta[j];
+        }
+        let dbeta_i = a_inv.dot(&lambda_s_beta);
+        dbeta_drho.push(dbeta_i.clone());
+
+        // ∂rss/∂ρᵢ = -2·residuals'·X·∂β/∂ρᵢ
+        let x_dbeta = x.dot(&dbeta_i);
+        let mut drss_sum = 0.0;
+        for j in 0..n {
+            drss_sum += residuals[j] * x_dbeta[j];
+        }
+        drss_drho.push(-2.0 * drss_sum);
+
+        // ∂edf/∂ρᵢ = -tr(A^{-1}·λᵢ·Sᵢ·A^{-1}·X'X)
+        let mut trace_sum = 0.0;
+        for j in 0..p {
+            for k in 0..p {
+                trace_sum += unsafe {
+                    *ainv_xtx_ainv.uget((j, k)) * *penalty_i.uget((k, j))
+                };
+            }
+        }
+        dedf_drho.push(-lambda_i * trace_sum);
+    }
+
+    // Step 6: Compute Hessian
+    let mut hessian = Array2::zeros((m, m));
+
+    for i in 0..m {
+        for j in i..m {  // Only compute upper triangle (symmetric)
+            let lambda_i = lambdas[i];
+            let lambda_j = lambdas[j];
+            let s_i = &penalties[i];
+            let s_j = &penalties[j];
+            let sqrt_si = &sqrt_penalties[i];
+            let sqrt_sj = &sqrt_penalties[j];
+
+            // ================================================================
+            // TERM 1: ∂²log|A|/∂ρⱼ∂ρᵢ
+            // ================================================================
+            // Part A: -λᵢ·λⱼ·tr(A⁻¹·Sⱼ·A⁻¹·Sᵢ)
+            let ainv_sj = a_inv.dot(s_j);
+            let ainv_sj_ainv = ainv_sj.dot(&a_inv);
+            let si_ainv_sj_ainv = s_i.dot(&ainv_sj_ainv);
+            let mut trace1a = 0.0;
+            for k in 0..p {
+                trace1a += si_ainv_sj_ainv[[k, k]];
+            }
+            let term1a = -lambda_i * lambda_j * trace1a;
+
+            // Part B: δᵢⱼ·λᵢ·tr(A⁻¹·Sᵢ) (diagonal correction from ∂λᵢ/∂ρⱼ)
+            let term1b = if i == j {
+                // tr(A⁻¹·Sᵢ) = tr(P'·√Sᵢ·√Sᵢ'·P) = ||P'·√Sᵢ||²_F
+                let p_t_sqrt_si = p_matrix.t().dot(sqrt_si);
+                let trace_ainv_si: f64 = p_t_sqrt_si.iter().map(|x| x * x).sum();
+                lambda_i * trace_ainv_si
+            } else {
+                0.0
+            };
+
+            let term1_total = term1a + term1b;
+
+            // ================================================================
+            // TERM 2: ∂/∂ρⱼ[∂edf/∂ρᵢ·(-log(φ)+1)]
+            // ================================================================
+            // Part A: ∂²edf/∂ρⱼ∂ρᵢ·(-log(φ)+1)
+            // ∂²edf/∂ρⱼ∂ρᵢ = λᵢ·λⱼ·[tr(A⁻¹·Sⱼ·A⁻¹·Sᵢ·A⁻¹·X'X) + tr(A⁻¹·Sᵢ·A⁻¹·Sⱼ·A⁻¹·X'X)]
+            //                - δᵢⱼ·λᵢ·tr(A⁻¹·Sᵢ·A⁻¹·X'X)
+            let ainv_si_ainv = a_inv.dot(s_i).dot(&a_inv);
+            let ainv_sj_ainv = a_inv.dot(s_j).dot(&a_inv);
+
+            // tr(A⁻¹·Sⱼ·A⁻¹·Sᵢ·A⁻¹·X'X) = Σ_k Σ_l Σ_m ainv_sj_ainv[k,l] · S_i[l,m] · ainv_xtx[m,k]
+            let mut trace2a1 = 0.0;
+            let mut trace2a2 = 0.0;
+            for k in 0..p {
+                for l in 0..p {
+                    for m in 0..p {
+                        trace2a1 += ainv_sj_ainv[[k, l]] * s_i[[l, m]] * ainv_xtx[[m, k]];
+                        trace2a2 += ainv_si_ainv[[k, l]] * s_j[[l, m]] * ainv_xtx[[m, k]];
+                    }
+                }
+            }
+
+            let d2edf_part1 = lambda_i * lambda_j * (trace2a1 + trace2a2);
+
+            let d2edf_part2 = if i == j {
+                // tr(A⁻¹·Sᵢ·A⁻¹·X'X) - NOT (A⁻¹·Sᵢ·A⁻¹)·(A⁻¹·X'X)!
+                let ainv_si = a_inv.dot(s_i);
+                let mut trace2b = 0.0;
+                for k in 0..p {
+                    for l in 0..p {
+                        trace2b += ainv_si[[k, l]] * ainv_xtx[[l, k]];
+                    }
+                }
+                -lambda_i * trace2b
+            } else {
+                0.0
+            };
+
+            let d2edf = d2edf_part1 + d2edf_part2;
+            let term2a = d2edf * (-log_phi + 1.0);
+
+            if std::env::var("MGCV_HESS_DEBUG").is_ok() && (i == 0 && j == 0) {
+                eprintln!("[HESS_QR_DEBUG]   d2edf_part1 = {:.6e}", d2edf_part1);
+                eprintln!("[HESS_QR_DEBUG]   d2edf_part2 (diag corr) = {:.6e}", d2edf_part2);
+                eprintln!("[HESS_QR_DEBUG]   d2edf_total = {:.6e}", d2edf);
+            }
+
+            // Part B: ∂edf/∂ρᵢ·∂(-log(φ))/∂ρⱼ
+            // ∂φ/∂ρⱼ = [∂rss/∂ρⱼ + φ·∂edf/∂ρⱼ] / (n-edf)
+            let dphi_drho_j = (drss_drho[j] + phi * dedf_drho[j]) / (n as f64 - edf_total);
+            let dlogphi_drho_j = -dphi_drho_j / phi;
+            let term2b = dedf_drho[i] * dlogphi_drho_j;
+
+            let term2_total = term2a + term2b;
+
+            // ================================================================
+            // TERM 3: ∂/∂ρⱼ[∂rss/∂ρᵢ/φ]
+            // ================================================================
+            // Part A: ∂²rss/∂ρⱼ∂ρᵢ/φ
+            // ∂²rss/∂ρⱼ∂ρᵢ = 2·(X·∂β/∂ρⱼ)'·X·∂β/∂ρᵢ - 2·r'·X·∂²β/∂ρⱼ∂ρᵢ
+            //
+            // where ∂²β/∂ρⱼ∂ρᵢ = A⁻¹·λⱼ·Sⱼ·A⁻¹·λᵢ·Sᵢ·β - A⁻¹·λᵢ·Sᵢ·∂β/∂ρⱼ
+            //                      - δᵢⱼ·∂β/∂ρᵢ
+
+            // Part (1): 2·(X·∂β/∂ρⱼ)'·X·∂β/∂ρᵢ
+            let x_dbeta_j = x.dot(&dbeta_drho[j]);
+            let x_dbeta_i = x.dot(&dbeta_drho[i]);
+            let d2rss_part1 = 2.0 * x_dbeta_j.dot(&x_dbeta_i);
+
+            // Part (2): ∂²β via IFT
+            let si_beta = s_i.dot(&beta);
+            let sj_beta = s_j.dot(&beta);
+            let ainv_si_beta = a_inv.dot(&si_beta);
+            let ainv_sj_beta = a_inv.dot(&sj_beta);
+
+            // A⁻¹·λⱼ·Sⱼ·A⁻¹·λᵢ·Sᵢ·β
+            let lambda_i_ainv_si_beta = ainv_si_beta.mapv(|x| lambda_i * x);
+            let sj_times_term = s_j.dot(&lambda_i_ainv_si_beta);
+            let part2_1 = a_inv.dot(&sj_times_term).mapv(|x| lambda_j * x);
+
+            // -A⁻¹·λᵢ·Sᵢ·∂β/∂ρⱼ
+            let si_dbeta_j = s_i.dot(&dbeta_drho[j]);
+            let part2_2 = a_inv.dot(&si_dbeta_j).mapv(|x| -lambda_i * x);
+
+            let mut d2beta = part2_1 + part2_2;
+
+            // Diagonal correction: -δᵢⱼ·∂β/∂ρᵢ
+            if i == j {
+                d2beta = d2beta - dbeta_drho[i].clone();
+            }
+
+            let x_d2beta = x.dot(&d2beta);
+            let d2rss_part2 = -2.0 * residuals.dot(&x_d2beta);
+
+            let d2rss = d2rss_part1 + d2rss_part2;
+            let term3a = d2rss / phi;
+
+            // Part B: -∂rss/∂ρᵢ·∂φ/∂ρⱼ/φ²
+            let term3b = -drss_drho[i] * dphi_drho_j / (phi * phi);
+
+            let term3_total = term3a + term3b;
+
+            // ================================================================
+            // TOTAL HESSIAN
+            // ================================================================
+            let h_val = term1_total + term2_total + term3_total;
+            hessian[[i, j]] = h_val;
+
+            if std::env::var("MGCV_HESS_DEBUG").is_ok() {
+                eprintln!("[HESS_QR_DEBUG] H[{},{}]:", i, j);
+                eprintln!("  Term 1 (log|A|): {:.6e} (1a={:.6e}, 1b={:.6e})",
+                         term1_total, term1a, term1b);
+                eprintln!("  Term 2 (edf): {:.6e} (2a={:.6e}, 2b={:.6e})",
+                         term2_total, term2a, term2b);
+                eprintln!("  Term 3 (rss): {:.6e} (3a={:.6e}, 3b={:.6e})",
+                         term3_total, term3a, term3b);
+                eprintln!("  TOTAL: {:.6e}", h_val);
+            }
+
+            // Fill symmetric entry
+            if i != j {
+                hessian[[j, i]] = hessian[[i, j]];
+            }
+        }
+    }
+
+    Ok(hessian)
+}
+
 /// Compute the gradient of REML with respect to log(λᵢ)
 ///
 /// Returns: ∂REML/∂log(λᵢ) for i = 1..m
