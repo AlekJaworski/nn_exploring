@@ -205,6 +205,18 @@ impl SmoothingParameter {
             let gradient = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 
+            // Debug output: show raw Hessian before conditioning
+            if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+                eprintln!("\n[SMOOTH_DEBUG] Raw Hessian at λ={:?}:", lambdas);
+                for i in 0..m {
+                    for j in 0..m {
+                        eprint!("  H[{},{}]={:.6e}", i, j, hessian[[i,j]]);
+                    }
+                    eprintln!();
+                }
+                eprintln!("[SMOOTH_DEBUG] Gradient: {:?}", gradient);
+            }
+
             // ===================================================================
             // CRITICAL: Condition Hessian like mgcv to ensure stable convergence
             // ===================================================================
@@ -269,6 +281,9 @@ impl SmoothingParameter {
             // 1. Gradient L-infinity norm is small (gradient convergence)
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
             // mgcv uses both criteria to handle different convergence scenarios
+            //
+            // NOTE: mgcv converges when max|grad| < ~0.01 or so
+            // Temporarily using very tight threshold to see Newton iterations
             if grad_norm_linf < 0.01 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
@@ -277,12 +292,15 @@ impl SmoothingParameter {
                 return Ok(());
             }
 
-            // REML change convergence: handles asymptotic cases (e.g., linear smooths with λ→∞)
-            if iter > 5 && reml_change < tolerance * 0.1 {
+            // REML change convergence: DISABLED for now to test gradient convergence
+            // The Hessian may be approximate, causing tiny REML steps even with large gradient
+            // Better to rely on gradient criterion
+            let relative_reml_change = reml_change / current_reml.abs().max(1.0);
+            if false && iter > 5 && relative_reml_change < 1e-6 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] Converged after {} iterations (REML change criterion: {:.2e} < {:.2e})",
-                             iter + 1, reml_change, tolerance * 0.1);
+                    eprintln!("[PROFILE] Converged after {} iterations (REML relative change: {:.2e} < 1e-6)",
+                             iter + 1, relative_reml_change);
                 }
                 return Ok(());
             }

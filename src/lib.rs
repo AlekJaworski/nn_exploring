@@ -13,6 +13,7 @@ pub mod gam;
 pub mod gam_optimized;
 pub mod utils;
 pub mod linalg;
+pub mod newton_optimizer;
 
 pub use gam::{GAM, SmoothTerm};
 pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
@@ -518,10 +519,184 @@ fn compute_penalty_matrix<'py>(
     Ok(PyArray2::from_owned_array_bound(py, penalty))
 }
 
+/// Evaluate REML gradient at fixed lambda (for testing/comparison)
+/// Returns gradient vector
+#[cfg(feature = "python")]
+#[pyfunction]
+fn evaluate_gradient<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    y: PyReadonlyArray1<f64>,
+    lambdas: Vec<f64>,
+    k_values: Vec<usize>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::PyArray1;
+    use ndarray::{Array1, Array2};
+
+    let x_array = x.as_array().to_owned();
+    let y_array = y.as_array().to_owned();
+    let (_n, d) = x_array.dim();
+
+    // Build design matrix and penalties for each smooth
+    let mut x_full = Array2::<f64>::zeros((x_array.nrows(), 0));
+    let mut penalties_vec = Vec::new();
+
+    for (col_idx, &k_val) in k_values.iter().enumerate() {
+        let col = x_array.column(col_idx);
+        let x_min = col.iter().copied().fold(f64::INFINITY, f64::min);
+        let x_max = col.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        // Create CR spline smooth
+        let smooth = SmoothTerm::cr_spline(format!("x{}", col_idx), k_val, x_min, x_max)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+        // Evaluate basis
+        let basis_vals = smooth.basis.evaluate(&col.to_owned())
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+        // Append to design matrix
+        let old_cols = x_full.ncols();
+        let new_cols = old_cols + basis_vals.ncols();
+        let mut x_new = Array2::<f64>::zeros((x_full.nrows(), new_cols));
+        for i in 0..x_full.nrows() {
+            for j in 0..old_cols {
+                x_new[[i, j]] = x_full[[i, j]];
+            }
+            for j in 0..basis_vals.ncols() {
+                x_new[[i, old_cols + j]] = basis_vals[[i, j]];
+            }
+        }
+        x_full = x_new;
+
+        // Get penalty matrix (expand to full size)
+        let penalty_small = smooth.penalty.clone();
+        let total_cols = x_full.ncols();
+        let mut penalty_full = Array2::<f64>::zeros((total_cols, total_cols));
+        for i in 0..penalty_small.nrows() {
+            for j in 0..penalty_small.ncols() {
+                penalty_full[[old_cols + i, old_cols + j]] = penalty_small[[i, j]];
+            }
+        }
+        penalties_vec.push(penalty_full);
+    }
+
+    // Compute gradient using QR method
+    let w = Array1::from_elem(y_array.len(), 1.0);
+    let gradient = reml::reml_gradient_multi_qr(&y_array, &x_full, &w, &lambdas, &penalties_vec)
+        .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
+
+    Ok(PyArray1::from_owned_array_bound(py, gradient))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn reml_gradient_multi_qr_py<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<f64>,
+    x: PyReadonlyArray2<f64>,
+    w: PyReadonlyArray1<f64>,
+    lambdas: Vec<f64>,
+    penalties: Vec<PyReadonlyArray2<f64>>,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::PyArray1;
+
+    let y_array = y.as_array().to_owned();
+    let x_array = x.as_array().to_owned();
+    let w_array = w.as_array().to_owned();
+
+    let penalties_vec: Vec<_> = penalties.iter()
+        .map(|p| p.as_array().to_owned())
+        .collect();
+
+    let gradient = reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+        .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
+
+    Ok(PyArray1::from_owned_array_bound(py, gradient))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn reml_hessian_multi_qr_py<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<f64>,
+    x: PyReadonlyArray2<f64>,
+    w: PyReadonlyArray1<f64>,
+    lambdas: Vec<f64>,
+    penalties: Vec<PyReadonlyArray2<f64>>,
+) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+    use numpy::PyArray2;
+
+    let y_array = y.as_array().to_owned();
+    let x_array = x.as_array().to_owned();
+    let w_array = w.as_array().to_owned();
+
+    let penalties_vec: Vec<_> = penalties.iter()
+        .map(|p| p.as_array().to_owned())
+        .collect();
+
+    let hessian = reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+        .map_err(|e| PyValueError::new_err(format!("Hessian computation failed: {}", e)))?;
+
+    Ok(PyArray2::from_owned_array_bound(py, hessian))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn newton_pirls_py<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<f64>,
+    x: PyReadonlyArray2<f64>,
+    w: PyReadonlyArray1<f64>,
+    initial_log_lambda: PyReadonlyArray1<f64>,
+    penalties: Vec<PyReadonlyArray2<f64>>,
+    max_iter: Option<usize>,
+    grad_tol: Option<f64>,
+    verbose: Option<bool>,
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>, f64, usize, bool, String)> {
+    use numpy::PyArray1;
+    use newton_optimizer::NewtonPIRLS;
+
+    let y_array = y.as_array().to_owned();
+    let x_array = x.as_array().to_owned();
+    let w_array = w.as_array().to_owned();
+    let initial_log_lambda_array = initial_log_lambda.as_array().to_owned();
+
+    let penalties_vec: Vec<_> = penalties.iter()
+        .map(|p| p.as_array().to_owned())
+        .collect();
+
+    let mut optimizer = NewtonPIRLS::new();
+    if let Some(max_iter) = max_iter {
+        optimizer.max_iter = max_iter;
+    }
+    if let Some(grad_tol) = grad_tol {
+        optimizer.grad_tol = grad_tol;
+    }
+    if let Some(verbose) = verbose {
+        optimizer.verbose = verbose;
+    }
+
+    let result = optimizer.optimize(&y_array, &x_array, &w_array, &initial_log_lambda_array, &penalties_vec)
+        .map_err(|e| PyValueError::new_err(format!("Newton-PIRLS optimization failed: {}", e)))?;
+
+    Ok((
+        PyArray1::from_owned_array_bound(py, result.log_lambda),
+        PyArray1::from_owned_array_bound(py, result.lambda),
+        result.reml_value,
+        result.iterations,
+        result.converged,
+        result.message,
+    ))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGAM>()?;
     m.add_function(wrap_pyfunction!(compute_penalty_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(evaluate_gradient, m)?)?;
+    m.add_function(wrap_pyfunction!(reml_gradient_multi_qr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
     Ok(())
 }
