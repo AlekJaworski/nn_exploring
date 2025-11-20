@@ -542,64 +542,31 @@ pub fn reml_gradient_multi_qr(
             eprintln!("[QR_GRAD_DEBUG] Starting penalty {} gradient computation", i);
         }
 
-        // CRITICAL FIX: Extract non-zero block from block-diagonal penalty
-        // Our penalties are p×p but only a block is non-zero
-        // We need to find that block and use only the corresponding rows of P
+        // CRITICAL FIX: Use FULL matrices, not blocks!
+        // The gradient formula requires tr(A^{-1}·λ·S) = λ·tr(P'·S·P)
+        // where S is the FULL p×p penalty matrix (block-diagonal)
+        // and P is the FULL p×p matrix R^{-1}
+        //
+        // Previous bug: we extracted only the non-zero block, which gave
+        // tr(P_block'·S_block·P_block) ≠ tr(P'·S·P)
+        // This caused gradient to be ~10-40x too small!
 
-        // Find the non-zero block by checking row sums
-        let mut block_start = 0;
-        let mut block_end = p;
-        let mut found_start = false;
+        // Use the pre-computed sqrt penalty for this smooth
+        let sqrt_pen_i = &sqrt_penalties[i];  // p × rank_i
 
-        for row in 0..p {
-            let row_sum: f64 = (0..p).map(|col| penalty_i[[row, col]].abs()).sum();
-            if row_sum > 1e-10 {
-                if !found_start {
-                    block_start = row;
-                    found_start = true;
-                }
-                block_end = row + 1;
-            }
-        }
+        // Compute P'·L where L = sqrt(S_i)
+        let p_t_l = p_matrix.t().dot(sqrt_pen_i);  // p × rank_i
 
-        let block_size = block_end - block_start;
-
-        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
-            eprintln!("[QR_GRAD_DEBUG] Found block: start={}, end={}, size={}", block_start, block_end, block_size);
-        }
-
-        // Extract the non-zero block from the penalty
-        let mut penalty_block = Array2::<f64>::zeros((block_size, block_size));
-        for ii in 0..block_size {
-            for jj in 0..block_size {
-                penalty_block[[ii, jj]] = penalty_i[[block_start + ii, block_start + jj]];
-            }
-        }
-
-        // Compute square root of the block
-        let sqrt_pen_block = penalty_sqrt(&penalty_block)?;
-
-        // Extract corresponding rows from P matrix
-        let mut p_block = Array2::<f64>::zeros((block_size, p));
-        for ii in 0..block_size {
-            for jj in 0..p {
-                p_block[[ii, jj]] = p_matrix[[block_start + ii, jj]];
-            }
-        }
-
-        // Compute tr(P_block'·S_block·P_block) using thin square root
-        let p_block_t_l = p_block.t().dot(&sqrt_pen_block);  // p × rank_i
-
-        // Compute tr(P_block'L * (P_block'L)') = tr(P_block'LL'P_block) = tr(P_block'S_block·P_block)
-        let mut trace = 0.0;
-        for k in 0..p {
-            for r in 0..sqrt_pen_block.ncols() {
-                trace += p_block_t_l[[k, r]] * p_block_t_l[[k, r]];
-            }
-        }
+        // Compute tr(P'·L·L'·P) = tr(P'·S·P) = sum of squared elements of P'·L
+        let trace_term: f64 = p_t_l.iter().map(|x| x * x).sum();
 
         // Scale by λ_i (derivative w.r.t. log(λ_i))
-        trace *= lambda_i;
+        let trace = lambda_i * trace_term;
+
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: λ_i={:.6}, trace_term={:.6}, trace={:.6}",
+                     i, lambda_i, trace_term, trace);
+        }
 
         // Compute penalty term: λᵢ·β'·Sᵢ·β
         let s_beta = penalty_i.dot(&beta);
@@ -613,11 +580,11 @@ pub fn reml_gradient_multi_qr(
         // where M = λ·S, ρ = log(λ)
         gradient[i] = (trace - (rank_i as f64) + penalty_term / phi) / 2.0;
 
-        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && i == 0 {
-            eprintln!("[QR_GRAD_DEBUG] lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}, block_size={}",
-                     lambda_i, trace, rank_i, penalty_term, phi, block_size);
-            eprintln!("[QR_GRAD_DEBUG]   gradient[{}] = {:.6}",
-                     i, gradient[i]);
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: lambda={:.6}, trace={:.6}, rank={}, penalty_term={:.6}, phi={:.6}",
+                     i, lambda_i, trace, rank_i, penalty_term, phi);
+            eprintln!("[QR_GRAD_DEBUG]   smooth={}: gradient = ({:.6} - {:.6} + {:.6}) / 2 = {:.6}",
+                     i, trace, rank_i as f64, penalty_term / phi, gradient[i]);
         }
     }
 
