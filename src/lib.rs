@@ -13,6 +13,7 @@ pub mod gam;
 pub mod gam_optimized;
 pub mod utils;
 pub mod linalg;
+pub mod newton_optimizer;
 
 pub use gam::{GAM, SmoothTerm};
 pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
@@ -640,6 +641,55 @@ fn reml_hessian_multi_qr_py<'py>(
 }
 
 #[cfg(feature = "python")]
+#[pyfunction]
+fn newton_pirls_py<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<f64>,
+    x: PyReadonlyArray2<f64>,
+    w: PyReadonlyArray1<f64>,
+    initial_log_lambda: PyReadonlyArray1<f64>,
+    penalties: Vec<PyReadonlyArray2<f64>>,
+    max_iter: Option<usize>,
+    grad_tol: Option<f64>,
+    verbose: Option<bool>,
+) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>, f64, usize, bool, String)> {
+    use numpy::PyArray1;
+    use newton_optimizer::NewtonPIRLS;
+
+    let y_array = y.as_array().to_owned();
+    let x_array = x.as_array().to_owned();
+    let w_array = w.as_array().to_owned();
+    let initial_log_lambda_array = initial_log_lambda.as_array().to_owned();
+
+    let penalties_vec: Vec<_> = penalties.iter()
+        .map(|p| p.as_array().to_owned())
+        .collect();
+
+    let mut optimizer = NewtonPIRLS::new();
+    if let Some(max_iter) = max_iter {
+        optimizer.max_iter = max_iter;
+    }
+    if let Some(grad_tol) = grad_tol {
+        optimizer.grad_tol = grad_tol;
+    }
+    if let Some(verbose) = verbose {
+        optimizer.verbose = verbose;
+    }
+
+    let result = optimizer.optimize(&y_array, &x_array, &w_array, &initial_log_lambda_array, &penalties_vec)
+        .map_err(|e| PyValueError::new_err(format!("Newton-PIRLS optimization failed: {}", e)))?;
+
+    Ok((
+        PyArray1::from_owned_array_bound(py, result.log_lambda),
+        PyArray1::from_owned_array_bound(py, result.lambda),
+        result.reml_value,
+        result.iterations,
+        result.converged,
+        result.message,
+    ))
+}
+
+#[cfg(feature = "python")]
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGAM>()?;
@@ -647,5 +697,6 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(reml_gradient_multi_qr_py, m)?)?;
     m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
+    m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
     Ok(())
 }
