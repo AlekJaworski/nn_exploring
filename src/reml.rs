@@ -373,6 +373,17 @@ fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
 
     let rank = non_zero_eigs.len();
 
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[PENALTY_SQRT_DEBUG] Matrix size: {}×{}", n, n);
+        eprintln!("[PENALTY_SQRT_DEBUG] Max eigenvalue: {:.6e}", max_eigenvalue);
+        eprintln!("[PENALTY_SQRT_DEBUG] Threshold: {:.6e}", threshold);
+        eprintln!("[PENALTY_SQRT_DEBUG] Positive eigenvalues found: {}", rank);
+        if rank > 0 {
+            let eig_values: Vec<f64> = non_zero_eigs.iter().map(|(_, e)| *e).collect();
+            eprintln!("[PENALTY_SQRT_DEBUG] Eigenvalues: {:?}", &eig_values[..rank.min(5)]);
+        }
+    }
+
     if rank == 0 {
         // Penalty is zero, return empty matrix
         return Ok(Array2::<f64>::zeros((n, 0)));
@@ -386,6 +397,17 @@ fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
         for i in 0..n {
             sqrt_penalty[[i, out_j]] = eigenvectors[[i, in_j]] * sqrt_eval;
         }
+    }
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[PENALTY_SQRT_DEBUG] Output L matrix shape: {}×{}", n, rank);
+
+        // Verify L·L' = S
+        let reconstructed = sqrt_penalty.dot(&sqrt_penalty.t());
+        let max_error = penalty.iter().zip(reconstructed.iter())
+            .map(|(s, r)| (s - r).abs())
+            .fold(0.0, f64::max);
+        eprintln!("[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = {:.6e}", max_error);
     }
 
     Ok(sqrt_penalty)
@@ -428,7 +450,9 @@ pub fn reml_gradient_multi_qr(
     let mut penalty_ranks = Vec::new();
     for penalty in penalties.iter() {
         let sqrt_pen = penalty_sqrt(penalty)?;
-        let rank = estimate_rank(penalty);
+        // Use the actual rank from eigenvalue decomposition (number of positive eigenvalues)
+        // This is more accurate than the heuristic in estimate_rank()
+        let rank = sqrt_pen.ncols();  // rank = number of positive eigenvalues
         sqrt_penalties.push(sqrt_pen);
         penalty_ranks.push(rank);
     }
@@ -438,6 +462,16 @@ pub fn reml_gradient_multi_qr(
     let mut total_rows = n;
     for sqrt_pen in sqrt_penalties.iter() {
         total_rows += sqrt_pen.ncols();  // Number of columns = rank
+    }
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[Z_BUILD_DEBUG] Building Z matrix:");
+        eprintln!("[Z_BUILD_DEBUG]   n = {}, p = {}", n, p);
+        for (i, sqrt_pen) in sqrt_penalties.iter().enumerate() {
+            eprintln!("[Z_BUILD_DEBUG]   L{} shape: {}×{}, λ{} = {:.6}",
+                     i, sqrt_pen.nrows(), sqrt_pen.ncols(), i, lambdas[i]);
+        }
+        eprintln!("[Z_BUILD_DEBUG]   Total Z rows: {}", total_rows);
     }
 
     let mut z = Array2::<f64>::zeros((total_rows, p));
@@ -452,7 +486,7 @@ pub fn reml_gradient_multi_qr(
     // Fill in scaled square root penalties (transposed)
     // sqrt_pen is p × rank, we need rank × p for augmented matrix
     let mut row_offset = n;
-    for (sqrt_pen, &lambda) in sqrt_penalties.iter().zip(lambdas.iter()) {
+    for (idx, (sqrt_pen, &lambda)) in sqrt_penalties.iter().zip(lambdas.iter()).enumerate() {
         let sqrt_lambda = lambda.sqrt();
         let rank = sqrt_pen.ncols();  // Number of non-zero eigenvalues
         for i in 0..rank {
@@ -460,6 +494,12 @@ pub fn reml_gradient_multi_qr(
                 z[[row_offset + i, j]] = sqrt_lambda * sqrt_pen[[j, i]];  // Transpose!
             }
         }
+
+        if std::env::var("MGCV_GRAD_DEBUG").is_ok() && rank > 0 {
+            eprintln!("[Z_BUILD_DEBUG]   After adding L{} (rows {} to {}), first value: {:.6e}",
+                     idx, row_offset, row_offset + rank - 1, z[[row_offset, 0]]);
+        }
+
         row_offset += rank;
     }
 
@@ -492,6 +532,16 @@ pub fn reml_gradient_multi_qr(
     let p_matrix = r_upper.inv()
         .map_err(|e| GAMError::InvalidParameter(format!("Matrix inversion failed: {:?}", e)))?;
 
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[QR_DEBUG] P = R^{{-1}} computed, shape: {}×{}", p_matrix.nrows(), p_matrix.ncols());
+        eprintln!("[QR_DEBUG] P[0,0] = {:.6e}, P[1,1] = {:.6e}", p_matrix[[0,0]], p_matrix[[1,1]]);
+
+        // Verify P·P' = A^{-1} by checking against A
+        let pp_t = p_matrix.dot(&p_matrix.t());
+        eprintln!("[QR_DEBUG] P·P' diagonal: [{:.6e}, {:.6e}, ..., {:.6e}]",
+                 pp_t[[0,0]], pp_t[[1,1]], pp_t[[p-1,p-1]]);
+    }
+
     // Compute coefficients for penalty term
     let xtw = sqrt_w_x.t().to_owned();
     let xtwx = xtw.dot(&sqrt_w_x);
@@ -522,8 +572,18 @@ pub fn reml_gradient_multi_qr(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
-    let total_rank: usize = penalty_ranks.iter().sum();
-    let phi = rss / (n - total_rank) as f64;
+    // Compute effective degrees of freedom: edf = tr(A^{-1} X'X)
+    // We have P = R^{-1}, and A^{-1} = P·P'
+    // So tr(A^{-1} X'X) = tr(P·P'·X'X)
+    let a_inv = p_matrix.dot(&p_matrix.t());
+    let ainv_xtwx = a_inv.dot(&xtwx);
+    let edf_total: f64 = (0..p).map(|i| ainv_xtwx[[i, i]]).sum();
+    let phi = rss / (n as f64 - edf_total);
+
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        eprintln!("[PHI_DEBUG] n={}, edf_total={:.6}, rss={:.6}, phi={:.6}",
+                 n, edf_total, rss, phi);
+    }
 
     // Compute gradient for each penalty
     let mut gradient = Array1::zeros(m);
@@ -564,6 +624,16 @@ pub fn reml_gradient_multi_qr(
         let trace = lambda_i * trace_term;
 
         if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: P'·L shape: {}×{}",
+                     i, p_t_l.nrows(), p_t_l.ncols());
+
+            // Show first few values to compare with Python
+            let sample_values: Vec<f64> = p_t_l.iter().take(5).copied().collect();
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: P'·L first values: {:?}", i, sample_values);
+
+            // Show sum of squares computation
+            let sum_sq: f64 = p_t_l.iter().map(|x| x * x).sum();
+            eprintln!("[QR_GRAD_DEBUG] smooth={}: sum((P'·L)²) = {:.6}", i, sum_sq);
             eprintln!("[QR_GRAD_DEBUG] smooth={}: λ_i={:.6}, trace_term={:.6}, trace={:.6}",
                      i, lambda_i, trace_term, trace);
         }
