@@ -53,6 +53,14 @@ pub struct NewtonPIRLS {
     pub max_line_search: usize,
     /// Print iteration details
     pub verbose: bool,
+    /// Use trust region instead of line search
+    pub use_trust_region: bool,
+    /// Initial trust region radius
+    pub initial_trust_radius: f64,
+    /// Maximum trust region radius
+    pub max_trust_radius: f64,
+    /// Trust region acceptance threshold (typically 0.1-0.25)
+    pub eta: f64,
 }
 
 impl Default for NewtonPIRLS {
@@ -65,6 +73,10 @@ impl Default for NewtonPIRLS {
             backtrack_factor: 0.5,
             max_line_search: 20,
             verbose: false,
+            use_trust_region: false,  // Disable: gradient has ~30% error, needs refinement
+            initial_trust_radius: 1.0,
+            max_trust_radius: 10.0,
+            eta: 0.15,  // Accept step if actual/predicted reduction > 0.15
         }
     }
 }
@@ -106,11 +118,17 @@ impl NewtonPIRLS {
         let mut iteration = 0;
         let mut converged = false;
         let mut message = String::new();
+        let mut trust_radius = self.initial_trust_radius;
 
         if self.verbose {
             eprintln!("Newton-PIRLS Optimization");
             eprintln!("========================");
             eprintln!("Initial ρ: {:?}", log_lambda);
+            if self.use_trust_region {
+                eprintln!("Using trust region method (Δ={:.3})", trust_radius);
+            } else {
+                eprintln!("Using line search");
+            }
         }
 
         loop {
@@ -155,35 +173,66 @@ impl NewtonPIRLS {
                 eprintln!("  Descent check (g'·Δρ): {:.6e} (should be < 0)", descent_check);
             }
 
-            // If not descent direction, try steepest descent instead
-            let delta_rho = if descent_check > 0.0 {
+            // Choose between trust region and line search
+            let step = if self.use_trust_region {
+                // Trust region method
+                let (step, new_radius) = self.trust_region_step(
+                    y, x, w, &log_lambda, &gradient, &hessian, penalties, trust_radius
+                )?;
+                trust_radius = new_radius;
+
                 if self.verbose {
-                    eprintln!("  WARNING: Not a descent direction, using steepest descent");
+                    eprintln!("  New trust radius: Δ={:.3e}", trust_radius);
                 }
-                gradient.mapv(|g| -g)  // Steepest descent: -g
+
+                // Check if step was rejected (all zeros)
+                let step_norm = step.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if step_norm < 1e-12 {
+                    // Step rejected, shrink trust region and continue
+                    trust_radius *= 0.5;
+                    if trust_radius < 1e-8 {
+                        message = format!("Trust region too small: Δ={:.6e}", trust_radius);
+                        break;
+                    }
+                    continue;
+                }
+
+                step
             } else {
-                delta_rho
+                // Line search method
+                // If not descent direction, try steepest descent instead
+                let delta_rho = if descent_check > 0.0 {
+                    if self.verbose {
+                        eprintln!("  WARNING: Not a descent direction, using steepest descent");
+                    }
+                    gradient.mapv(|g| -g)  // Steepest descent: -g
+                } else {
+                    delta_rho
+                };
+
+                // Line search to find step size
+                let step_size = self.line_search(
+                    y, x, w, &log_lambda, &delta_rho, penalties
+                )?;
+
+                if self.verbose {
+                    eprintln!("  Line search result: step = {:.6e}", step_size);
+                }
+
+                if step_size < self.min_step {
+                    message = format!("Line search failed: step size {:.6e} < {:.6e}", step_size, self.min_step);
+                    break;
+                }
+
+                delta_rho.mapv(|d| step_size * d)
             };
 
-            // Line search to find step size
-            let step_size = self.line_search(
-                y, x, w, &log_lambda, &delta_rho, penalties
-            )?;
-
-            if self.verbose {
-                eprintln!("  Line search result: step = {:.6e}", step_size);
-            }
-
-            if step_size < self.min_step {
-                message = format!("Line search failed: step size {:.6e} < {:.6e}", step_size, self.min_step);
-                break;
-            }
-
             // Update parameters
-            log_lambda = &log_lambda + &(delta_rho.mapv(|d| step_size * d));
+            log_lambda = &log_lambda + &step;
 
             if self.verbose {
-                eprintln!("  Step size: {:.6e}", step_size);
+                let step_norm = step.iter().map(|x| x * x).sum::<f64>().sqrt();
+                eprintln!("  Step norm: {:.6e}", step_norm);
                 eprintln!("  New ρ: {:?}", log_lambda);
             }
         }
@@ -307,6 +356,171 @@ impl NewtonPIRLS {
         }
         // Return best step found (might be very small)
         Ok(step)
+    }
+
+    /// Trust region step: solve subproblem and update trust radius
+    ///
+    /// Solves: min_{Δρ} g'·Δρ + (1/2)·Δρ'·H·Δρ subject to ||Δρ|| ≤ Δ
+    ///
+    /// Uses dogleg method for efficiency:
+    /// - If Hessian is PD and Newton step within trust region: use Newton step
+    /// - Otherwise: combine Cauchy point (steepest descent) and Newton step
+    ///
+    /// Returns: (step, new_trust_radius)
+    fn trust_region_step(
+        &self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        log_lambda: &Array1<f64>,
+        gradient: &Array1<f64>,
+        hessian: &Array2<f64>,
+        penalties: &[Array2<f64>],
+        trust_radius: f64,
+    ) -> Result<(Array1<f64>, f64)> {
+        let m = gradient.len();
+
+        // Compute current REML
+        let lambda: Vec<f64> = log_lambda.iter().map(|x| x.exp()).collect();
+        let reml_current = self.compute_reml(y, x, w, &lambda, penalties)?;
+
+        // Try to solve H·Δρ = -g with ridge regularization if needed
+        let mut delta_rho_newton = Array1::zeros(m);
+        let mut hessian_reg = hessian.clone();
+
+        // Add ridge to ensure positive definiteness
+        // Use stronger ridge since gradient has ~30% error
+        let max_diag = hessian_reg.diag().iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+        let ridge = 1e-2 * max_diag.max(1.0);  // Increased from 1e-4 to 1e-2
+        for i in 0..m {
+            hessian_reg[[i, i]] += ridge;
+        }
+
+        // Solve using Cholesky (will fallback if needed)
+        delta_rho_newton = self.solve_newton_system(&hessian_reg, gradient)?;
+
+        // Check if Newton step is a descent direction: g'·Δρ < 0
+        let descent_check: f64 = gradient.iter().zip(delta_rho_newton.iter())
+            .map(|(g, d)| g * d)
+            .sum();
+
+        // If not descent, set Newton step to zero (will use Cauchy instead)
+        if descent_check > 0.0 {
+            if self.verbose {
+                eprintln!("  Trust region: Newton step not descent (g'·Δρ={:.3e}), using Cauchy", descent_check);
+            }
+            delta_rho_newton = Array1::zeros(m);
+        }
+
+        // Compute Newton step norm
+        let newton_norm = delta_rho_newton.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        // Compute Cauchy point (steepest descent direction)
+        // Δρ_C = -τ·g where τ minimizes quadratic along -g direction
+        let grad_norm_sq: f64 = gradient.iter().map(|g| g * g).sum();
+        let hg = hessian.dot(gradient);
+        let g_hg: f64 = gradient.iter().zip(hg.iter()).map(|(g, hg)| g * hg).sum();
+
+        // τ for Cauchy point
+        let tau = if g_hg > 0.0 {
+            // Hessian is positive in this direction
+            (grad_norm_sq / g_hg).min(trust_radius / grad_norm_sq.sqrt())
+        } else {
+            // Hessian is negative/zero in this direction, go to boundary
+            trust_radius / grad_norm_sq.sqrt()
+        };
+
+        let delta_rho_cauchy = gradient.mapv(|g| -tau * g);
+        let cauchy_norm = delta_rho_cauchy.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        // Dogleg path:
+        // 1. If Newton step within trust region AND non-zero: use it
+        // 2. If Cauchy point outside trust region: scale Cauchy to boundary
+        // 3. Otherwise: interpolate between Cauchy and Newton
+        let delta_rho = if newton_norm > 1e-10 && newton_norm <= trust_radius {
+            // Newton step is within trust region
+            if self.verbose {
+                eprintln!("  Trust region: Using Newton step (norm={:.3e} ≤ Δ={:.3e})", newton_norm, trust_radius);
+            }
+            delta_rho_newton
+        } else if cauchy_norm >= trust_radius {
+            // Scale Cauchy point to trust region boundary
+            if self.verbose {
+                eprintln!("  Trust region: Using scaled Cauchy point");
+            }
+            delta_rho_cauchy.mapv(|x| x * trust_radius / cauchy_norm)
+        } else {
+            // Dogleg: find point on line from Cauchy to Newton that hits boundary
+            // ||δ_C + β·(δ_N - δ_C))||² = Δ²
+            let diff = &delta_rho_newton - &delta_rho_cauchy;
+            let a: f64 = diff.iter().map(|x| x * x).sum::<f64>();
+            let b: f64 = 2.0 * delta_rho_cauchy.iter().zip(diff.iter()).map(|(c, d)| c * d).sum::<f64>();
+            let c: f64 = cauchy_norm * cauchy_norm - trust_radius * trust_radius;
+
+            let beta = if a > 1e-10 {
+                (-b + (b * b - 4.0 * a * c).sqrt()) / (2.0 * a)
+            } else {
+                1.0
+            };
+
+            if self.verbose {
+                eprintln!("  Trust region: Dogleg interpolation (β={:.3})", beta);
+            }
+            &delta_rho_cauchy + &diff.mapv(|x| beta * x)
+        };
+
+        // Evaluate REML at new point
+        let log_lambda_new = log_lambda + &delta_rho;
+        let lambda_new: Vec<f64> = log_lambda_new.iter().map(|x| x.exp()).collect();
+        let reml_new = self.compute_reml(y, x, w, &lambda_new, penalties)?;
+
+        // Compute actual vs predicted reduction
+        let actual_reduction = reml_current - reml_new;
+
+        // Predicted reduction: m(0) - m(δ) = -g'·δ - (1/2)·δ'·H·δ
+        let h_delta = hessian.dot(&delta_rho);
+        let predicted_reduction = -(
+            gradient.iter().zip(delta_rho.iter()).map(|(g, d)| g * d).sum::<f64>()
+            + 0.5 * delta_rho.iter().zip(h_delta.iter()).map(|(d, hd)| d * hd).sum::<f64>()
+        );
+
+        let rho = if predicted_reduction.abs() < 1e-10 {
+            0.0
+        } else {
+            actual_reduction / predicted_reduction
+        };
+
+        if self.verbose {
+            eprintln!("  Trust region: actual={:.3e}, predicted={:.3e}, ρ={:.3}",
+                     actual_reduction, predicted_reduction, rho);
+        }
+
+        // Update trust region radius based on agreement
+        let new_radius = if rho < 0.25 {
+            // Poor agreement: shrink trust region
+            0.25 * trust_radius
+        } else if rho > 0.75 && (delta_rho.iter().map(|x| x * x).sum::<f64>().sqrt() - trust_radius).abs() < 1e-6 {
+            // Good agreement and at boundary: expand trust region
+            (2.0 * trust_radius).min(self.max_trust_radius)
+        } else {
+            // Acceptable: keep trust region
+            trust_radius
+        };
+
+        // Accept step if rho > eta
+        let step = if rho > self.eta {
+            if self.verbose {
+                eprintln!("  Trust region: ACCEPT (ρ={:.3} > η={:.3})", rho, self.eta);
+            }
+            delta_rho
+        } else {
+            if self.verbose {
+                eprintln!("  Trust region: REJECT (ρ={:.3} ≤ η={:.3})", rho, self.eta);
+            }
+            Array1::zeros(m)  // Reject step
+        };
+
+        Ok((step, new_radius))
     }
 
     /// Compute REML criterion value
