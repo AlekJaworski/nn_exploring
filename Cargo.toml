@@ -13,7 +13,7 @@ approx = "0.5"
 thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
-ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-system"] }
+ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-static"] }
 
 [features]
 default = []
