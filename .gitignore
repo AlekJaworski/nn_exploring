@@ -22,3 +22,5 @@ derive_*.md
 summary_*.md
 INVESTIGATION_PLAN.md
 .venv/
+*.npz
+*.npy
