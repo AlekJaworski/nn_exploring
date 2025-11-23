@@ -2,7 +2,7 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_hessian_multi};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_hessian_multi};
 use crate::linalg::solve;
 
 /// Smoothing parameter optimization method
@@ -68,19 +68,21 @@ impl SmoothingParameter {
         let n = x.nrows();
         let p = x.ncols();
 
-        // Compute trace(X'WX) as reference scale
-        let mut xtwx_trace = 0.0;
+        // Compute trace(X'WX) / n to get scale-invariant measure
+        // This makes initialization independent of sample size
+        let mut xtwx_trace_per_n = 0.0;
         for j in 0..p {
             let mut col_weighted_sq = 0.0;
             for i in 0..n {
                 col_weighted_sq += x[[i, j]] * x[[i, j]] * w[i];
             }
-            xtwx_trace += col_weighted_sq;
+            xtwx_trace_per_n += col_weighted_sq;
         }
+        xtwx_trace_per_n /= n as f64;
 
         // Fallback if matrix is degenerate
-        if xtwx_trace < 1e-10 {
-            xtwx_trace = 1.0;
+        if xtwx_trace_per_n < 1e-10 {
+            xtwx_trace_per_n = 1.0;
         }
 
         // Initialize each lambda based on its penalty matrix scale
@@ -91,10 +93,11 @@ impl SmoothingParameter {
                 penalty_trace += penalty[[j, j]];
             }
 
-            // R's mgcv heuristic: lambda ~ 0.1 * trace(S) / trace(X'WX)
-            // This ensures lambdas are scaled appropriately for the problem
+            // FIXED: Scale-invariant initialization
+            // lambda ~ 0.1 * trace(S) / (trace(X'WX)/n)
+            // This makes starting lambda independent of n
             if penalty_trace > 1e-10 {
-                self.lambda[i] = 0.1 * penalty_trace / xtwx_trace;
+                self.lambda[i] = 0.1 * penalty_trace / xtwx_trace_per_n;
             } else {
                 self.lambda[i] = 0.1;  // Fallback for near-zero penalty
             }
@@ -201,8 +204,8 @@ impl SmoothingParameter {
             let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
 
             // Compute gradient and Hessian
-            // Use QR-based gradient computation to match mgcv and avoid cross-coupling issues
-            let gradient = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
+            // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
+            let gradient = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 
             // Debug output: show raw Hessian before conditioning
@@ -403,7 +406,7 @@ impl SmoothingParameter {
 
                 // Steepest descent: step = -gradient (scaled very small)
                 // Recompute gradient since it was moved earlier
-                let gradient_sd = reml_gradient_multi_qr(y, x, w, &lambdas, penalties)?;
+                let gradient_sd = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
 
                 // Try progressively smaller steepest descent steps
                 let mut sd_worked = false;

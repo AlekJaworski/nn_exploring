@@ -427,6 +427,117 @@ fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
     Ok(sqrt_penalty)
 }
 
+/// Compute the gradient of REML using block-wise QR approach
+///
+/// This is optimized for large n by processing X in blocks instead of forming
+/// the full augmented matrix. Complexity is O(blocks × p²) instead of O(np²).
+///
+/// For n < 2000, falls back to full QR for simplicity.
+pub fn reml_gradient_multi_qr_adaptive(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+) -> Result<Array1<f64>> {
+    let n = y.len();
+
+    // Use block-wise for large n (>= 2000), full QR for small n
+    if n >= 2000 {
+        reml_gradient_multi_qr_blockwise(y, x, w, lambdas, penalties, 1000)
+    } else {
+        reml_gradient_multi_qr(y, x, w, lambdas, penalties)
+    }
+}
+
+/// Block-wise version of QR gradient computation
+/// Processes X in blocks to avoid O(np²) complexity
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_qr_blockwise(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    block_size: usize,
+) -> Result<Array1<f64>> {
+    use ndarray_linalg::Inverse;
+    use crate::blockwise_qr::compute_r_blockwise;
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Compute square root penalties once (these are constant)
+    let mut sqrt_penalties = Vec::new();
+    let mut penalty_ranks = Vec::new();
+    for penalty in penalties.iter() {
+        let sqrt_pen = penalty_sqrt(penalty)?;
+        let rank = sqrt_pen.ncols();
+        sqrt_penalties.push(sqrt_pen);
+        penalty_ranks.push(rank);
+    }
+
+    // Use block-wise QR to get R factor
+    let r_upper = compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?;
+
+    // DEBUG: Verify R'R = X'WX + λS
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        let rtr = r_upper.t().dot(&r_upper);
+        let xtwx = compute_xtwx(x, w);
+        let mut expected = xtwx.clone();
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            expected.scaled_add(*lambda, penalty);
+        }
+
+        let max_error = rtr.iter().zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        eprintln!("[BLOCKWISE_DEBUG] Max error in R'R vs X'WX+λS: {:.6e}", max_error);
+        eprintln!("[BLOCKWISE_DEBUG] R'R trace: {:.6e}", (0..p).map(|i| rtr[[i,i]]).sum::<f64>());
+        eprintln!("[BLOCKWISE_DEBUG] Expected trace: {:.6e}", (0..p).map(|i| expected[[i,i]]).sum::<f64>());
+    }
+
+    // Compute P = R^{-1}
+    let p_matrix = r_upper.inv()
+        .map_err(|_| GAMError::LinAlgError("Failed to invert R matrix".to_string()))?;
+
+    // Rest is same as before: compute gradient using P
+    let mut gradient = Array1::<f64>::zeros(m);
+
+    for i in 0..m {
+        let penalty = &penalties[i];
+
+        // Compute tr(P'·S·P) = tr(P·P'·S) since tr(ABC) = tr(CAB)
+        let pp_t = p_matrix.dot(&p_matrix.t());
+        let pp_s = pp_t.dot(penalty);
+
+        let mut trace = 0.0;
+        for j in 0..p {
+            trace += pp_s[[j, j]];
+        }
+
+        // ∂log|A|/∂log(λ) = λ·tr(A^{-1}·S) = λ·tr(P·P'·S)
+        gradient[i] = lambdas[i] * trace;
+    }
+
+    Ok(gradient)
+}
+
+#[cfg(not(feature = "blas"))]
+pub fn reml_gradient_multi_qr_blockwise(
+    _y: &Array1<f64>,
+    _x: &Array2<f64>,
+    _w: &Array1<f64>,
+    _lambdas: &[f64],
+    _penalties: &[Array2<f64>],
+    _block_size: usize,
+) -> Result<Array1<f64>> {
+    Err(GAMError::InvalidParameter(
+        "Block-wise QR requires 'blas' feature".to_string()
+    ))
+}
+
 /// Compute the gradient of REML using QR-based approach (matching mgcv's gdi.c)
 ///
 /// Following Wood (2011) and mgcv's gdi.c (get_ddetXWXpS function), this uses:
@@ -436,6 +547,8 @@ fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
 /// 4. Gradient: ∂log|R'R|/∂log(λ_m) = λ_m·tr(P'·S_m·P)
 ///
 /// This avoids explicit formation of A^{-1} and cross-coupling issues.
+///
+/// NOTE: For large n (>= 2000), use reml_gradient_multi_qr_blockwise instead
 pub fn reml_gradient_multi_qr(
     y: &Array1<f64>,
     x: &Array2<f64>,
