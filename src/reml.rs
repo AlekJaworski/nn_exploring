@@ -5,6 +5,46 @@ use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
 use crate::GAMError;
 
+/// Compute X'WX efficiently without forming weighted matrix
+/// This is a key optimization for large n: avoids O(np) allocation
+fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
+    let (_n, p) = x.dim();
+    let mut xtwx = Array2::zeros((p, p));
+
+    // Compute only upper triangle (symmetric matrix)
+    for i in 0..p {
+        for j in i..p {
+            let mut sum = 0.0;
+            // This loop is cache-friendly: sequential access
+            for row in 0..x.nrows() {
+                sum += x[[row, i]] * w[row] * x[[row, j]];
+            }
+            xtwx[[i, j]] = sum;
+            if i != j {
+                xtwx[[j, i]] = sum;  // Fill lower triangle by symmetry
+            }
+        }
+    }
+
+    xtwx
+}
+
+/// Compute X'Wy efficiently without forming weighted vectors
+fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
+    let (_n, p) = x.dim();
+    let mut xtwy = Array1::zeros(p);
+
+    for j in 0..p {
+        let mut sum = 0.0;
+        for i in 0..x.nrows() {
+            sum += x[[i, j]] * w[i] * y[i];
+        }
+        xtwy[j] = sum;
+    }
+
+    xtwy
+}
+
 /// Estimate the rank of a matrix using row norms as approximation to singular values
 /// For symmetric matrices like penalty matrices, this gives a reasonable estimate
 fn estimate_rank(matrix: &Array2<f64>) -> usize {
@@ -58,36 +98,21 @@ pub fn reml_criterion(
     let n = y.len();
     let _p = x.ncols();
 
-    // Compute weighted design matrix: sqrt(W) * X
-    // Optimized: avoid intermediate allocation, compute directly
-    let mut x_weighted = x.to_owned();
-    for (i, mut row) in x_weighted.rows_mut().into_iter().enumerate() {
-        let w_sqrt = w[i].sqrt();
-        for val in row.iter_mut() {
-            *val *= w_sqrt;
-        }
-    }
+    // OPTIMIZED: Compute X'WX once and reuse it
+    let xtwx = compute_xtwx(x, w);
 
     // Compute coefficients if not provided
     let beta_computed;
     let beta = if let Some(b) = beta {
         b
     } else {
+        // Compute X'Wy directly without forming weighted vectors
+        let xtwy = compute_xtwy(x, w, y);
+
         // Solve: (X'WX + λS)β = X'Wy
-        let xtw = x_weighted.t().to_owned();
-        let xtwx = xtw.dot(&x_weighted);
+        let a = &xtwx + &(penalty * lambda);
 
-        let a = xtwx + &(penalty * lambda);
-
-        // Optimized: compute y_weighted in-place to avoid allocation
-        let mut y_weighted = Array1::zeros(n);
-        for i in 0..n {
-            y_weighted[i] = y[i] * w[i];
-        }
-
-        let b = xtw.dot(&y_weighted);
-
-        beta_computed = solve(a, b)?;
+        beta_computed = solve(a, xtwy)?;
         &beta_computed
     };
 
@@ -111,10 +136,8 @@ pub fn reml_criterion(
     // Compute RSS + λβ'Sβ (this is what mgcv calls rss.bSb)
     let rss_bsb = rss + lambda * beta_s_beta;
 
-    // Compute X'WX + λS
-    let xtw = x_weighted.t().to_owned();
-    let xtwx = xtw.dot(&x_weighted);
-    let a = xtwx + &(penalty * lambda);
+    // Reuse X'WX from above (no recomputation needed!)
+    let a = &xtwx + &(penalty * lambda);
 
     // Compute log determinants
     let log_det_a = determinant(&a)?.ln();
@@ -243,14 +266,8 @@ pub fn reml_criterion_multi(
     let n = y.len();
     let p = x.ncols();
 
-    // Compute weighted design matrix: sqrt(W) * X
-    // Use broadcasting: multiply each row of X by corresponding sqrt(w_i)
-    let w_sqrt: Array1<f64> = w.iter().map(|wi| wi.sqrt()).collect();
-    let x_weighted = x * &w_sqrt.view().insert_axis(ndarray::Axis(1));
-
-    // Compute X'WX
-    let xtw = x_weighted.t().to_owned();
-    let xtwx = xtw.dot(&x_weighted);
+    // OPTIMIZED: Compute X'WX directly without forming weighted matrix
+    let xtwx = compute_xtwx(x, w);
 
     // Compute A = X'WX + Σλᵢ·Sᵢ
     let mut a = xtwx.clone();
@@ -264,11 +281,8 @@ pub fn reml_criterion_multi(
     let beta = if let Some(b) = beta {
         b
     } else {
-        let y_weighted: Array1<f64> = y.iter().zip(w.iter())
-            .map(|(yi, wi)| yi * wi)
-            .collect();
-
-        let b = xtw.dot(&y_weighted);
+        // OPTIMIZED: Compute X'Wy directly
+        let b = compute_xtwy(x, w, y);
 
         // Add ridge for numerical stability when solving
         let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
