@@ -450,12 +450,13 @@ pub fn reml_gradient_multi_qr(
     let p = x.ncols();
     let m = lambdas.len();
 
-    // Compute sqrt(W) * X
-    let mut sqrt_w_x = x.clone();
+    // OPTIMIZED: Compute sqrt(W) * X without cloning x
+    // Allocate directly to avoid clone overhead
+    let mut sqrt_w_x = Array2::<f64>::zeros((n, p));
     for i in 0..n {
         let weight_sqrt = w[i].sqrt();
         for j in 0..p {
-            sqrt_w_x[[i, j]] *= weight_sqrt;
+            sqrt_w_x[[i, j]] = x[[i, j]] * weight_sqrt;
         }
     }
 
