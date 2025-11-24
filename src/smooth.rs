@@ -285,12 +285,12 @@ impl SmoothingParameter {
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
             // mgcv uses both criteria to handle different convergence scenarios
             //
-            // NOTE: mgcv converges when max|grad| < ~0.01 or so
-            // Temporarily using very tight threshold to see Newton iterations
-            if grad_norm_linf < 0.01 {
+            // NOTE: mgcv's default tolerance is 0.05-0.1 for the gradient Linf norm
+            // Using 0.05 to match mgcv's convergence behavior
+            if grad_norm_linf < 0.05 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] Converged after {} iterations (gradient criterion)", iter + 1);
+                    eprintln!("[PROFILE] Converged after {} iterations (gradient criterion: {:.6} < 0.05)", iter + 1, grad_norm_linf);
                 }
                 return Ok(());
             }
