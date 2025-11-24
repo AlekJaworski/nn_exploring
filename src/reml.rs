@@ -576,10 +576,20 @@ pub fn reml_gradient_multi_qr_blockwise(
         // Term 2: -rank(Sᵢ)
         let rank_term = -rank_i;
 
-        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β using solve
+        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β using cached R factorization
+        // A = R'R, so A⁻¹·b = R⁻¹·R'⁻¹·b
+        // Solve in two steps: R'·y = b, then R·x = y
         let s_i_beta = penalty_i.dot(&beta);
         let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
-        let dbeta_drho = solve(a.clone(), lambda_s_beta)?.mapv(|x| -x);
+
+        // Step 1: Solve R'·y = lambda_s_beta (lower triangular)
+        let y = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+        // Step 2: Solve R·x = y (upper triangular)
+        let dbeta_drho = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
 
         // Compute ∂RSS/∂ρᵢ
         let x_dbeta = x.dot(&dbeta_drho);
@@ -853,10 +863,20 @@ pub fn reml_gradient_multi_qr(
         // Term 2: -rank(Sᵢ)
         let rank_term = -rank_i;
 
-        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β using solve
+        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β using cached R factorization
+        // A = R'R, so A⁻¹·b = R⁻¹·R'⁻¹·b
+        // Solve in two steps: R'·y = b, then R·x = y
         let s_i_beta = penalty_i.dot(&beta);
         let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
-        let dbeta_drho = solve(a.clone(), lambda_s_beta)?.mapv(|x| -x);
+
+        // Step 1: Solve R'·y = lambda_s_beta (lower triangular)
+        let y = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+        // Step 2: Solve R·x = y (upper triangular)
+        let dbeta_drho = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
 
         // Compute ∂RSS/∂ρᵢ = -2·residuals'·X·∂β/∂ρᵢ
         let x_dbeta = x.dot(&dbeta_drho);
