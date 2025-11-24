@@ -466,6 +466,7 @@ pub fn reml_gradient_multi_qr_blockwise(
     block_size: usize,
 ) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
+    use ndarray_linalg::{SolveTriangular, UPLO, Diag};
     use crate::blockwise_qr::compute_r_blockwise;
 
     let n = y.len();
@@ -551,6 +552,9 @@ pub fn reml_gradient_multi_qr_blockwise(
     // Compute FULL gradient for each penalty (matching full QR version)
     let mut gradient = Array1::<f64>::zeros(m);
 
+    // Transpose R once (reused for all penalties)
+    let r_t = r_upper.t().to_owned();
+
     for i in 0..m {
         let lambda_i = lambdas[i];
         let penalty_i = &penalties[i];
@@ -558,14 +562,15 @@ pub fn reml_gradient_multi_qr_blockwise(
         let sqrt_penalty = &sqrt_penalties[i];
 
         // Term 1: tr(A^{-1}·λᵢ·Sᵢ) using solve without forming A^{-1}
-        // Solve R'·x_k = L[:, k] for each column k, sum ||x_k||²
+        // Batch triangular solve: R'·X = L for ALL columns at once
         let rank = sqrt_penalty.ncols();
-        let mut trace_term = 0.0;
-        for k in 0..rank {
-            let l_col = sqrt_penalty.column(k).to_owned();
-            let x = solve(r_upper.t().to_owned(), l_col)?;
-            trace_term += x.iter().map(|xi| xi * xi).sum::<f64>();
-        }
+
+        // R' is lower triangular (transpose of upper triangular R)
+        let x_batch = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+        // Compute trace term: Σ_k ||X[:, k]||² = ||X||²_F (sum of all squared elements)
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
         let trace = lambda_i * trace_term;
 
         // Term 2: -rank(Sᵢ)
@@ -652,6 +657,7 @@ pub fn reml_gradient_multi_qr(
 ) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::QR;
+    use ndarray_linalg::{SolveTriangular, UPLO, Diag};
 
     let n = y.len();
     let p = x.ncols();
@@ -820,6 +826,9 @@ pub fn reml_gradient_multi_qr(
     }
     let p_value = rss + penalty_sum;
 
+    // Transpose R once (reused for all penalties)
+    let r_t = r_upper.t().to_owned();
+
     for i in 0..m {
         let lambda_i = lambdas[i];
         let penalty_i = &penalties[i];
@@ -828,16 +837,17 @@ pub fn reml_gradient_multi_qr(
         // Term 1: tr(A^{-1}·λᵢ·Sᵢ) using solve without forming A^{-1}
         // We have R'R = A, so tr(A^{-1}·S) = tr(R^{-1}·R'^{-1}·S)
         // = Σ_k ||R'^{-1}·L[:, k]||² where S = L·L'
-        // Compute by solving R'·x_k = L[:, k] for each column k
+        // Compute by solving R'·X = L for ALL columns at once (batch solve)
         let sqrt_penalty = &sqrt_penalties[i];
         let rank = sqrt_penalty.ncols();
-        let mut trace_term = 0.0;
-        for k in 0..rank {
-            let l_col = sqrt_penalty.column(k).to_owned();
-            // Solve R'·x = l_col
-            let x = solve(r_upper.t().to_owned(), l_col)?;
-            trace_term += x.iter().map(|xi| xi * xi).sum::<f64>();
-        }
+
+        // Batch triangular solve: R'·X = L where L is p×rank matrix
+        // R' is lower triangular (transpose of upper triangular R)
+        let x_batch = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+        // Compute trace term: Σ_k ||X[:, k]||² = ||X||²_F (sum of all squared elements)
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
         let trace = lambda_i * trace_term;
 
         // Term 2: -rank(Sᵢ)
