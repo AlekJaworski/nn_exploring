@@ -8,41 +8,45 @@ use crate::GAMError;
 /// Compute X'WX efficiently without forming weighted matrix
 /// This is a key optimization for large n: avoids O(np) allocation
 fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
-    let (_n, p) = x.dim();
-    let mut xtwx = Array2::zeros((p, p));
+    let (n, p) = x.dim();
 
-    // Compute only upper triangle (symmetric matrix)
-    for i in 0..p {
-        for j in i..p {
-            let mut sum = 0.0;
-            // This loop is cache-friendly: sequential access
-            for row in 0..x.nrows() {
-                sum += x[[row, i]] * w[row] * x[[row, j]];
-            }
-            xtwx[[i, j]] = sum;
-            if i != j {
-                xtwx[[j, i]] = sum;  // Fill lower triangle by symmetry
-            }
+    // Create weighted design matrix: X_w[i,j] = sqrt(w[i]) * X[i,j]
+    // This allows us to compute X'WX = X_w' * X_w using BLAS GEMM/SYRK
+    let mut x_weighted = Array2::zeros((n, p));
+    for i in 0..n {
+        let sqrt_w = w[i].sqrt();
+        for j in 0..p {
+            x_weighted[[i, j]] = x[[i, j]] * sqrt_w;
         }
     }
 
-    xtwx
+    // Use BLAS matrix multiplication: X'WX = X_w' * X_w
+    // This will automatically use optimized BLAS GEMM or SYRK
+    x_weighted.t().dot(&x_weighted)
 }
 
-/// Compute X'Wy efficiently without forming weighted vectors
+/// Compute X'Wy efficiently using BLAS
 fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
-    let (_n, p) = x.dim();
-    let mut xtwy = Array1::zeros(p);
+    let n = x.nrows();
 
-    for j in 0..p {
-        let mut sum = 0.0;
-        for i in 0..x.nrows() {
-            sum += x[[i, j]] * w[i] * y[i];
-        }
-        xtwy[j] = sum;
+    // Create weighted y vector: y_w[i] = sqrt(w[i]) * y[i]
+    let mut y_weighted = Array1::zeros(n);
+    for i in 0..n {
+        y_weighted[i] = y[i] * w[i].sqrt();
     }
 
-    xtwy
+    // Create weighted X (reusing the same approach as compute_xtwx)
+    let (n, p) = x.dim();
+    let mut x_weighted = Array2::zeros((n, p));
+    for i in 0..n {
+        let sqrt_w = w[i].sqrt();
+        for j in 0..p {
+            x_weighted[[i, j]] = x[[i, j]] * sqrt_w;
+        }
+    }
+
+    // Use BLAS matrix-vector product: X'Wy = X_w' * y_w
+    x_weighted.t().dot(&y_weighted)
 }
 
 /// Estimate the rank of a matrix using row norms as approximation to singular values
@@ -502,23 +506,114 @@ pub fn reml_gradient_multi_qr_blockwise(
     let p_matrix = r_upper.inv()
         .map_err(|_| GAMError::LinAlgError("Failed to invert R matrix".to_string()))?;
 
-    // Rest is same as before: compute gradient using P
+    // Compute A^{-1} = P·P' and other quantities needed for full gradient
+    let a_inv = p_matrix.dot(&p_matrix.t());
+
+    // Compute coefficients β
+    let xtwx = compute_xtwx(x, w);
+    let xtwy = compute_xtwy(x, w, y);
+
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a.scaled_add(*lambda, penalty);
+    }
+
+    let ridge = 1e-7 * (1.0 + (m as f64).sqrt());
+    for i in 0..p {
+        a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+    }
+
+    let beta = solve(a, xtwy)?;
+
+    // Compute RSS and φ
+    let fitted = x.dot(&beta);
+    let mut rss = 0.0;
+    let mut residuals = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        residuals[i] = y[i] - fitted[i];
+        rss += residuals[i] * residuals[i] * w[i];
+    }
+
+    let total_rank: usize = penalty_ranks.iter().sum();
+    let phi = rss / (n as f64 - total_rank as f64);
+
+    let inv_phi = 1.0 / phi;
+    let phi_sq = phi * phi;
+    let n_minus_r = (n as f64) - (total_rank as f64);
+
+    // Pre-compute P = RSS + Σλⱼ·β'·Sⱼ·β
+    let mut penalty_sum = 0.0;
+    for j in 0..m {
+        let s_j_beta = penalties[j].dot(&beta);
+        let beta_s_j_beta: f64 = beta.iter().zip(s_j_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambdas[j] * beta_s_j_beta;
+    }
+    let p_value = rss + penalty_sum;
+
+    // Compute FULL gradient for each penalty (matching full QR version)
     let mut gradient = Array1::<f64>::zeros(m);
 
     for i in 0..m {
-        let penalty = &penalties[i];
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = penalty_ranks[i] as f64;
+        let sqrt_penalty = &sqrt_penalties[i];
 
-        // Compute tr(P'·S·P) = tr(P·P'·S) since tr(ABC) = tr(CAB)
-        let pp_t = p_matrix.dot(&p_matrix.t());
-        let pp_s = pp_t.dot(penalty);
+        // Term 1: tr(A^{-1}·λᵢ·Sᵢ) - OPTIMIZED using sqrt(S)
+        let p_t_sqrt_s = p_matrix.t().dot(sqrt_penalty);
+        let mut trace_term = 0.0;
+        for val in p_t_sqrt_s.iter() {
+            trace_term += val * val;
+        }
+        let trace = lambda_i * trace_term;
 
-        let mut trace = 0.0;
-        for j in 0..p {
-            trace += pp_s[[j, j]];
+        // Term 2: -rank(Sᵢ)
+        let rank_term = -rank_i;
+
+        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β
+        let s_i_beta = penalty_i.dot(&beta);
+        let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
+        let dbeta_drho = a_inv.dot(&lambda_s_beta).mapv(|x| -x);
+
+        // Compute ∂RSS/∂ρᵢ
+        let x_dbeta = x.dot(&dbeta_drho);
+        let drss_drho: f64 = -2.0 * residuals.iter().zip(x_dbeta.iter())
+            .map(|(ri, xdbi)| ri * xdbi)
+            .sum::<f64>();
+
+        let dphi_drho = drss_drho / n_minus_r;
+
+        // Compute ∂P/∂ρᵢ
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        let explicit_pen = lambda_i * beta_s_i_beta;
+
+        let mut implicit_pen = 0.0;
+        for j in 0..m {
+            let s_j_beta = penalties[j].dot(&beta);
+            let s_j_dbeta = penalties[j].dot(&dbeta_drho);
+            let term1: f64 = s_j_beta.iter().zip(dbeta_drho.iter())
+                .map(|(sj, dbi)| sj * dbi)
+                .sum();
+            let term2: f64 = beta.iter().zip(s_j_dbeta.iter())
+                .map(|(bi, sjd)| bi * sjd)
+                .sum();
+            implicit_pen += lambdas[j] * (term1 + term2);
         }
 
-        // ∂log|A|/∂log(λ) = λ·tr(A^{-1}·S) = λ·tr(P·P'·S)
-        gradient[i] = lambdas[i] * trace;
+        let dp_drho = drss_drho + explicit_pen + implicit_pen;
+
+        // Term 3: ∂(P/φ)/∂ρᵢ
+        let penalty_quotient_deriv = dp_drho * inv_phi - (p_value / phi_sq) * dphi_drho;
+
+        // Term 4: ∂[(n-r)·log(2πφ)]/∂ρᵢ
+        let log_phi_deriv = n_minus_r * dphi_drho * inv_phi;
+
+        // Total gradient (divide by 2)
+        gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
     }
 
     Ok(gradient)
