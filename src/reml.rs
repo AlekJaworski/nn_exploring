@@ -502,12 +502,8 @@ pub fn reml_gradient_multi_qr_blockwise(
         eprintln!("[BLOCKWISE_DEBUG] Expected trace: {:.6e}", (0..p).map(|i| expected[[i,i]]).sum::<f64>());
     }
 
-    // Compute P = R^{-1}
-    let p_matrix = r_upper.inv()
-        .map_err(|_| GAMError::LinAlgError("Failed to invert R matrix".to_string()))?;
-
-    // Compute A^{-1} = P·P' and other quantities needed for full gradient
-    let a_inv = p_matrix.dot(&p_matrix.t());
+    // DON'T compute P = R^{-1} - it overflows!
+    // Use solve() calls directly
 
     // Compute coefficients β
     let xtwx = compute_xtwx(x, w);
@@ -523,7 +519,7 @@ pub fn reml_gradient_multi_qr_blockwise(
         a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
     }
 
-    let beta = solve(a, xtwy)?;
+    let beta = solve(a.clone(), xtwy)?;
 
     // Compute RSS and φ
     let fitted = x.dot(&beta);
@@ -561,21 +557,24 @@ pub fn reml_gradient_multi_qr_blockwise(
         let rank_i = penalty_ranks[i] as f64;
         let sqrt_penalty = &sqrt_penalties[i];
 
-        // Term 1: tr(A^{-1}·λᵢ·Sᵢ) - OPTIMIZED using sqrt(S)
-        let p_t_sqrt_s = p_matrix.t().dot(sqrt_penalty);
+        // Term 1: tr(A^{-1}·λᵢ·Sᵢ) using solve without forming A^{-1}
+        // Solve R'·x_k = L[:, k] for each column k, sum ||x_k||²
+        let rank = sqrt_penalty.ncols();
         let mut trace_term = 0.0;
-        for val in p_t_sqrt_s.iter() {
-            trace_term += val * val;
+        for k in 0..rank {
+            let l_col = sqrt_penalty.column(k).to_owned();
+            let x = solve(r_upper.t().to_owned(), l_col)?;
+            trace_term += x.iter().map(|xi| xi * xi).sum::<f64>();
         }
         let trace = lambda_i * trace_term;
 
         // Term 2: -rank(Sᵢ)
         let rank_term = -rank_i;
 
-        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β
+        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β using solve
         let s_i_beta = penalty_i.dot(&beta);
         let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
-        let dbeta_drho = a_inv.dot(&lambda_s_beta).mapv(|x| -x);
+        let dbeta_drho = solve(a.clone(), lambda_s_beta)?.mapv(|x| -x);
 
         // Compute ∂RSS/∂ρᵢ
         let x_dbeta = x.dot(&dbeta_drho);
@@ -751,32 +750,17 @@ pub fn reml_gradient_multi_qr(
                  rtr[[0,0]], rtr[[1,1]], rtr[[p-1,p-1]]);
     }
 
-    // Compute P = R^{-1}
-    let p_matrix = r_upper.inv()
-        .map_err(|e| GAMError::InvalidParameter(format!("Matrix inversion failed: {:?}", e)))?;
-
-    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-        eprintln!("[QR_DEBUG] P = R^{{-1}} computed, shape: {}×{}", p_matrix.nrows(), p_matrix.ncols());
-        eprintln!("[QR_DEBUG] P[0,0] = {:.6e}, P[1,1] = {:.6e}", p_matrix[[0,0]], p_matrix[[1,1]]);
-
-        // Verify P·P' = A^{-1} by checking against A
-        let pp_t = p_matrix.dot(&p_matrix.t());
-        eprintln!("[QR_DEBUG] P·P' diagonal: [{:.6e}, {:.6e}, ..., {:.6e}]",
-                 pp_t[[0,0]], pp_t[[1,1]], pp_t[[p-1,p-1]]);
-    }
+    // DON'T compute P = R^{-1} - it overflows for ill-conditioned R!
+    // Instead use solve() calls directly
 
     // Compute coefficients for penalty term
-    let xtw = sqrt_w_x.t().to_owned();
-    let xtwx = xtw.dot(&sqrt_w_x);
+    let xtwx = compute_xtwx(x, w);
+    let xtwy = compute_xtwy(x, w, y);
+
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         a.scaled_add(*lambda, penalty);
     }
-
-    let y_weighted: Array1<f64> = y.iter().zip(w.iter())
-        .map(|(yi, wi)| yi * wi)
-        .collect();
-    let b = xtw.dot(&y_weighted);
 
     // Add small ridge for stability
     let ridge = 1e-7 * (1.0 + (m as f64).sqrt());
@@ -784,7 +768,7 @@ pub fn reml_gradient_multi_qr(
         a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
     }
 
-    let beta = solve(a, b)?;
+    let beta = solve(a.clone(), xtwy)?;
 
     // Compute RSS and φ
     let fitted = x.dot(&beta);
@@ -795,25 +779,13 @@ pub fn reml_gradient_multi_qr(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
-    // Compute effective degrees of freedom: edf = tr(A^{-1} X'X)
-    // We have P = R^{-1}, and A^{-1} = P·P'
-    // So tr(A^{-1} X'X) = tr(P·P'·X'X)
-    let a_inv = p_matrix.dot(&p_matrix.t());
-    let ainv_xtwx = a_inv.dot(&xtwx);
-    let edf_total: f64 = (0..p).map(|i| ainv_xtwx[[i, i]]).sum();
-
     // Compute total rank for φ calculation
-    // IMPORTANT: Use total_rank (sum of penalty ranks), NOT edf_total
     let total_rank: usize = penalty_ranks.iter().sum();
     let phi = rss / (n as f64 - total_rank as f64);
 
-    // Pre-compute A^{-1}·X'X·A^{-1} for ∂edf/∂ρ calculations
-    // This is O(p³) and independent of smooth index, so compute once
-    let ainv_xtx_ainv = ainv_xtwx.dot(&a_inv);
-
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
-        eprintln!("[PHI_DEBUG] n={}, edf_total={:.6}, rss={:.6}, phi={:.6}",
-                 n, edf_total, rss, phi);
+        eprintln!("[PHI_DEBUG] n={}, total_rank={}, rss={:.6}, phi={:.6}",
+                 n, total_rank, rss, phi);
     }
 
     // Compute gradient for each penalty
@@ -853,19 +825,28 @@ pub fn reml_gradient_multi_qr(
         let penalty_i = &penalties[i];
         let rank_i = penalty_ranks[i] as f64;
 
-        // Term 1: tr(A^{-1}·λᵢ·Sᵢ) = λᵢ·Σ(A^{-1})[i,j]·(Sᵢ)[j,i]
-        // This is the Frobenius inner product: λᵢ·<A^{-1}, Sᵢ>
-        let ainv_s = a_inv.dot(penalty_i);
-        let trace_term: f64 = (0..p).map(|i| ainv_s[[i, i]]).sum();
+        // Term 1: tr(A^{-1}·λᵢ·Sᵢ) using solve without forming A^{-1}
+        // We have R'R = A, so tr(A^{-1}·S) = tr(R^{-1}·R'^{-1}·S)
+        // = Σ_k ||R'^{-1}·L[:, k]||² where S = L·L'
+        // Compute by solving R'·x_k = L[:, k] for each column k
+        let sqrt_penalty = &sqrt_penalties[i];
+        let rank = sqrt_penalty.ncols();
+        let mut trace_term = 0.0;
+        for k in 0..rank {
+            let l_col = sqrt_penalty.column(k).to_owned();
+            // Solve R'·x = l_col
+            let x = solve(r_upper.t().to_owned(), l_col)?;
+            trace_term += x.iter().map(|xi| xi * xi).sum::<f64>();
+        }
         let trace = lambda_i * trace_term;
 
         // Term 2: -rank(Sᵢ)
         let rank_term = -rank_i;
 
-        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β
+        // Compute ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β using solve
         let s_i_beta = penalty_i.dot(&beta);
         let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
-        let dbeta_drho = a_inv.dot(&lambda_s_beta).mapv(|x| -x);
+        let dbeta_drho = solve(a.clone(), lambda_s_beta)?.mapv(|x| -x);
 
         // Compute ∂RSS/∂ρᵢ = -2·residuals'·X·∂β/∂ρᵢ
         let x_dbeta = x.dot(&dbeta_drho);
