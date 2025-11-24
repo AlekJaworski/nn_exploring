@@ -47,3 +47,8 @@ required-features = ["blas"]
 [[bin]]
 name = "bench_solve"
 path = "benches/bench_solve.rs"
+
+[[bin]]
+name = "test_batch_solve"
+path = "test_batch_solve.rs"
+required-features = ["blas"]
