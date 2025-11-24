@@ -122,6 +122,24 @@ The remaining performance gap (2.5-4.4x) is likely due to:
 ✅ **No numerical overflow** (no more 10^27 values!)
 ✅ **Iterations match R** (5 vs 6-7)
 
+### 🧪 Numerical Stability Tests (Commit: ab37ba7)
+
+**All tests passing** (run with `cargo test --lib --features blas test_multidim_gradient`):
+
+1. **`test_multidim_gradient_no_overflow`** ✅
+   - Verifies no catastrophic overflow (values < 1e10, not 1e27)
+   - Tests n=100, 3D case with block-diagonal penalties
+
+2. **`test_multidim_gradient_ill_conditioned`** ✅
+   - Tests extreme ill-conditioning (eigenvalues 1e-8 to 1.0, lambdas 0.01 to 1000)
+   - Verifies gradients remain finite and bounded
+
+3. **`test_multidim_lambda_variation`** ✅
+   - Confirms gradients vary correctly (not all identical)
+   - Tests n=200, 3D case with different smoothness needs
+
+**Status: Numerical stability VERIFIED** ✓
+
 ---
 
 ## Conclusion
