@@ -22,6 +22,8 @@ blas = ["ndarray-linalg"]  # Enable optimized BLAS/LAPACK backend
 
 [dev-dependencies]
 approx = "0.5"
+rand = "0.8"
+rand_chacha = "0.3"
 
 [profile.release]
 # Aggressive optimization flags for maximum performance

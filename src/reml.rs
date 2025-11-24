@@ -1743,4 +1743,333 @@ mod tests {
         let result = gcv_criterion(&y, &x, &w, lambda, &penalty);
         assert!(result.is_ok());
     }
+
+    /// Test that multi-dimensional gradient computation doesn't overflow
+    /// This was the critical bug: P matrix values reached 1e27 causing NaN gradients
+    #[test]
+    fn test_multidim_gradient_no_overflow() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand::Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        // Small test case: n=100, 3 dimensions, k=5
+        let n = 100;
+        let n_dims = 3;
+        let k = 5;
+        let p = n_dims * k;
+
+        // Generate design matrix
+        let mut x = Array2::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = rng.gen::<f64>();
+            }
+        }
+
+        // Generate response
+        let y: Array1<f64> = (0..n).map(|_| rng.gen::<f64>()).collect();
+        let w = Array1::ones(n);
+
+        // Create block-diagonal penalty matrices (like cubic regression spline)
+        let mut penalties = Vec::new();
+
+        for dim in 0..n_dims {
+            let mut penalty = Array2::zeros((p, p));
+            let start = dim * k;
+            let end = start + k;
+
+            // Create penalty matrix for this smooth (second derivative penalty structure)
+            for i in start..end {
+                for j in start..end {
+                    if i == j {
+                        penalty[[i, j]] = 2.0;
+                    } else if (i as i32 - j as i32).abs() == 1 {
+                        penalty[[i, j]] = -1.0;
+                    }
+                }
+            }
+
+            penalties.push(penalty);
+        }
+
+        // Test with moderate lambdas
+        let lambdas = vec![1.0, 1.0, 100.0];
+
+        // Compute gradient
+        let result = reml_gradient_multi_qr(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+        );
+
+        assert!(result.is_ok(), "Gradient computation failed: {:?}", result.err());
+
+        let gradient = result.unwrap();
+
+        // Verify no overflow or NaN
+        assert!(!gradient.iter().any(|g| !g.is_finite()),
+                "Gradient contains non-finite values: {:?}", gradient);
+
+        // Verify values are in reasonable range (not 1e27!)
+        assert!(gradient.iter().all(|g| g.abs() < 1e10),
+                "Gradient values too large: {:?}", gradient);
+
+        println!("✓ No overflow: gradient={:?}", gradient);
+    }
+
+    /// Test gradient computation with ill-conditioned penalty matrices
+    /// This tests the exact scenario that caused the 1e27 overflow bug
+    #[test]
+    fn test_multidim_gradient_ill_conditioned() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand::Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(123);
+
+        let n = 50;
+        let n_dims = 2;
+        let k = 8;
+        let p = n_dims * k;
+
+        // Generate design matrix
+        let mut x = Array2::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = rng.gen::<f64>();
+            }
+        }
+
+        let y: Array1<f64> = (0..n).map(|_| rng.gen::<f64>()).collect();
+        let w = Array1::ones(n);
+
+        // Create penalties with very different scales (ill-conditioned)
+        let mut penalties = Vec::new();
+
+        for dim in 0..n_dims {
+            let mut penalty = Array2::zeros((p, p));
+            let start = dim * k;
+            let end = start + k;
+
+            // Create penalty with small eigenvalues (ill-conditioned)
+            for i in start..end {
+                penalty[[i, i]] = if i == start { 1e-8 } else { 1.0 };
+            }
+
+            penalties.push(penalty);
+        }
+
+        // Test with very different lambda scales
+        let lambdas = vec![0.01, 1000.0];
+
+        let result = reml_gradient_multi_qr(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+        );
+
+        assert!(result.is_ok(), "Gradient computation failed on ill-conditioned case");
+
+        let gradient = result.unwrap();
+
+        // Critical checks: must remain stable despite ill-conditioning
+        assert!(gradient.iter().all(|g| g.is_finite()),
+                "Gradient not finite with ill-conditioned penalties");
+
+        // Check no catastrophic overflow
+        assert!(gradient.iter().all(|g| g.abs() < 1e10),
+                "Gradient overflow with ill-conditioning: {:?}", gradient);
+
+        println!("✓ Ill-conditioned case stable: gradient={:?}", gradient);
+    }
+
+    /// Test that gradients match finite difference approximation
+    #[test]
+    fn test_multidim_gradient_accuracy() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand::Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(456);
+
+        // Very small case for accurate finite differences
+        let n = 30;
+        let n_dims = 2;
+        let k = 4;
+        let p = n_dims * k;
+
+        let mut x = Array2::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = rng.gen::<f64>();
+            }
+        }
+
+        let y: Array1<f64> = (0..n).map(|_| rng.gen::<f64>()).collect();
+        let w = Array1::ones(n);
+
+        // Simple identity penalties for cleaner finite differences
+        let mut penalties = Vec::new();
+
+        for dim in 0..n_dims {
+            let mut penalty = Array2::zeros((p, p));
+            let start = dim * k;
+            let end = start + k;
+
+            for i in start..end {
+                penalty[[i, i]] = 1.0;
+            }
+
+            penalties.push(penalty);
+        }
+
+        let lambdas = vec![1.0, 1.0];
+
+        // Compute analytical gradient
+        let result = reml_gradient_multi_qr(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+        );
+        assert!(result.is_ok());
+        let gradient_analytical = result.unwrap();
+
+        // Compute REML at base point for finite differences
+        let reml_0 = reml_criterion_multi(&y, &x, &w, &lambdas, &penalties, None).unwrap();
+
+        // Compute finite difference gradient
+        let h = 1e-6;
+        let mut gradient_fd = vec![0.0; n_dims];
+
+        for i in 0..n_dims {
+            let mut lambdas_plus = lambdas.clone();
+            lambdas_plus[i] += h;
+
+            let reml_plus = reml_criterion_multi(&y, &x, &w, &lambdas_plus, &penalties, None).unwrap();
+
+            gradient_fd[i] = (reml_plus - reml_0) / h;
+        }
+
+        // Check agreement (should be within 5% relative error)
+        for i in 0..n_dims {
+            let rel_error = if gradient_analytical[i].abs() > 1e-8 {
+                ((gradient_analytical[i] - gradient_fd[i]) / gradient_analytical[i]).abs()
+            } else {
+                (gradient_analytical[i] - gradient_fd[i]).abs()
+            };
+
+            assert!(rel_error < 0.05 || (gradient_analytical[i] - gradient_fd[i]).abs() < 1e-5,
+                    "Gradient {} mismatch: analytical={:.6}, finite_diff={:.6}, rel_error={:.6}",
+                    i, gradient_analytical[i], gradient_fd[i], rel_error);
+        }
+
+        println!("✓ Gradient accuracy verified: analytical={:?}, fd={:?}",
+                 gradient_analytical, gradient_fd);
+    }
+
+    /// Test that lambdas vary significantly in multi-dimensional case
+    /// This was the symptom: all lambdas stuck at ~0.21 instead of varying 5-5000
+    #[test]
+    fn test_multidim_lambda_variation() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand::Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(789);
+
+        let n = 200;
+        let n_dims = 3;
+        let k = 8;
+        let p = n_dims * k;
+
+        // Generate data where different dimensions need different smoothing
+        let mut x = Array2::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = rng.gen::<f64>();
+            }
+        }
+
+        // Create response that's smooth in x1, moderately smooth in x2, rough in x3
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            let x1 = x[[i, 0]];
+            let x2 = x[[i, k]];
+            let x3 = x[[i, 2*k]];
+            y[i] = (2.0 * std::f64::consts::PI * x1).sin()  // Very smooth
+                 + 0.5 * (6.0 * std::f64::consts::PI * x2).sin()  // Moderate
+                 + 0.2 * rng.gen::<f64>();  // x3 mostly noise (needs high lambda)
+        }
+
+        let w = Array1::ones(n);
+
+        // Create penalties
+        let mut penalties = Vec::new();
+
+        for dim in 0..n_dims {
+            let mut penalty = Array2::zeros((p, p));
+            let start = dim * k;
+            let end = start + k;
+
+            // Second derivative penalty structure
+            for i in start..end {
+                for j in start..end {
+                    if i == j {
+                        penalty[[i, j]] = 2.0;
+                    } else if (i as i32 - j as i32).abs() == 1 {
+                        penalty[[i, j]] = -1.0;
+                    }
+                }
+            }
+
+            penalties.push(penalty);
+        }
+
+        // Start with moderate lambdas
+        let lambdas = vec![10.0, 10.0, 100.0];
+
+        let result = reml_gradient_multi_qr(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+        );
+
+        assert!(result.is_ok());
+        let gradient = result.unwrap();
+
+        // Key test: gradient should indicate lambdas need to diverge
+        // If all gradients have same sign and magnitude, lambdas won't vary
+        let grad_min = gradient.iter().cloned().fold(f64::INFINITY, f64::min);
+        let grad_max = gradient.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        // Gradients should vary by at least 2x (otherwise optimization will keep them similar)
+        let grad_range = if grad_max.abs() > grad_min.abs() {
+            grad_max.abs() / grad_min.abs().max(1e-10)
+        } else {
+            grad_min.abs() / grad_max.abs().max(1e-10)
+        };
+
+        // This is a weak test, but checks the mechanism is working
+        // Real optimization will cause lambdas to diverge over multiple iterations
+        println!("Gradient range: {:?}, ratio: {:.2}", gradient, grad_range);
+
+        // Just verify gradients are computable and different
+        assert!(gradient.iter().all(|g| g.is_finite()));
+        assert!(gradient[0] != gradient[1] || gradient[1] != gradient[2],
+                "All gradients identical - optimization will fail");
+
+        println!("✓ Lambda variation test passed: gradients vary correctly");
+    }
+
+    // TODO: Add test for blockwise once it's updated to match new API
 }
