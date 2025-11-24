@@ -14,11 +14,13 @@ thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
 ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-system"] }
+rand = { version = "0.8", optional = true }
+rand_chacha = { version = "0.3", optional = true }
 
 [features]
 default = []
 python = ["pyo3", "numpy"]
-blas = ["ndarray-linalg"]  # Enable optimized BLAS/LAPACK backend
+blas = ["ndarray-linalg", "rand", "rand_chacha"]  # Enable optimized BLAS/LAPACK backend
 
 [dev-dependencies]
 approx = "0.5"
@@ -51,4 +53,9 @@ path = "benches/bench_solve.rs"
 [[bin]]
 name = "test_batch_solve"
 path = "test_batch_solve.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "profile_gradient"
+path = "profile_gradient.rs"
 required-features = ["blas"]
