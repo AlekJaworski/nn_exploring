@@ -1,0 +1,85 @@
+R detected. Running full benchmarks...
+
+================================================================================
+PERFORMANCE COMPARISON: mgcvrust (Rust) vs mgcv (R)
+================================================================================
+
+Test 1: Single Variable GAMs - Various Problem Sizes
+--------------------------------------------------------------------------------
+
+Problem size: n=100, k=10
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0014s ± 0.0003s  (λ=1.209050)
+  R:      0.0372s ± 0.0186s  (λ=1.223084)
+  Speedup: 26.00x
+
+Problem size: n=500, k=10
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0070s ± 0.0011s  (λ=1.408167)
+  R:      0.0566s ± 0.0298s  (λ=1.413070)
+  Speedup: 8.14x
+
+Problem size: n=1000, k=15
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0374s ± 0.0053s  (λ=7.735285)
+  R:      0.0785s ± 0.0372s  (λ=7.739346)
+  Speedup: 2.10x
+
+Problem size: n=2000, k=20
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.1493s ± 0.0032s  (λ=20.801690)
+  R:      0.1042s ± 0.0488s  (λ=20.762955)
+  Speedup: 0.70x
+
+Problem size: n=5000, k=20
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.3426s ± 0.0109s  (λ=25.701203)
+  R:      0.1760s ± 0.0473s  (λ=25.699706)
+  Speedup: 0.51x
+
+================================================================================
+Test 2: Multi-Variable GAMs
+--------------------------------------------------------------------------------
+
+Problem size: n=500, d=2, k=[10, 10]
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0298s ± 0.0007s
+  R:      0.0978s ± 0.0344s
+  Speedup: 3.28x
+
+Problem size: n=1000, d=3, k=[10, 10, 10]
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0536s ± 0.0029s
+  R:      0.1469s ± 0.0631s
+  Speedup: 2.74x
+
+Problem size: n=2000, d=4, k=[10, 10, 10, 10]
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.2292s ± 0.0021s
+  R:      0.2642s ± 0.0695s
+  Speedup: 1.15x
+
+================================================================================
+SUMMARY
+================================================================================
+
+Single Variable GAMs:
+  Average speedup: 7.49x
+  Min speedup:     0.51x
+  Max speedup:     26.00x
+
+Multi-Variable GAMs:
+  Average speedup: 2.39x
+  Min speedup:     1.15x
+  Max speedup:     3.28x
+
+Results saved to: rust_vs_r_benchmark_results.json
+

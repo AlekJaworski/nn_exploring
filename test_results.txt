@@ -1,0 +1,248 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.14, pytest-9.0.1, pluggy-1.6.0 -- /root/.local/share/uv/tools/pytest/bin/python
+cachedir: .pytest_cache
+rootdir: /home/user/nn_exploring
+configfile: pyproject.toml
+collecting ... collected 0 items / 72 errors
+
+==================================== ERRORS ====================================
+_____________________ ERROR collecting performance_test.py _____________________
+ImportError while importing test module '/home/user/nn_exploring/performance_test.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+performance_test.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+___________________ ERROR collecting test_1var_gam.marimo.py ___________________
+ImportError while importing test module '/home/user/nn_exploring/test_1var_gam.marimo.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_1var_gam.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+______________________ ERROR collecting test_1var_gam.py _______________________
+ImportError while importing test module '/home/user/nn_exploring/test_1var_gam.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_1var_gam.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+________________ ERROR collecting test_4d_multidim_inference.py ________________
+ImportError while importing test module '/home/user/nn_exploring/test_4d_multidim_inference.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_4d_multidim_inference.py:14: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+_________________ ERROR collecting test_bandchol_weighting.py __________________
+ImportError while importing test module '/home/user/nn_exploring/test_bandchol_weighting.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_bandchol_weighting.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+______________________ ERROR collecting test_basic_fit.py ______________________
+ImportError while importing test module '/home/user/nn_exploring/test_basic_fit.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_basic_fit.py:6: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+_____________________ ERROR collecting test_better_init.py _____________________
+ImportError while importing test module '/home/user/nn_exploring/test_better_init.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_better_init.py:4: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+______________________ ERROR collecting test_bindings.py _______________________
+ImportError while importing test module '/home/user/nn_exploring/test_bindings.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_bindings.py:4: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+________________ ERROR collecting test_blockwise_correctness.py ________________
+ImportError while importing test module '/home/user/nn_exploring/test_blockwise_correctness.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_blockwise_correctness.py:4: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+__________________ ERROR collecting test_boundary_behavior.py __________________
+ImportError while importing test module '/home/user/nn_exploring/test_boundary_behavior.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_boundary_behavior.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+___________________ ERROR collecting test_boundary_simple.py ___________________
+ImportError while importing test module '/home/user/nn_exploring/test_boundary_simple.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_boundary_simple.py:6: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+__________________ ERROR collecting test_compare_gradients.py __________________
+ImportError while importing test module '/home/user/nn_exploring/test_compare_gradients.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_compare_gradients.py:13: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+___________________ ERROR collecting test_compare_hessian.py ___________________
+ImportError while importing test module '/home/user/nn_exploring/test_compare_hessian.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_compare_hessian.py:12: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+______________ ERROR collecting test_constraint_implementation.py ______________
+ImportError while importing test module '/home/user/nn_exploring/test_constraint_implementation.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_constraint_implementation.py:6: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+_____________________ ERROR collecting test_convergence.py _____________________
+ImportError while importing test module '/home/user/nn_exploring/test_convergence.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_convergence.py:4: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+___________________ ERROR collecting test_cr_basis_check.py ____________________
+ImportError while importing test module '/home/user/nn_exploring/test_cr_basis_check.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_cr_basis_check.py:6: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+______________ ERROR collecting test_cr_constraint_comparison.py _______________
+ImportError while importing test module '/home/user/nn_exploring/test_cr_constraint_comparison.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_cr_constraint_comparison.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+_____________________ ERROR collecting test_cr_splines.py ______________________
+ImportError while importing test module '/home/user/nn_exploring/test_cr_splines.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_cr_splines.py:6: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+___________________ ERROR collecting test_det2_validation.py ___________________
+ImportError while importing test module '/home/user/nn_exploring/test_det2_validation.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_det2_validation.py:11: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+__________________ ERROR collecting test_direct_comparison.py __________________
+ImportError while importing test module '/home/user/nn_exploring/test_direct_comparison.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_direct_comparison.py:9: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+__________________ ERROR collecting test_diverse_datasets.py ___________________
+ImportError while importing test module '/home/user/nn_exploring/test_diverse_datasets.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_diverse_datasets.py:4: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+__________________ ERROR collecting test_effective_penalty.py __________________
+ImportError while importing test module '/home/user/nn_exploring/test_effective_penalty.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_effective_penalty.py:7: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+__________________ ERROR collecting test_exact_r_sequence.py ___________________
+ImportError while importing test module '/home/user/nn_exploring/test_exact_r_sequence.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_exact_r_sequence.py:2: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+____________________ ERROR collecting test_extrap_debug.py _____________________
+ImportError while importing test module '/home/user/nn_exploring/test_extrap_debug.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+test_extrap_debug.py:4: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'

@@ -363,6 +363,8 @@ dependencies = [
  "ndarray-linalg",
  "numpy",
  "pyo3",
+ "rand",
+ "rand_chacha",
  "thiserror",
 ]
 

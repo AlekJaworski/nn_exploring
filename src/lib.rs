@@ -14,6 +14,7 @@ pub mod gam_optimized;
 pub mod utils;
 pub mod linalg;
 pub mod newton_optimizer;
+pub mod blockwise_qr;
 
 pub use gam::{GAM, SmoothTerm};
 pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};

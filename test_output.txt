@@ -1,0 +1,410 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.14, pytest-9.0.1, pluggy-1.6.0 -- /usr/local/bin/python
+cachedir: .pytest_cache
+rootdir: /home/user/nn_exploring
+configfile: pyproject.toml
+collecting ... collected 2 items / 5 errors
+======================================================================
+Testing CR Spline with Sum-to-Zero Constraint
+======================================================================
+
+Fitting GAM with CR splines (k=10, constrained to k-1=9)...
+
+Results:
+Error during test: unsupported format string passed to numpy.ndarray.__format__
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 0.631232
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 1.995560e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.644709, 10.545529, ..., 3.644709]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.238037e-1, P[1,1] = 3.188422e-1
+[QR_DEBUG] P·P' diagonal: [2.988286e-1, 1.027861e-1, ..., 2.988286e-1]
+[PHI_DEBUG] n=100, edf_total=9.551780, rss=0.747596, phi=0.008126
+[PHI_DEBUG] edf (correct) = 9.551, old total_rank = 8, φ_correct = 8.265451e-3, φ_old = 8.126061e-3, ratio = 0.983
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 3.900746e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -8.667086e-5
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 2.687607e-6
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -9.204607e-5
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -9.204607e-5
+[HESS_DEBUG]   bSb2 diag_corr = 3.713614e0
+[HESS_DEBUG]   bSb2 total = 3.713078e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 2.051576e0
+[HESS_DEBUG]   phi = 8.265451e-3, lambda_0 = 6.312323e-1, lambda_0 = 6.312323e-1
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[0.631232295946457]:
+  H[0,0]=2.051576e0
+[SMOOTH_DEBUG] Gradient: [-1.8762951090277415], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 0.997204
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 2.508200e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.674026, 10.725638, ..., 3.674026]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.217097e-1, P[1,1] = 3.149795e-1
+[QR_DEBUG] P·P' diagonal: [2.929775e-1, 9.982107e-2, ..., 2.929775e-1]
+[PHI_DEBUG] n=100, edf_total=9.340769, rss=0.747731, phi=0.008128
+[PHI_DEBUG] edf (correct) = 9.340, old total_rank = 8, φ_correct = 8.247701e-3, φ_old = 8.127527e-3, ratio = 0.985
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 5.370053e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -2.015481e-4
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 8.777182e-6
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -2.191025e-4
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -2.191025e-4
+[HESS_DEBUG]   bSb2 diag_corr = 5.841464e0
+[HESS_DEBUG]   bSb2 total = 5.840202e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 3.188604e0
+[HESS_DEBUG]   phi = 8.247701e-3, lambda_0 = 9.972038e-1, lambda_0 = 9.972038e-1
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[0.9972038452597171]:
+  H[0,0]=3.188604e0
+[SMOOTH_DEBUG] Gradient: [-0.6811339972414049], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 1.234684
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 2.790925e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.693050, 10.842511, ..., 3.693050]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.203642e-1, P[1,1] = 3.125746e-1
+[QR_DEBUG] P·P' diagonal: [2.895160e-1, 9.808364e-2, ..., 2.895160e-1]
+[PHI_DEBUG] n=100, edf_total=9.218010, rss=0.747846, phi=0.008129
+[PHI_DEBUG] edf (correct) = 9.218, old total_rank = 8, φ_correct = 8.237822e-3, φ_old = 8.128784e-3, ratio = 0.987
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 6.128456e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -2.969995e-4
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 1.489806e-5
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -3.267956e-4
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -3.267956e-4
+[HESS_DEBUG]   bSb2 diag_corr = 7.212309e0
+[HESS_DEBUG]   bSb2 total = 7.210437e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 3.911641e0
+[HESS_DEBUG]   phi = 8.237822e-3, lambda_0 = 1.234684e0, lambda_0 = 1.234684e0
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[1.2346839753898327]:
+  H[0,0]=3.911641e0
+[SMOOTH_DEBUG] Gradient: [0.082655673446466], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 1.208868
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 2.761593e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.690982, 10.829806, ..., 3.690982]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.205100e-1, P[1,1] = 3.128323e-1
+[QR_DEBUG] P·P' diagonal: [2.898809e-1, 9.826618e-2, ..., 2.898809e-1]
+[PHI_DEBUG] n=100, edf_total=9.230880, rss=0.747832, phi=0.008129
+[PHI_DEBUG] edf (correct) = 9.231, old total_rank = 8, φ_correct = 8.238841e-3, φ_old = 8.128636e-3, ratio = 0.987
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 6.052118e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -2.858762e-4
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 1.414874e-5
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -3.141737e-4
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -3.141737e-4
+[HESS_DEBUG]   bSb2 diag_corr = 7.063666e0
+[HESS_DEBUG]   bSb2 total = 7.061866e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 3.833539e0
+[HESS_DEBUG]   phi = 8.238841e-3, lambda_0 = 1.208868e0, lambda_0 = 1.208868e0
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[1.2088679724556486]:
+  H[0,0]=3.833539e0
+[SMOOTH_DEBUG] Gradient: [4.312853078446838e-5], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 0.631232
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 1.995560e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.644709, 10.545529, ..., 3.644709]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.238037e-1, P[1,1] = 3.188422e-1
+[QR_DEBUG] P·P' diagonal: [2.988286e-1, 1.027861e-1, ..., 2.988286e-1]
+[PHI_DEBUG] n=100, edf_total=9.551780, rss=0.747596, phi=0.008126
+[PHI_DEBUG] edf (correct) = 9.551, old total_rank = 8, φ_correct = 8.265451e-3, φ_old = 8.126061e-3, ratio = 0.983
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 3.900746e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -8.667086e-5
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 2.687607e-6
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -9.204607e-5
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -9.204607e-5
+[HESS_DEBUG]   bSb2 diag_corr = 3.713614e0
+[HESS_DEBUG]   bSb2 total = 3.713078e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 2.051576e0
+[HESS_DEBUG]   phi = 8.265451e-3, lambda_0 = 6.312323e-1, lambda_0 = 6.312323e-1
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[0.631232295946457]:
+  H[0,0]=2.051576e0
+[SMOOTH_DEBUG] Gradient: [-1.8762951090277415], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 0.997204
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 2.508200e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.674026, 10.725638, ..., 3.674026]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.217097e-1, P[1,1] = 3.149795e-1
+[QR_DEBUG] P·P' diagonal: [2.929775e-1, 9.982107e-2, ..., 2.929775e-1]
+[PHI_DEBUG] n=100, edf_total=9.340769, rss=0.747731, phi=0.008128
+[PHI_DEBUG] edf (correct) = 9.340, old total_rank = 8, φ_correct = 8.247701e-3, φ_old = 8.127527e-3, ratio = 0.985
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 5.370053e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -2.015481e-4
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 8.777182e-6
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -2.191025e-4
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -2.191025e-4
+[HESS_DEBUG]   bSb2 diag_corr = 5.841464e0
+[HESS_DEBUG]   bSb2 total = 5.840202e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 3.188604e0
+[HESS_DEBUG]   phi = 8.247701e-3, lambda_0 = 9.972038e-1, lambda_0 = 9.972038e-1
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[0.9972038452597171]:
+  H[0,0]=3.188604e0
+[SMOOTH_DEBUG] Gradient: [-0.6811339972414049], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 1.234684
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 2.790925e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.693050, 10.842511, ..., 3.693050]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.203642e-1, P[1,1] = 3.125746e-1
+[QR_DEBUG] P·P' diagonal: [2.895160e-1, 9.808364e-2, ..., 2.895160e-1]
+[PHI_DEBUG] n=100, edf_total=9.218010, rss=0.747846, phi=0.008129
+[PHI_DEBUG] edf (correct) = 9.218, old total_rank = 8, φ_correct = 8.237822e-3, φ_old = 8.128784e-3, ratio = 0.987
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 6.128456e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -2.969995e-4
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 1.489806e-5
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -3.267956e-4
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -3.267956e-4
+[HESS_DEBUG]   bSb2 diag_corr = 7.212309e0
+[HESS_DEBUG]   bSb2 total = 7.210437e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 3.911641e0
+[HESS_DEBUG]   phi = 8.237822e-3, lambda_0 = 1.234684e0, lambda_0 = 1.234684e0
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[1.2346839753898327]:
+  H[0,0]=3.911641e0
+[SMOOTH_DEBUG] Gradient: [0.082655673446466], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+[PENALTY_SQRT_DEBUG] Matrix size: 10×10
+[PENALTY_SQRT_DEBUG] Max eigenvalue: 2.129354e0
+[PENALTY_SQRT_DEBUG] Threshold: 2.129354e-10
+[PENALTY_SQRT_DEBUG] Positive eigenvalues found: 8
+[PENALTY_SQRT_DEBUG] Eigenvalues: [0.0025733734497614016, 0.019979629533899004, 0.07831282181421395, 0.21734918839428322, 0.4873383268836572]
+[PENALTY_SQRT_DEBUG] Output L matrix shape: 10×8
+[PENALTY_SQRT_DEBUG] Reconstruction error ||L·L' - S||_∞ = 8.881784e-16
+[Z_BUILD_DEBUG] Building Z matrix:
+[Z_BUILD_DEBUG]   n = 100, p = 10
+[Z_BUILD_DEBUG]   L0 shape: 10×8, λ0 = 1.208868
+[Z_BUILD_DEBUG]   Total Z rows: 108
+[Z_BUILD_DEBUG]   After adding L0 (rows 100 to 107), first value: 2.761593e-2
+[QR_DEBUG] Z dimensions: 108×10
+[QR_DEBUG] R dimensions: 10×10
+[QR_DEBUG] total_rows=108, n=100, p=10
+[QR_DEBUG] R'R diagonal: [3.690982, 10.829806, ..., 3.690982]
+[QR_DEBUG] P = R^{-1} computed, shape: 10×10
+[QR_DEBUG] P[0,0] = -5.205100e-1, P[1,1] = 3.128323e-1
+[QR_DEBUG] P·P' diagonal: [2.898809e-1, 9.826618e-2, ..., 2.898809e-1]
+[PHI_DEBUG] n=100, edf_total=9.230880, rss=0.747832, phi=0.008129
+[PHI_DEBUG] edf (correct) = 9.231, old total_rank = 8, φ_correct = 8.238841e-3, φ_old = 8.128636e-3, ratio = 0.987
+[HESS_DEBUG] Hessian[0,0]:
+[HESS_DEBUG]   det2 = 6.052118e-1 (log-determinant)
+[HESS_DEBUG]   bSb2 term1 (d2beta) = -2.858762e-4
+[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = 1.414874e-5
+[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = -3.141737e-4
+[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = -3.141737e-4
+[HESS_DEBUG]   bSb2 diag_corr = 7.063666e0
+[HESS_DEBUG]   bSb2 total = 7.061866e0 (penalty)
+[HESS_DEBUG]   (det2 + bSb2)/2 = 3.833539e0
+[HESS_DEBUG]   phi = 8.238841e-3, lambda_0 = 1.208868e0, lambda_0 = 1.208868e0
+
+[SMOOTH_DEBUG] Raw Hessian at λ=[1.2088679724556486]:
+  H[0,0]=3.833539e0
+[SMOOTH_DEBUG] Gradient: [4.312853078446838e-5], shape=[1], strides=[1], layout=CFcf (0xf), const ndim=1
+Traceback (most recent call last):
+  File "/home/user/nn_exploring/test_constraint_implementation.py", line 34, in <module>
+    print(f"  Lambda: {result_cr['lambda']:.6f}")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: unsupported format string passed to numpy.ndarray.__format__
+INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/home/user/nn_exploring/test_constraint_implementation.py", line 34, in <module>
+INTERNALERROR>     print(f"  Lambda: {result_cr['lambda']:.6f}")
+INTERNALERROR>           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR> TypeError: unsupported format string passed to numpy.ndarray.__format__
+INTERNALERROR> 
+INTERNALERROR> During handling of the above exception, another exception occurred:
+INTERNALERROR> 
+INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 318, in wrap_session
+INTERNALERROR>     session.exitstatus = doit(config, session) or 0
+INTERNALERROR>                          ^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 371, in _main
+INTERNALERROR>     config.hook.pytest_collection(session=session)
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_hooks.py", line 512, in __call__
+INTERNALERROR>     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_manager.py", line 120, in _hookexec
+INTERNALERROR>     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 167, in _multicall
+INTERNALERROR>     raise exception
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/logging.py", line 788, in pytest_collection
+INTERNALERROR>     return (yield)
+INTERNALERROR>             ^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/warnings.py", line 98, in pytest_collection
+INTERNALERROR>     return (yield)
+INTERNALERROR>             ^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/config/__init__.py", line 1372, in pytest_collection
+INTERNALERROR>     return (yield)
+INTERNALERROR>             ^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 121, in _multicall
+INTERNALERROR>     res = hook_impl.function(*args)
+INTERNALERROR>           ^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 382, in pytest_collection
+INTERNALERROR>     session.perform_collect()
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 857, in perform_collect
+INTERNALERROR>     self.items.extend(self.genitems(node))
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 1023, in genitems
+INTERNALERROR>     yield from self.genitems(subnode)
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 1020, in genitems
+INTERNALERROR>     rep, duplicate = self._collect_one_node(node, handle_dupes)
+INTERNALERROR>                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/main.py", line 883, in _collect_one_node
+INTERNALERROR>     rep = collect_one_node(node)
+INTERNALERROR>           ^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/runner.py", line 576, in collect_one_node
+INTERNALERROR>     rep: CollectReport = ihook.pytest_make_collect_report(collector=collector)
+INTERNALERROR>                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_hooks.py", line 512, in __call__
+INTERNALERROR>     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_manager.py", line 120, in _hookexec
+INTERNALERROR>     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 167, in _multicall
+INTERNALERROR>     raise exception
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/capture.py", line 880, in pytest_make_collect_report
+INTERNALERROR>     rep = yield
+INTERNALERROR>           ^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/pluggy/_callers.py", line 121, in _multicall
+INTERNALERROR>     res = hook_impl.function(*args)
+INTERNALERROR>           ^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/runner.py", line 400, in pytest_make_collect_report
+INTERNALERROR>     call = CallInfo.from_call(
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/runner.py", line 353, in from_call
+INTERNALERROR>     result: TResult | None = func()
+INTERNALERROR>                              ^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/runner.py", line 398, in collect
+INTERNALERROR>     return list(collector.collect())
+INTERNALERROR>                 ^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/python.py", line 563, in collect
+INTERNALERROR>     self._register_setup_module_fixture()
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/python.py", line 576, in _register_setup_module_fixture
+INTERNALERROR>     self.obj, ("setUpModule", "setup_module")
+INTERNALERROR>     ^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/python.py", line 289, in obj
+INTERNALERROR>     self._obj = obj = self._getobj()
+INTERNALERROR>                       ^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/python.py", line 560, in _getobj
+INTERNALERROR>     return importtestmodule(self.path, self.config)
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/python.py", line 507, in importtestmodule
+INTERNALERROR>     mod = import_path(
+INTERNALERROR>           ^^^^^^^^^^^^
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/pathlib.py", line 587, in import_path
+INTERNALERROR>     importlib.import_module(module_name)
+INTERNALERROR>   File "/usr/lib/python3.11/importlib/__init__.py", line 126, in import_module
+INTERNALERROR>     return _bootstrap._gcd_import(name[level:], package, level)
+INTERNALERROR>            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+INTERNALERROR>   File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+INTERNALERROR>   File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+INTERNALERROR>   File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+INTERNALERROR>   File "/usr/local/lib/python3.11/dist-packages/_pytest/assertion/rewrite.py", line 197, in exec_module
+INTERNALERROR>     exec(co, module.__dict__)
+INTERNALERROR>   File "/home/user/nn_exploring/test_constraint_implementation.py", line 127, in <module>
+INTERNALERROR>     sys.exit(1)
+INTERNALERROR> SystemExit: 1
+mainloop: caught unexpected SystemExit!
+
+============================== 5 errors in 13.12s ==============================
