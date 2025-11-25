@@ -94,3 +94,23 @@ required-features = ["blas"]
 name = "test_cached_gradient"
 path = "test_cached_gradient.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "profile_cached_detailed"
+path = "profile_cached_detailed.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "profile_xtwx"
+path = "profile_xtwx.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_components"
+path = "benchmark_components.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "test_fully_cached"
+path = "test_fully_cached.rs"
+required-features = ["blas"]

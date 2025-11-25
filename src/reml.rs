@@ -1096,6 +1096,163 @@ pub fn reml_gradient_multi_cholesky_cached(
     Ok(gradient)
 }
 
+/// Ultra-optimized Cholesky gradient with ALL pre-computed values
+///
+/// This version caches everything that doesn't change:
+/// - sqrt_penalties (penalties constant)
+/// - X'WX (X and W constant)
+/// - X'Wy (X, W, and y constant)
+///
+/// Only lambdas change during optimization, so everything else can be
+/// pre-computed once and reused. This gives maximum performance for
+/// optimization loops.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_cholesky_fully_cached(
+    x: &Array2<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    sqrt_penalties: &[Array2<f64>],
+    penalty_ranks: &[usize],
+    xtwx: &Array2<f64>,  // Pre-computed X'WX
+    xtwy: &Array1<f64>,  // Pre-computed X'Wy
+    y_residual_data: &(Array1<f64>, Array1<f64>),  // (y, w) for residual computation
+) -> Result<Array1<f64>> {
+    use ndarray_linalg::{Cholesky, UPLO, SolveTriangular, Diag};
+
+    let (y, w) = y_residual_data;
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Form A = X'WX + Σλᵢ·Sᵢ (only lambda scaling changes)
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a.scaled_add(*lambda, penalty);
+    }
+
+    // Cholesky factorization
+    let r_upper = a.cholesky(UPLO::Upper)
+        .map_err(|e| GAMError::InvalidParameter(format!("Cholesky failed: {:?}", e)))?;
+
+    let r_t = r_upper.t().to_owned();
+
+    // Compute beta using pre-computed X'Wy
+    let y_temp = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, xtwy)
+        .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+    let beta = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y_temp)
+        .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+    // Compute residuals
+    let y_hat = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(y_hat.iter())
+        .map(|(yi, yhati)| yi - yhati)
+        .collect();
+
+    // Effective DOF and RSS
+    let mut effective_dof = 0.0;
+    for &rank in penalty_ranks.iter() {
+        effective_dof += rank as f64;
+    }
+    let n_minus_r = n as f64 - effective_dof;
+
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(ri, wi)| ri * ri * wi)
+        .sum();
+
+    let phi = rss / n_minus_r;
+    let inv_phi = 1.0 / phi;
+    let phi_sq = phi * phi;
+
+    // Penalty term in P
+    let mut penalty_sum = 0.0;
+    for j in 0..m {
+        let s_j_beta = penalties[j].dot(&beta);
+        let beta_s_j_beta: f64 = beta.iter().zip(s_j_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambdas[j] * beta_s_j_beta;
+    }
+    let p_value = rss + penalty_sum;
+
+    let mut gradient = Array1::<f64>::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = penalty_ranks[i] as f64;
+        let sqrt_penalty = &sqrt_penalties[i];
+
+        // Trace computation
+        let x_batch = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
+        let trace = lambda_i * trace_term;
+
+        let rank_term = -rank_i;
+
+        // Beta derivatives
+        let s_i_beta = penalty_i.dot(&beta);
+        let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
+
+        let y_temp = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let dbeta_drho = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y_temp)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
+
+        // RSS derivative
+        let x_dbeta = x.dot(&dbeta_drho);
+        let drss_drho: f64 = -2.0 * residuals.iter().zip(x_dbeta.iter())
+            .map(|(ri, xdbi)| ri * xdbi)
+            .sum::<f64>();
+
+        let dphi_drho = drss_drho / n_minus_r;
+
+        // Penalty derivatives
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        let explicit_pen = lambda_i * beta_s_i_beta;
+
+        let mut implicit_pen = 0.0;
+        for j in 0..m {
+            let s_j_beta = penalties[j].dot(&beta);
+            let s_j_dbeta = penalties[j].dot(&dbeta_drho);
+            let term1: f64 = s_j_beta.iter().zip(dbeta_drho.iter())
+                .map(|(sj, dbi)| sj * dbi)
+                .sum();
+            let term2: f64 = beta.iter().zip(s_j_dbeta.iter())
+                .map(|(bi, sjd)| bi * sjd)
+                .sum();
+            implicit_pen += lambdas[j] * (term1 + term2);
+        }
+
+        let dp_drho = drss_drho + explicit_pen + implicit_pen;
+        let penalty_quotient_deriv = dp_drho * inv_phi - (p_value / phi_sq) * dphi_drho;
+        let log_phi_deriv = n_minus_r * dphi_drho * inv_phi;
+
+        gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
+    }
+
+    Ok(gradient)
+}
+
+#[cfg(not(feature = "blas"))]
+pub fn reml_gradient_multi_cholesky_fully_cached(
+    _x: &Array2<f64>,
+    _lambdas: &[f64],
+    _penalties: &[Array2<f64>],
+    _sqrt_penalties: &[Array2<f64>],
+    _penalty_ranks: &[usize],
+    _xtwx: &Array2<f64>,
+    _xtwy: &Array1<f64>,
+    _y_residual_data: &(Array1<f64>, Array1<f64>),
+) -> Result<Array1<f64>> {
+    Err(GAMError::InvalidParameter(
+        "Fully cached gradient requires 'blas' feature".to_string()
+    ))
+}
+
 #[cfg(not(feature = "blas"))]
 pub fn reml_gradient_multi_cholesky(
     _y: &Array1<f64>,
