@@ -2,7 +2,7 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_cholesky, reml_hessian_multi};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, penalty_sqrt};
 use crate::linalg::solve;
 
 /// Smoothing parameter optimization method
@@ -183,6 +183,22 @@ impl SmoothingParameter {
     ) -> Result<()> {
         let m = penalties.len();
 
+        // OPTIMIZATION: Pre-compute sqrt_penalties once (expensive eigendecomp)
+        // Penalties don't change during Newton optimization, so cache them
+        let sqrt_penalties_start = std::time::Instant::now();
+        let mut sqrt_penalties = Vec::new();
+        let mut penalty_ranks = Vec::new();
+        for penalty in penalties.iter() {
+            let sqrt_pen = penalty_sqrt(penalty)?;
+            let rank = sqrt_pen.ncols();
+            sqrt_penalties.push(sqrt_pen);
+            penalty_ranks.push(rank);
+        }
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            let sqrt_pen_time = sqrt_penalties_start.elapsed();
+            eprintln!("[PROFILE] Pre-computed sqrt_penalties: {:.2}ms", sqrt_pen_time.as_secs_f64() * 1000.0);
+        }
+
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter()
             .map(|l| l.ln())
@@ -205,8 +221,8 @@ impl SmoothingParameter {
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
-            // Note: Cholesky is faster but less numerically stable for ill-conditioned matrices
-            let gradient = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+            // OPTIMIZATION: Pass cached sqrt_penalties to avoid recomputing eigendecomposition
+            let gradient = reml_gradient_multi_qr_adaptive_cached(y, x, w, &lambdas, penalties, Some(&sqrt_penalties))?;
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 
             // Debug output: show raw Hessian before conditioning

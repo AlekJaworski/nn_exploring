@@ -364,7 +364,7 @@ pub fn reml_criterion_multi(
 ///
 /// For a symmetric positive semi-definite matrix S, computes L such that S = L'L
 /// Uses eigenvalue decomposition: S = Q Λ Q', so L = Q Λ^{1/2} Q' (taking transpose)
-fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
+pub fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
     use ndarray_linalg::Eigh;
 
     let n = penalty.nrows();
@@ -442,13 +442,32 @@ pub fn reml_gradient_multi_qr_adaptive(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
+    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties, None)
+}
+
+/// Adaptive QR gradient with optional cached sqrt_penalties
+pub fn reml_gradient_multi_qr_adaptive_cached(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+) -> Result<Array1<f64>> {
     let n = y.len();
 
     // Use block-wise for large n (>= 2000), full QR for small n
     if n >= 2000 {
-        reml_gradient_multi_qr_blockwise(y, x, w, lambdas, penalties, 1000)
+        #[cfg(feature = "blas")]
+        {
+            reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties)
+        }
+        #[cfg(not(feature = "blas"))]
+        {
+            reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties)
+        }
     } else {
-        reml_gradient_multi_qr(y, x, w, lambdas, penalties)
+        reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties)
     }
 }
 
@@ -463,6 +482,20 @@ pub fn reml_gradient_multi_qr_blockwise(
     penalties: &[Array2<f64>],
     block_size: usize,
 ) -> Result<Array1<f64>> {
+    reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, block_size, None)
+}
+
+/// Block-wise QR gradient with optional cached sqrt_penalties
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_qr_blockwise_cached(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    block_size: usize,
+    cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::{SolveTriangular, UPLO, Diag};
     use crate::blockwise_qr::compute_r_blockwise;
@@ -471,14 +504,29 @@ pub fn reml_gradient_multi_qr_blockwise(
     let p = x.ncols();
     let m = lambdas.len();
 
-    // Compute square root penalties once (these are constant)
-    let mut sqrt_penalties = Vec::new();
-    let mut penalty_ranks = Vec::new();
-    for penalty in penalties.iter() {
-        let sqrt_pen = penalty_sqrt(penalty)?;
-        let rank = sqrt_pen.ncols();
-        sqrt_penalties.push(sqrt_pen);
-        penalty_ranks.push(rank);
+    // Use cached sqrt_penalties if provided, otherwise compute them
+    // Avoid cloning by storing temporary and using a reference
+    let computed_sqrt_penalties: Vec<Array2<f64>>;
+    let sqrt_penalties: &[Array2<f64>];
+    let penalty_ranks: Vec<usize>;
+
+    if let Some(cached) = cached_sqrt_penalties {
+        // Use cached values - NO CLONE, just reference
+        sqrt_penalties = cached.as_slice();
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
+    } else {
+        // Compute square root penalties once (these are constant)
+        let mut sp = Vec::new();
+        let mut pr = Vec::new();
+        for penalty in penalties.iter() {
+            let sqrt_pen = penalty_sqrt(penalty)?;
+            let rank = sqrt_pen.ncols();
+            sp.push(sqrt_pen);
+            pr.push(rank);
+        }
+        computed_sqrt_penalties = sp;
+        sqrt_penalties = &computed_sqrt_penalties;
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
     }
 
     // Use block-wise QR to get R factor
@@ -663,6 +711,19 @@ pub fn reml_gradient_multi_qr(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
+    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, None)
+}
+
+/// QR-based REML gradient with optional cached sqrt_penalties
+/// If cached_sqrt_penalties is provided, skips expensive eigendecomposition
+pub fn reml_gradient_multi_qr_cached(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::QR;
     use ndarray_linalg::{SolveTriangular, UPLO, Diag};
@@ -681,16 +742,31 @@ pub fn reml_gradient_multi_qr(
         }
     }
 
-    // Compute square root penalties and their ranks
-    let mut sqrt_penalties = Vec::new();
-    let mut penalty_ranks = Vec::new();
-    for penalty in penalties.iter() {
-        let sqrt_pen = penalty_sqrt(penalty)?;
-        // Use the actual rank from eigenvalue decomposition (number of positive eigenvalues)
-        // This is more accurate than the heuristic in estimate_rank()
-        let rank = sqrt_pen.ncols();  // rank = number of positive eigenvalues
-        sqrt_penalties.push(sqrt_pen);
-        penalty_ranks.push(rank);
+    // Use cached sqrt_penalties if provided, otherwise compute them
+    // Avoid cloning by storing temporary and using a reference
+    let computed_sqrt_penalties: Vec<Array2<f64>>;
+    let sqrt_penalties: &[Array2<f64>];
+    let penalty_ranks: Vec<usize>;
+
+    if let Some(cached) = cached_sqrt_penalties {
+        // Use cached values - NO CLONE, just reference
+        sqrt_penalties = cached.as_slice();
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
+    } else {
+        // Compute square root penalties and their ranks
+        let mut sp = Vec::new();
+        let mut pr = Vec::new();
+        for penalty in penalties.iter() {
+            let sqrt_pen = penalty_sqrt(penalty)?;
+            // Use the actual rank from eigenvalue decomposition (number of positive eigenvalues)
+            // This is more accurate than the heuristic in estimate_rank()
+            let rank = sqrt_pen.ncols();  // rank = number of positive eigenvalues
+            sp.push(sqrt_pen);
+            pr.push(rank);
+        }
+        computed_sqrt_penalties = sp;
+        sqrt_penalties = &computed_sqrt_penalties;
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
     }
 
     // Build augmented matrix Z = [sqrt(W)X; sqrt(λ_0)L_0'; sqrt(λ_1)L_1'; ...]
@@ -981,6 +1057,16 @@ pub fn reml_gradient_multi_cholesky_cached(
     let mut a = compute_xtwx(x, w);
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         a.scaled_add(*lambda, penalty);
+    }
+
+    // Add adaptive ridge regularization for numerical stability
+    // mgcv adds small ridge to diagonal to ensure positive definiteness
+    // Ridge size: max(diagonal) * sqrt(machine_epsilon) ≈ 1e-8 * max_diag
+    let max_diag = (0..p).map(|i| a[[i, i]].abs()).fold(0.0f64, f64::max);
+    let ridge = max_diag * 1e-8;
+
+    for i in 0..p {
+        a[[i, i]] += ridge;
     }
 
     // Cholesky factorization: A = R'R (R is upper triangular)
