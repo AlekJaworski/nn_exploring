@@ -2,7 +2,7 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_hessian_multi};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_cholesky, reml_hessian_multi};
 use crate::linalg::solve;
 
 /// Smoothing parameter optimization method
@@ -205,6 +205,7 @@ impl SmoothingParameter {
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
+            // Note: Cholesky is faster but less numerically stable for ill-conditioned matrices
             let gradient = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
 

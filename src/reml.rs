@@ -5,20 +5,27 @@ use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
 use crate::GAMError;
 
-/// Compute X'WX efficiently without forming weighted matrix
-/// This is a key optimization for large n: avoids O(np) allocation
-fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
+/// Helper: Create weighted design matrix X_w[i,j] = sqrt(w[i]) * X[i,j]
+/// Optimized with column-wise operations for better cache locality
+#[inline]
+fn create_weighted_x(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
     let (n, p) = x.dim();
+    let mut x_weighted = x.to_owned();
 
-    // Create weighted design matrix: X_w[i,j] = sqrt(w[i]) * X[i,j]
-    // This allows us to compute X'WX = X_w' * X_w using BLAS GEMM/SYRK
-    let mut x_weighted = Array2::zeros((n, p));
-    for i in 0..n {
-        let sqrt_w = w[i].sqrt();
-        for j in 0..p {
-            x_weighted[[i, j]] = x[[i, j]] * sqrt_w;
+    // Column-wise weighting: better cache locality than row-wise
+    for j in 0..p {
+        for i in 0..n {
+            x_weighted[[i, j]] *= w[i].sqrt();
         }
     }
+
+    x_weighted
+}
+
+/// Compute X'WX efficiently without forming weighted matrix
+/// This is a key optimization for large n: avoids redundant allocations
+fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
+    let x_weighted = create_weighted_x(x, w);
 
     // Use BLAS matrix multiplication: X'WX = X_w' * X_w
     // This will automatically use optimized BLAS GEMM or SYRK
@@ -27,22 +34,13 @@ fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
 
 /// Compute X'Wy efficiently using BLAS
 fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
-    let n = x.nrows();
+    let x_weighted = create_weighted_x(x, w);
 
     // Create weighted y vector: y_w[i] = sqrt(w[i]) * y[i]
+    let n = x_weighted.nrows();
     let mut y_weighted = Array1::zeros(n);
     for i in 0..n {
         y_weighted[i] = y[i] * w[i].sqrt();
-    }
-
-    // Create weighted X (reusing the same approach as compute_xtwx)
-    let (n, p) = x.dim();
-    let mut x_weighted = Array2::zeros((n, p));
-    for i in 0..n {
-        let sqrt_w = w[i].sqrt();
-        for j in 0..p {
-            x_weighted[[i, j]] = x[[i, j]] * sqrt_w;
-        }
     }
 
     // Use BLAS matrix-vector product: X'Wy = X_w' * y_w
