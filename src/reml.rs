@@ -941,13 +941,7 @@ pub fn reml_gradient_multi_cholesky(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
-    use ndarray_linalg::{Cholesky, UPLO, SolveTriangular, Diag};
-
-    let n = y.len();
-    let p = x.ncols();
-    let m = lambdas.len();
-
-    // Compute square root penalties and their ranks (needed for trace computation)
+    // Compute square root penalties (expensive eigendecomp)
     let mut sqrt_penalties = Vec::new();
     let mut penalty_ranks = Vec::new();
     for penalty in penalties.iter() {
@@ -956,6 +950,34 @@ pub fn reml_gradient_multi_cholesky(
         sqrt_penalties.push(sqrt_pen);
         penalty_ranks.push(rank);
     }
+
+    // Delegate to cached version
+    reml_gradient_multi_cholesky_cached(y, x, w, lambdas, penalties, &sqrt_penalties, &penalty_ranks)
+}
+
+/// Cholesky gradient with pre-computed sqrt_penalties (avoids eigendecomp)
+///
+/// This version accepts pre-computed sqrt_penalties to avoid expensive
+/// eigendecomposition on every call. Since penalties don't change during
+/// optimization (only lambdas do), you can compute sqrt_penalties once
+/// and reuse them across all gradient evaluations.
+///
+/// Use this when calling gradient multiple times with same penalties.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_cholesky_cached(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    sqrt_penalties: &[Array2<f64>],
+    penalty_ranks: &[usize],
+) -> Result<Array1<f64>> {
+    use ndarray_linalg::{Cholesky, UPLO, SolveTriangular, Diag};
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
 
     // Form A = X'WX + Σλᵢ·Sᵢ directly
     let mut a = compute_xtwx(x, w);
@@ -1081,6 +1103,21 @@ pub fn reml_gradient_multi_cholesky(
     _w: &Array1<f64>,
     _lambdas: &[f64],
     _penalties: &[Array2<f64>],
+) -> Result<Array1<f64>> {
+    Err(GAMError::InvalidParameter(
+        "Cholesky gradient requires 'blas' feature".to_string()
+    ))
+}
+
+#[cfg(not(feature = "blas"))]
+pub fn reml_gradient_multi_cholesky_cached(
+    _y: &Array1<f64>,
+    _x: &Array2<f64>,
+    _w: &Array1<f64>,
+    _lambdas: &[f64],
+    _penalties: &[Array2<f64>],
+    _sqrt_penalties: &[Array2<f64>],
+    _penalty_ranks: &[usize],
 ) -> Result<Array1<f64>> {
     Err(GAMError::InvalidParameter(
         "Cholesky gradient requires 'blas' feature".to_string()

@@ -89,3 +89,8 @@ required-features = ["blas"]
 name = "test_cholesky_stability"
 path = "test_cholesky_stability.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "test_cached_gradient"
+path = "test_cached_gradient.rs"
+required-features = ["blas"]
