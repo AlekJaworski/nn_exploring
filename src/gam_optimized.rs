@@ -235,7 +235,7 @@ impl GAM {
                 &cache.design_matrix,
                 &weights,
                 &cache.penalties,
-                100,  // Very large to see if it eventually converges
+                10,  // max iterations for lambda optimization (same as non-optimized version)
                 tolerance,
             )?;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
