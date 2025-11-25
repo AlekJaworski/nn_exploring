@@ -69,3 +69,23 @@ required-features = ["blas"]
 name = "test_batch_trace"
 path = "test_batch_trace.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "profile_detailed"
+path = "profile_detailed.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "profile_full"
+path = "profile_full.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "test_cholesky_gradient"
+path = "test_cholesky_gradient.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "test_cholesky_stability"
+path = "test_cholesky_stability.rs"
+required-features = ["blas"]

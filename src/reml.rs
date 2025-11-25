@@ -924,6 +924,169 @@ pub fn reml_gradient_multi_qr(
     Ok(gradient)
 }
 
+/// Optimized gradient computation using direct Cholesky factorization
+///
+/// For small p, this is much faster than the augmented QR approach:
+/// 1. Form A = X'WX + Σλᵢ·Sᵢ directly (using optimized compute_xtwx)
+/// 2. Cholesky factorize: A = R'R
+/// 3. Cache R for all trace and beta derivative solves
+///
+/// This avoids QR on the tall augmented matrix, which is slow for large n.
+/// Recommended for p < 500.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_cholesky(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+) -> Result<Array1<f64>> {
+    use ndarray_linalg::{Cholesky, UPLO, SolveTriangular, Diag};
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Compute square root penalties and their ranks (needed for trace computation)
+    let mut sqrt_penalties = Vec::new();
+    let mut penalty_ranks = Vec::new();
+    for penalty in penalties.iter() {
+        let sqrt_pen = penalty_sqrt(penalty)?;
+        let rank = sqrt_pen.ncols();
+        sqrt_penalties.push(sqrt_pen);
+        penalty_ranks.push(rank);
+    }
+
+    // Form A = X'WX + Σλᵢ·Sᵢ directly
+    let mut a = compute_xtwx(x, w);
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a.scaled_add(*lambda, penalty);
+    }
+
+    // Cholesky factorization: A = R'R (R is upper triangular)
+    // Returns upper triangular R
+    let r_upper = a.cholesky(UPLO::Upper)
+        .map_err(|e| GAMError::InvalidParameter(format!("Cholesky factorization failed: {:?}", e)))?;
+
+    // Compute beta = A^{-1}·X'Wy using cached factorization
+    let xtwy = compute_xtwy(x, w, y);
+    let r_t = r_upper.t().to_owned();
+
+    // Solve R'·y = X'Wy, then R·beta = y
+    let y_temp = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &xtwy)
+        .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+    let beta = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y_temp)
+        .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+    // Compute residuals
+    let y_hat = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(y_hat.iter())
+        .map(|(yi, yhati)| yi - yhati)
+        .collect();
+
+    // Effective degrees of freedom and RSS
+    let mut effective_dof = 0.0;
+    for &rank in penalty_ranks.iter() {
+        effective_dof += rank as f64;
+    }
+    let n_minus_r = n as f64 - effective_dof;
+
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(ri, wi)| ri * ri * wi)
+        .sum();
+
+    let phi = rss / n_minus_r;
+    let inv_phi = 1.0 / phi;
+    let phi_sq = phi * phi;
+
+    // Compute penalty term in P
+    let mut penalty_sum = 0.0;
+    for j in 0..m {
+        let s_j_beta = penalties[j].dot(&beta);
+        let beta_s_j_beta: f64 = beta.iter().zip(s_j_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambdas[j] * beta_s_j_beta;
+    }
+    let p_value = rss + penalty_sum;
+
+    let mut gradient = Array1::<f64>::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = penalty_ranks[i] as f64;
+        let sqrt_penalty = &sqrt_penalties[i];
+
+        // Term 1: Trace computation using batch triangular solve
+        let x_batch = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
+        let trace = lambda_i * trace_term;
+
+        // Term 2: -rank(Sᵢ)
+        let rank_term = -rank_i;
+
+        // Beta derivatives using cached factorization
+        let s_i_beta = penalty_i.dot(&beta);
+        let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
+
+        let y_temp = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let dbeta_drho = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y_temp)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
+
+        // RSS derivative
+        let x_dbeta = x.dot(&dbeta_drho);
+        let drss_drho: f64 = -2.0 * residuals.iter().zip(x_dbeta.iter())
+            .map(|(ri, xdbi)| ri * xdbi)
+            .sum::<f64>();
+
+        let dphi_drho = drss_drho / n_minus_r;
+
+        // Penalty term derivatives
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        let explicit_pen = lambda_i * beta_s_i_beta;
+
+        let mut implicit_pen = 0.0;
+        for j in 0..m {
+            let s_j_beta = penalties[j].dot(&beta);
+            let s_j_dbeta = penalties[j].dot(&dbeta_drho);
+            let term1: f64 = s_j_beta.iter().zip(dbeta_drho.iter())
+                .map(|(sj, dbi)| sj * dbi)
+                .sum();
+            let term2: f64 = beta.iter().zip(s_j_dbeta.iter())
+                .map(|(bi, sjd)| bi * sjd)
+                .sum();
+            implicit_pen += lambdas[j] * (term1 + term2);
+        }
+
+        let dp_drho = drss_drho + explicit_pen + implicit_pen;
+        let penalty_quotient_deriv = dp_drho * inv_phi - (p_value / phi_sq) * dphi_drho;
+        let log_phi_deriv = n_minus_r * dphi_drho * inv_phi;
+
+        gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
+    }
+
+    Ok(gradient)
+}
+
+#[cfg(not(feature = "blas"))]
+pub fn reml_gradient_multi_cholesky(
+    _y: &Array1<f64>,
+    _x: &Array2<f64>,
+    _w: &Array1<f64>,
+    _lambdas: &[f64],
+    _penalties: &[Array2<f64>],
+) -> Result<Array1<f64>> {
+    Err(GAMError::InvalidParameter(
+        "Cholesky gradient requires 'blas' feature".to_string()
+    ))
+}
+
 /// Compute the Hessian of REML with respect to log(λᵢ) using QR-based approach
 ///
 /// Returns: ∂²REML/∂ρᵢ∂ρⱼ for i,j = 1..m, where ρᵢ = log(λᵢ)
