@@ -24,7 +24,7 @@ fn create_weighted_x(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
 
 /// Compute X'WX efficiently without forming weighted matrix
 /// This is a key optimization for large n: avoids redundant allocations
-fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
+pub fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
     let x_weighted = create_weighted_x(x, w);
 
     // Use BLAS matrix multiplication: X'WX = X_w' * X_w
