@@ -4,6 +4,7 @@ use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
 use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, penalty_sqrt, compute_xtwx};
 use crate::linalg::{solve, inverse};
+use crate::chunked_qr::IncrementalQR;
 
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -619,6 +620,143 @@ impl SmoothingParameter {
 
         Ok(())
     }
+
+    /// Optimize using REML with Fellner-Schall iteration in chunked mode
+    ///
+    /// This version processes data in chunks to avoid forming the full design matrix.
+    /// Uses incremental QR decomposition and QR-based trace computation.
+    ///
+    /// # Arguments
+    /// * `y` - Response vector (n)
+    /// * `x` - Design matrix (n × p)
+    /// * `w` - Weights vector (n)
+    /// * `penalties` - Penalty matrices (p × p each)
+    /// * `chunk_size` - Number of rows to process at a time
+    /// * `max_iter` - Maximum Fellner-Schall iterations
+    /// * `tolerance` - Convergence tolerance for log(λ)
+    fn optimize_reml_fellner_schall_chunked(
+        &mut self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[Array2<f64>],
+        chunk_size: usize,
+        max_iter: usize,
+        tolerance: f64,
+    ) -> Result<()> {
+        let m = penalties.len();
+        let p = x.ncols();
+        let n = x.nrows();
+
+        // Pre-compute penalty ranks
+        let mut penalty_ranks = Vec::new();
+        for penalty in penalties.iter() {
+            let sqrt_pen = penalty_sqrt(penalty)?;
+            penalty_ranks.push(sqrt_pen.ncols());
+        }
+
+        // Work in log space for numerical stability
+        let mut log_lambda: Vec<f64> = self.lambda.iter().map(|l| l.ln()).collect();
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Starting chunked Fellner-Schall optimization (chunk_size={})", chunk_size);
+        }
+
+        for iter in 0..max_iter {
+            let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+
+            // Build augmented system: [X; √λ₁·√S₁; √λ₂·√S₂; ...]
+            // This gives us R such that R'R = X'WX + Σλᵢ·Sᵢ
+            let mut qr = IncrementalQR::new(p);
+
+            // Process X in chunks
+            let num_chunks = (n + chunk_size - 1) / chunk_size;
+            for chunk_idx in 0..num_chunks {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(n);
+
+                let x_chunk = x.slice(ndarray::s![start..end, ..]).to_owned();
+                let y_chunk = y.slice(ndarray::s![start..end]).to_owned();
+                let w_chunk = w.slice(ndarray::s![start..end]).to_owned();
+
+                qr.update_chunk(&x_chunk, &y_chunk, Some(&w_chunk))?;
+            }
+
+            // Augment with penalty terms: √λᵢ·√Sᵢ
+            // penalty_sqrt returns L (p × rank) such that L·L' = S
+            // We need to augment with L' scaled by √λ (rank × p rows)
+            for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+                let sqrt_pen = penalty_sqrt(penalty)?;
+                if sqrt_pen.ncols() > 0 {  // Only if penalty has non-zero rank
+                    let scaled_sqrt_t = sqrt_pen.t().to_owned() * lambda.sqrt();
+
+                    // Augment with zero response for penalty rows
+                    let penalty_y = Array1::zeros(scaled_sqrt_t.nrows());
+                    qr.update_chunk(&scaled_sqrt_t, &penalty_y, None)?;
+                }
+            }
+
+            // Add small ridge for numerical stability
+            let mut max_diag: f64 = 1.0;
+            for i in 0..p {
+                max_diag = max_diag.max(qr.r[[i, i]].abs());
+            }
+            let ridge_scale = 1e-5 * (1.0 + (m as f64).sqrt());
+            let ridge = ridge_scale * max_diag;
+
+            // Add ridge as diagonal augmentation
+            let ridge_sqrt = Array2::from_diag(&Array1::from_elem(p, ridge.sqrt()));
+            let ridge_y = Array1::zeros(p);
+            qr.update_chunk(&ridge_sqrt, &ridge_y, None)?;
+
+            // Fellner-Schall update for each smoothing parameter
+            let mut new_log_lambda = log_lambda.clone();
+            let mut max_change: f64 = 0.0;
+
+            for i in 0..m {
+                let penalty_i = &penalties[i];
+                let rank_i = penalty_ranks[i] as f64;
+
+                // Compute tr(A^{-1}·Sᵢ) using QR-based method
+                let trace = qr.trace_ainv_s(penalty_i)?;
+
+                // Fellner-Schall update
+                let step_size = 0.5;
+                let adjustment = step_size * (trace - rank_i) / rank_i;
+                new_log_lambda[i] = log_lambda[i] - adjustment;
+
+                // Track maximum change for convergence
+                let change = (new_log_lambda[i] - log_lambda[i]).abs();
+                max_change = max_change.max(change);
+
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Chunked FS iter {}: smooth {}: λ={:.6}, trace={:.6}, rank={}, adj={:.6}, change={:.6}",
+                             iter, i, lambdas[i], trace, rank_i, adjustment, change);
+                }
+            }
+
+            // Check convergence
+            if max_change < tolerance {
+                self.lambda = new_log_lambda.iter().map(|l| l.exp()).collect();
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Chunked Fellner-Schall converged in {} iterations", iter + 1);
+                }
+                return Ok(());
+            }
+
+            log_lambda = new_log_lambda;
+        }
+
+        // Update final lambda values even if not converged
+        self.lambda = log_lambda.iter().map(|l| l.exp()).collect();
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!("[PROFILE] Chunked Fellner-Schall reached max iterations ({}) without convergence", max_iter);
+        }
+
+        Ok(())
+    }
+
     /// Optimize using GCV criterion
     fn optimize_gcv(
         &mut self,
@@ -767,5 +905,193 @@ mod tests {
         assert!(result.is_ok());
         let lambda = result.unwrap();
         assert!(lambda > 0.0);
+    }
+
+    #[test]
+    fn test_chunked_fellner_schall_basic() {
+        use crate::penalty::compute_penalty;
+        use ndarray_rand::RandomExt;
+        use ndarray_rand::rand_distr::Uniform;
+
+        // Small test case
+        let n = 100;
+        let k = 10;
+
+        let x = Array2::random((n, k), Uniform::new(0.0, 1.0));
+        let y = Array1::random(n, Uniform::new(0.0, 1.0));
+        let w = Array1::ones(n);
+
+        // Simple identity penalty
+        let penalty = Array2::eye(k);
+        let penalties = vec![penalty];
+
+        let mut sp = SmoothingParameter::new_with_algorithm(
+            1,
+            OptimizationMethod::REML,
+            REMLAlgorithm::FellnerSchall
+        );
+
+        // Test with chunk size of 25
+        let result = sp.optimize_reml_fellner_schall_chunked(
+            &y, &x, &w, &penalties,
+            25,  // chunk_size
+            10,  // max_iter
+            1e-4  // tolerance
+        );
+
+        assert!(result.is_ok());
+        assert!(sp.lambda[0] > 0.0);
+        assert!(sp.lambda[0].is_finite());
+    }
+
+    #[test]
+    fn test_chunked_vs_batch_agreement() {
+        use ndarray_rand::RandomExt;
+        use ndarray_rand::rand_distr::Uniform;
+
+        // Create test data
+        let n = 200;
+        let k = 12;
+
+        let x = Array2::random((n, k), Uniform::new(0.0, 1.0));
+        let y = Array1::random(n, Uniform::new(0.0, 1.0));
+        let w = Array1::ones(n);
+
+        // Create a non-trivial penalty (second-order difference)
+        let mut penalty = Array2::zeros((k, k));
+        for i in 0..k {
+            penalty[[i, i]] = 2.0;
+            if i > 0 {
+                penalty[[i, i-1]] = -1.0;
+            }
+            if i < k - 1 {
+                penalty[[i, i+1]] = -1.0;
+            }
+        }
+        let penalties = vec![penalty];
+
+        // Optimize with batch method
+        let mut sp_batch = SmoothingParameter::new_with_algorithm(
+            1,
+            OptimizationMethod::REML,
+            REMLAlgorithm::FellnerSchall
+        );
+        sp_batch.optimize_reml_fellner_schall(
+            &y, &x, &w, &penalties, 30, 1e-6
+        ).unwrap();
+
+        // Optimize with chunked method (chunk_size = 50)
+        let mut sp_chunked = SmoothingParameter::new_with_algorithm(
+            1,
+            OptimizationMethod::REML,
+            REMLAlgorithm::FellnerSchall
+        );
+        sp_chunked.optimize_reml_fellner_schall_chunked(
+            &y, &x, &w, &penalties,
+            50,   // chunk_size
+            30,   // max_iter
+            1e-6  // tolerance
+        ).unwrap();
+
+        // Results should be very similar (within 1% relative error)
+        let relative_error = (sp_batch.lambda[0] - sp_chunked.lambda[0]).abs() / sp_batch.lambda[0];
+        println!("Batch λ: {:.6}, Chunked λ: {:.6}, Relative error: {:.6}",
+                 sp_batch.lambda[0], sp_chunked.lambda[0], relative_error);
+
+        assert!(relative_error < 0.01,
+                "Chunked and batch methods should agree within 1%: batch={:.6}, chunked={:.6}, error={:.6}",
+                sp_batch.lambda[0], sp_chunked.lambda[0], relative_error);
+    }
+
+    #[test]
+    fn test_chunked_multiple_smooths() {
+        use ndarray_rand::RandomExt;
+        use ndarray_rand::rand_distr::Uniform;
+
+        // Create test data with 2 smooths
+        let n = 150;
+        let k = 8;
+
+        let x = Array2::random((n, 2*k), Uniform::new(0.0, 1.0));
+        let y = Array1::random(n, Uniform::new(0.0, 1.0));
+        let w = Array1::ones(n);
+
+        // Two penalties - one for each smooth
+        let mut penalty1 = Array2::zeros((2*k, 2*k));
+        for i in 0..k {
+            penalty1[[i, i]] = 1.0;
+        }
+
+        let mut penalty2 = Array2::zeros((2*k, 2*k));
+        for i in k..(2*k) {
+            penalty2[[i, i]] = 1.0;
+        }
+
+        let penalties = vec![penalty1, penalty2];
+
+        let mut sp = SmoothingParameter::new_with_algorithm(
+            2,
+            OptimizationMethod::REML,
+            REMLAlgorithm::FellnerSchall
+        );
+
+        let result = sp.optimize_reml_fellner_schall_chunked(
+            &y, &x, &w, &penalties,
+            50,   // chunk_size
+            20,   // max_iter
+            1e-4  // tolerance
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(sp.lambda.len(), 2);
+        assert!(sp.lambda[0] > 0.0 && sp.lambda[0].is_finite());
+        assert!(sp.lambda[1] > 0.0 && sp.lambda[1].is_finite());
+    }
+
+    #[test]
+    fn test_chunked_various_chunk_sizes() {
+        use ndarray_rand::RandomExt;
+        use ndarray_rand::rand_distr::Uniform;
+
+        let n = 100;
+        let k = 10;
+
+        let x = Array2::random((n, k), Uniform::new(0.0, 1.0));
+        let y = Array1::random(n, Uniform::new(0.0, 1.0));
+        let w = Array1::ones(n);
+
+        let penalty = Array2::eye(k);
+        let penalties = vec![penalty];
+
+        // Test different chunk sizes
+        let chunk_sizes = vec![10, 25, 50, 100, 200];  // Include sizes larger than n
+        let mut results = Vec::new();
+
+        for &chunk_size in &chunk_sizes {
+            let mut sp = SmoothingParameter::new_with_algorithm(
+                1,
+                OptimizationMethod::REML,
+                REMLAlgorithm::FellnerSchall
+            );
+
+            let result = sp.optimize_reml_fellner_schall_chunked(
+                &y, &x, &w, &penalties,
+                chunk_size,
+                20,
+                1e-6
+            );
+
+            assert!(result.is_ok(), "Failed with chunk_size={}", chunk_size);
+            results.push(sp.lambda[0]);
+        }
+
+        // All results should be similar (within 5% of each other)
+        let mean = results.iter().sum::<f64>() / results.len() as f64;
+        for (i, &lambda) in results.iter().enumerate() {
+            let relative_diff = (lambda - mean).abs() / mean;
+            assert!(relative_diff < 0.05,
+                    "Chunk size {} gave λ={:.6}, too far from mean={:.6} (diff={:.2}%)",
+                    chunk_sizes[i], lambda, mean, relative_diff * 100.0);
+        }
     }
 }

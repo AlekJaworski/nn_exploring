@@ -26,6 +26,7 @@ blas = ["ndarray-linalg", "rand", "rand_chacha"]  # Enable optimized BLAS/LAPACK
 approx = "0.5"
 rand = "0.8"
 rand_chacha = "0.3"
+ndarray-rand = "0.15"
 
 [profile.release]
 # Aggressive optimization flags for maximum performance
