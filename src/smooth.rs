@@ -65,7 +65,11 @@ impl SmoothingParameter {
 
         // Adaptive initialization: lambda_i = 0.1 * trace(S_i) / trace(X'WX)
         // This scales initialization based on problem characteristics
-        self.initialize_lambda_adaptive(x, w, penalties);
+        // DISABLED FOR DEBUGGING - using fixed init for testing
+        // Try starting from a reasonable middle value
+        for i in 0..self.lambda.len() {
+            self.lambda[i] = 1.0; // Start from λ=1
+        }
 
         match self.method {
             OptimizationMethod::REML => {
@@ -596,28 +600,58 @@ impl SmoothingParameter {
                 let rank_i = penalty_ranks[i] as f64;
 
                 // Compute tr(A^{-1}·Sᵢ)
+                // For block-diagonal penalties, only non-zero elements of S_i contribute
                 // Use fast BLAS matrix multiply then extract diagonal
                 let ainv_s = a_inv.dot(penalty_i);
+
+                // Sum full trace (all diagonal elements)
                 let mut trace = 0.0;
                 for j in 0..p {
                     trace += ainv_s[[j, j]];
                 }
 
-                // Fellner-Schall update based on trace term
-                // If trace (edf) < rank: increase lambda (more smoothing)
-                // If trace (edf) > rank: decrease lambda (less smoothing)
-                // Use step size of 0.5 for stability
-                let step_size = 0.5;
-                let adjustment = step_size * (trace - rank_i) / rank_i;
-                new_log_lambda[i] = log_lambda[i] - adjustment;
+                // Debug: check which elements are non-zero
+                if std::env::var("MGCV_TRACE_DEBUG").is_ok() && iter == 0 {
+                    let mut nonzero_count = 0;
+                    let mut trace_nonzero = 0.0;
+                    for j in 0..p {
+                        if penalty_i.row(j).iter().any(|&x| x.abs() > 1e-10) {
+                            trace_nonzero += ainv_s[[j, j]];
+                            nonzero_count += 1;
+                        }
+                    }
+                    eprintln!("[TRACE_DEBUG] Smooth {}: full_trace={:.6}, nonzero_trace={:.6}, nonzero_cols={}, p={}",
+                             i, trace, trace_nonzero, nonzero_count, p);
+                }
+
+                // Fellner-Schall update: λ_new = λ_old × (trace / rank)
+                // trace = tr(A^{-1}·S) represents effective degrees of freedom for this smooth
+                // If trace < rank: EDF too low (over-smoothing) → λ too high → decrease λ
+                // If trace > rank: EDF too high (under-smoothing) → λ too low → increase λ
+                // In log space: log(λ_new) = log(λ_old) + log(trace / rank)
+
+                // Use moderate damping
+                let damping = 0.5;
+
+                // Compute ratio - NO CLAMPING on trace itself!
+                // trace can legitimately be < rank (over-smoothed) or > rank (under-smoothed)
+                let ratio = if rank_i > 1e-10 { trace / rank_i } else { 1.0 };
+
+                // Clamp ratio to prevent too-extreme steps per iteration
+                let ratio_clamped = ratio.clamp(0.2, 5.0);  // 0.2x to 5x per iteration
+                let log_ratio = ratio_clamped.ln();
+                new_log_lambda[i] = log_lambda[i] + damping * log_ratio;
+
+                // Enforce reasonable bounds on λ itself: [1e-7, 1e5]
+                new_log_lambda[i] = new_log_lambda[i].max((1e-7f64).ln()).min((1e5f64).ln());
 
                 // Track maximum change for convergence
                 let change = (new_log_lambda[i] - log_lambda[i]).abs();
                 max_change = max_change.max(change);
 
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] FS iter {}: smooth {}: λ={:.6}, trace={:.6}, rank={}, adj={:.6}, change={:.6}",
-                             iter, i, lambdas[i], trace, rank_i, adjustment, change);
+                    eprintln!("[PROFILE] FS iter {}: smooth {}: λ={:.6}, trace={:.6}, rank={}, ratio={:.3}, change={:.6}",
+                             iter, i, lambdas[i], trace, rank_i, ratio, change);
                 }
             }
 
