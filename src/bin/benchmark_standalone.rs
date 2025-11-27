@@ -144,24 +144,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1e-6,
     )?;
 
-    // Output results
-    println!("SMOOTHING_PARAMETERS");
-    for lambda in &sp.lambda {
-        println!("{}", lambda);
+    // Output results in format expected by R benchmark script
+    for (i, lambda) in sp.lambda.iter().enumerate() {
+        println!("lambda[{}]={}", i, lambda);
     }
-    println!("END_SMOOTHING_PARAMETERS");
 
-    println!("COEFFICIENTS");
-    for coef in result.coefficients.iter() {
-        println!("{}", coef);
+    for (i, val) in result.fitted_values.iter().enumerate() {
+        println!("fitted[{}]={}", i, val);
     }
-    println!("END_COEFFICIENTS");
-
-    println!("FITTED_VALUES");
-    for val in result.fitted_values.iter() {
-        println!("{}", val);
-    }
-    println!("END_FITTED_VALUES");
 
     Ok(())
 }
