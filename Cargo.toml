@@ -115,3 +115,8 @@ required-features = ["blas"]
 name = "test_fully_cached"
 path = "test_fully_cached.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "test_newton_reml"
+path = "test_newton_reml.rs"
+required-features = ["blas"]
