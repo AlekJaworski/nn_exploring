@@ -15,6 +15,7 @@ pub mod utils;
 pub mod linalg;
 pub mod newton_optimizer;
 pub mod blockwise_qr;
+pub mod chunked_qr;
 
 pub use gam::{GAM, SmoothTerm};
 pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
@@ -43,6 +44,9 @@ pub enum GAMError {
 
     #[error("Linear algebra error: {0}")]
     LinAlgError(String),
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 pub type Result<T> = std::result::Result<T, GAMError>;
