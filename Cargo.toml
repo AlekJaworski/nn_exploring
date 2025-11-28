@@ -115,3 +115,43 @@ required-features = ["blas"]
 name = "test_fully_cached"
 path = "test_fully_cached.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "test_newton_reml"
+path = "test_newton_reml.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_rust_performance"
+path = "benchmark_rust_performance.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_comprehensive"
+path = "benchmark_comprehensive.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_rust_comprehensive"
+path = "benchmark_rust_comprehensive.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "debug_multidim"
+path = "debug_multidim.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "test_high_d"
+path = "test_high_d.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "test_d8_n5000_rust"
+path = "test_d8_n5000_rust.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "profile_n5000"
+path = "profile_n5000.rs"
+required-features = ["blas"]

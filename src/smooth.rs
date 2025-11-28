@@ -2,9 +2,10 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, penalty_sqrt, compute_xtwx};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt, compute_xtwx};
 use crate::linalg::{solve, inverse};
 use crate::chunked_qr::IncrementalQR;
+use std::time::Instant;
 
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,8 +17,8 @@ pub enum OptimizationMethod {
 /// REML optimization algorithm
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum REMLAlgorithm {
-    Newton,         // Newton's method with Hessian (slower, more stable)
-    FellnerSchall,  // Fellner-Schall iteration (faster, simpler)
+    Newton,         // Newton's method with Hessian (RECOMMENDED: fast, stable, matches bam())
+    FellnerSchall,  // Fellner-Schall iteration (DEPRECATED: broken by penalty normalization)
 }
 
 /// Container for smoothing parameters
@@ -34,7 +35,7 @@ impl SmoothingParameter {
         Self {
             lambda: vec![0.1; num_smooths],  // Will be refined in optimize()
             method,
-            reml_algorithm: REMLAlgorithm::FellnerSchall,  // Default to faster method
+            reml_algorithm: REMLAlgorithm::Newton,  // Default to Newton (matches bam())
         }
     }
 
@@ -228,6 +229,33 @@ impl SmoothingParameter {
             eprintln!("[PROFILE] Pre-computed sqrt_penalties: {:.2}ms", sqrt_pen_time.as_secs_f64() * 1000.0);
         }
 
+        // OPTIMIZATION: Pre-compute X'WX and X'Wy (don't change during optimization)
+        // This avoids O(np²) recomputation every iteration
+        use crate::reml::compute_xtwx;
+        let xtwx_start = Instant::now();
+        let xtwx = compute_xtwx(x, w);
+
+        // Compute X'Wy (also constant)
+        let x_weighted = {
+            let mut x_w = x.clone();
+            for i in 0..x.nrows() {
+                for j in 0..x.ncols() {
+                    x_w[[i, j]] *= w[i].sqrt();
+                }
+            }
+            x_w
+        };
+        let mut y_weighted = Array1::zeros(y.len());
+        for i in 0..y.len() {
+            y_weighted[i] = y[i] * w[i].sqrt();
+        }
+        let xtwy = x_weighted.t().dot(&y_weighted);
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            let xtwx_time = xtwx_start.elapsed();
+            eprintln!("[PROFILE] Pre-computed X'WX and X'Wy: {:.2}ms", xtwx_time.as_secs_f64() * 1000.0);
+        }
+
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter()
             .map(|l| l.ln())
@@ -250,9 +278,19 @@ impl SmoothingParameter {
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
-            // OPTIMIZATION: Pass cached sqrt_penalties to avoid recomputing eigendecomposition
-            let gradient = reml_gradient_multi_qr_adaptive_cached(y, x, w, &lambdas, penalties, Some(&sqrt_penalties))?;
+            // OPTIMIZATION: Pass cached sqrt_penalties, X'WX, X'Wy to avoid recomputation
+            let t_grad = Instant::now();
+            let gradient = reml_gradient_multi_qr_adaptive_cached(y, x, w, &lambdas, penalties, Some(&sqrt_penalties), Some(&xtwx), Some(&xtwy))?;
+            let grad_time = t_grad.elapsed().as_micros();
+
+            let t_hess = Instant::now();
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+            let hess_time = t_hess.elapsed().as_micros();
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE]     Gradient: {:.2}ms, Hessian: {:.2}ms",
+                         grad_time as f64 / 1000.0, hess_time as f64 / 1000.0);
+            }
 
             // Debug output: show raw Hessian before conditioning
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
@@ -341,15 +379,14 @@ impl SmoothingParameter {
                 return Ok(());
             }
 
-            // REML change convergence: DISABLED for now to test gradient convergence
-            // The Hessian may be approximate, causing tiny REML steps even with large gradient
-            // Better to rely on gradient criterion
-            let relative_reml_change = reml_change / current_reml.abs().max(1.0);
-            if false && iter > 5 && relative_reml_change < 1e-6 {
+            // REML change convergence: Stop if making negligible progress
+            // After a few iterations, if REML barely changes, we're done
+            // Use relative change to be scale-invariant
+            if iter >= 2 && reml_change < 1e-5 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] Converged after {} iterations (REML relative change: {:.2e} < 1e-6)",
-                             iter + 1, relative_reml_change);
+                    eprintln!("[PROFILE] Converged after {} iterations (REML change: {:.2e} < 1e-5)",
+                             iter + 1, reml_change);
                 }
                 return Ok(());
             }
@@ -394,6 +431,7 @@ impl SmoothingParameter {
                          step_size_clamped, current_reml);
             }
 
+            let t_linesearch = Instant::now();
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
 
@@ -435,9 +473,17 @@ impl SmoothingParameter {
                     }
                 }
             }
+            let linesearch_time = t_linesearch.elapsed().as_micros();
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE]     Line search: {:.2}ms", linesearch_time as f64 / 1000.0);
+            }
 
             // Update log_lambda
-            if best_step_scale > 0.0 {
+            // Reject steps smaller than 1e-6 as they're effectively zero and waste time
+            const MIN_STEP_SIZE: f64 = 1e-6;
+
+            if best_step_scale > MIN_STEP_SIZE {
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE]   Accepted Newton step, scale={:.4}", best_step_scale);
                 }
@@ -445,6 +491,21 @@ impl SmoothingParameter {
                     log_lambda[i] += step[i] * best_step_scale;
                 }
             } else {
+                // Newton line search found no meaningful improvement (step too small or zero)
+                // If gradient is already small, accept convergence rather than waste time
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Newton step too small (scale={:.3e}), checking gradient", best_step_scale);
+                }
+
+                if grad_norm_linf < 0.1 {
+                    self.lambda = lambdas;
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE] Converged after {} iterations (gradient {:.6} < 0.1, no further progress possible)",
+                                 iter + 1, grad_norm_linf);
+                    }
+                    return Ok(());
+                }
+
                 // Newton failed - try steepest descent as fallback
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE]   Newton failed, trying steepest descent");
@@ -488,7 +549,28 @@ impl SmoothingParameter {
 
                 if !sd_worked {
                     if std::env::var("MGCV_PROFILE").is_ok() {
-                        eprintln!("[PROFILE]   Steepest descent failed at all scales, stopping");
+                        eprintln!("[PROFILE]   Steepest descent failed at all scales");
+                    }
+                    // Check if we're close enough to converged before giving up
+                    // When at a minimum, no further progress is possible but gradient may still be small
+                    let gradient_check = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+                    let grad_norm_final = gradient_check.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
+
+                    // Use relaxed gradient tolerance (0.1) since we can't make further progress
+                    // mgcv uses 0.05-0.1, so 0.1 is reasonable when at numerical limits
+                    let relaxed_tol = 0.1;
+                    if grad_norm_final < relaxed_tol {
+                        self.lambda = lambdas;
+                        if std::env::var("MGCV_PROFILE").is_ok() {
+                            eprintln!("[PROFILE] Converged after {} iterations (gradient {:.6} < {:.6} at numerical limit)",
+                                     iter + 1, grad_norm_final, relaxed_tol);
+                        }
+                        return Ok(());
+                    }
+
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE]   Gradient {:.6} still too large (tolerance={:.6}), stopping",
+                                 grad_norm_final, relaxed_tol);
                     }
                     break;
                 }

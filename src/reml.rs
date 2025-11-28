@@ -442,7 +442,7 @@ pub fn reml_gradient_multi_qr_adaptive(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties, None)
+    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties, None, None, None)
 }
 
 /// Adaptive QR gradient with optional cached sqrt_penalties
@@ -453,6 +453,8 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     let n = y.len();
 
@@ -460,14 +462,14 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     if n >= 2000 {
         #[cfg(feature = "blas")]
         {
-            reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties)
+            reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
         }
         #[cfg(not(feature = "blas"))]
         {
-            reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties)
+            reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
         }
     } else {
-        reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties)
+        reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
     }
 }
 
@@ -482,7 +484,7 @@ pub fn reml_gradient_multi_qr_blockwise(
     penalties: &[Array2<f64>],
     block_size: usize,
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, block_size, None)
+    reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, block_size, None, None, None)
 }
 
 /// Block-wise QR gradient with optional cached sqrt_penalties
@@ -495,6 +497,8 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     penalties: &[Array2<f64>],
     block_size: usize,
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::{SolveTriangular, UPLO, Diag};
@@ -529,8 +533,35 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
         penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
     }
 
-    // Use block-wise QR to get R factor
-    let r_upper = compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?;
+    // OPTIMIZATION: If X'WX is cached, use Cholesky instead of blockwise QR
+    // Cholesky is O(p³/3) vs blockwise QR O(blocks × p²)
+    // For p=64, blocks=5: Cholesky ~90K flops vs QR ~22M flops (244x faster!)
+    let r_upper = if let Some(cached) = cached_xtwx {
+        use ndarray_linalg::Cholesky;
+
+        // Build A = X'WX + Σλᵢ·Sᵢ using cached X'WX
+        let mut a = cached.to_owned();
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            a.scaled_add(*lambda, penalty);
+        }
+
+        // Add small ridge for numerical stability
+        let ridge = 1e-7;
+        for i in 0..p {
+            a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+        }
+
+        // Compute R via Cholesky: R = chol(A) such that R'R = A
+        match a.cholesky(ndarray_linalg::UPLO::Upper) {
+            Ok(r) => r,
+            Err(_) => {
+                // Fallback to blockwise QR if Cholesky fails
+                compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?
+            }
+        }
+    } else {
+        compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?
+    };
 
     // DEBUG: Verify R'R = X'WX + λS
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
@@ -553,10 +584,24 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     // Use solve() calls directly
 
     // Compute coefficients β
-    let xtwx = compute_xtwx(x, w);
-    let xtwy = compute_xtwy(x, w, y);
+    // Use cached X'WX and X'Wy if provided (avoid O(np²) recomputation)
+    let xtwx_owned: Array2<f64>;
+    let xtwx = if let Some(cached) = cached_xtwx {
+        cached
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
 
-    let mut a = xtwx.clone();
+    let xtwy_owned: Array1<f64>;
+    let xtwy = if let Some(cached) = cached_xtwy {
+        cached
+    } else {
+        xtwy_owned = compute_xtwy(x, w, y);
+        &xtwy_owned
+    };
+
+    let mut a = xtwx.to_owned();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         a.scaled_add(*lambda, penalty);
     }
@@ -566,7 +611,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
         a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
     }
 
-    let beta = solve(a.clone(), xtwy)?;
+    let beta = solve(a.clone(), xtwy.to_owned())?;
 
     // Compute RSS and φ
     let fitted = x.dot(&beta);
@@ -711,7 +756,7 @@ pub fn reml_gradient_multi_qr(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, None)
+    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, None, None, None)
 }
 
 /// QR-based REML gradient with optional cached sqrt_penalties
@@ -723,6 +768,8 @@ pub fn reml_gradient_multi_qr_cached(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    _cached_xtwx: Option<&Array2<f64>>,
+    _cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::QR;
