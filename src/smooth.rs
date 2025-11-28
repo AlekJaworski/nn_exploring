@@ -2,7 +2,7 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, penalty_sqrt, compute_xtwx};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt, compute_xtwx};
 use crate::linalg::{solve, inverse};
 use crate::chunked_qr::IncrementalQR;
 
@@ -437,7 +437,10 @@ impl SmoothingParameter {
             }
 
             // Update log_lambda
-            if best_step_scale > 0.0 {
+            // Reject steps smaller than 1e-6 as they're effectively zero and waste time
+            const MIN_STEP_SIZE: f64 = 1e-6;
+
+            if best_step_scale > MIN_STEP_SIZE {
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE]   Accepted Newton step, scale={:.4}", best_step_scale);
                 }
@@ -445,6 +448,21 @@ impl SmoothingParameter {
                     log_lambda[i] += step[i] * best_step_scale;
                 }
             } else {
+                // Newton line search found no meaningful improvement (step too small or zero)
+                // If gradient is already small, accept convergence rather than waste time
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE]   Newton step too small (scale={:.3e}), checking gradient", best_step_scale);
+                }
+
+                if grad_norm_linf < 0.1 {
+                    self.lambda = lambdas;
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE] Converged after {} iterations (gradient {:.6} < 0.1, no further progress possible)",
+                                 iter + 1, grad_norm_linf);
+                    }
+                    return Ok(());
+                }
+
                 // Newton failed - try steepest descent as fallback
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!("[PROFILE]   Newton failed, trying steepest descent");
