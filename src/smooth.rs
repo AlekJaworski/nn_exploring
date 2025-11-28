@@ -16,8 +16,8 @@ pub enum OptimizationMethod {
 /// REML optimization algorithm
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum REMLAlgorithm {
-    Newton,         // Newton's method with Hessian (slower, more stable)
-    FellnerSchall,  // Fellner-Schall iteration (faster, simpler)
+    Newton,         // Newton's method with Hessian (RECOMMENDED: fast, stable, matches bam())
+    FellnerSchall,  // Fellner-Schall iteration (DEPRECATED: broken by penalty normalization)
 }
 
 /// Container for smoothing parameters
@@ -34,7 +34,7 @@ impl SmoothingParameter {
         Self {
             lambda: vec![0.1; num_smooths],  // Will be refined in optimize()
             method,
-            reml_algorithm: REMLAlgorithm::FellnerSchall,  // Default to faster method
+            reml_algorithm: REMLAlgorithm::Newton,  // Default to Newton (matches bam())
         }
     }
 
