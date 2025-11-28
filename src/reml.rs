@@ -442,7 +442,7 @@ pub fn reml_gradient_multi_qr_adaptive(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties, None)
+    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties, None, None, None)
 }
 
 /// Adaptive QR gradient with optional cached sqrt_penalties
@@ -453,6 +453,8 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     let n = y.len();
 
@@ -460,14 +462,14 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     if n >= 2000 {
         #[cfg(feature = "blas")]
         {
-            reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties)
+            reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
         }
         #[cfg(not(feature = "blas"))]
         {
-            reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties)
+            reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
         }
     } else {
-        reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties)
+        reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
     }
 }
 
@@ -482,7 +484,7 @@ pub fn reml_gradient_multi_qr_blockwise(
     penalties: &[Array2<f64>],
     block_size: usize,
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, block_size, None)
+    reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, block_size, None, None, None)
 }
 
 /// Block-wise QR gradient with optional cached sqrt_penalties
@@ -495,6 +497,8 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     penalties: &[Array2<f64>],
     block_size: usize,
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::{SolveTriangular, UPLO, Diag};
@@ -553,10 +557,24 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     // Use solve() calls directly
 
     // Compute coefficients β
-    let xtwx = compute_xtwx(x, w);
-    let xtwy = compute_xtwy(x, w, y);
+    // Use cached X'WX and X'Wy if provided (avoid O(np²) recomputation)
+    let xtwx_owned: Array2<f64>;
+    let xtwx = if let Some(cached) = cached_xtwx {
+        cached
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
 
-    let mut a = xtwx.clone();
+    let xtwy_owned: Array1<f64>;
+    let xtwy = if let Some(cached) = cached_xtwy {
+        cached
+    } else {
+        xtwy_owned = compute_xtwy(x, w, y);
+        &xtwy_owned
+    };
+
+    let mut a = xtwx.to_owned();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         a.scaled_add(*lambda, penalty);
     }
@@ -566,7 +584,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
         a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
     }
 
-    let beta = solve(a.clone(), xtwy)?;
+    let beta = solve(a.clone(), xtwy.to_owned())?;
 
     // Compute RSS and φ
     let fitted = x.dot(&beta);
@@ -711,7 +729,7 @@ pub fn reml_gradient_multi_qr(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, None)
+    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, None, None, None)
 }
 
 /// QR-based REML gradient with optional cached sqrt_penalties
@@ -723,6 +741,8 @@ pub fn reml_gradient_multi_qr_cached(
     lambdas: &[f64],
     penalties: &[Array2<f64>],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    _cached_xtwx: Option<&Array2<f64>>,
+    _cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::QR;

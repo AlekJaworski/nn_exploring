@@ -5,6 +5,7 @@ use crate::{Result, GAMError};
 use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt, compute_xtwx};
 use crate::linalg::{solve, inverse};
 use crate::chunked_qr::IncrementalQR;
+use std::time::Instant;
 
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -228,6 +229,33 @@ impl SmoothingParameter {
             eprintln!("[PROFILE] Pre-computed sqrt_penalties: {:.2}ms", sqrt_pen_time.as_secs_f64() * 1000.0);
         }
 
+        // OPTIMIZATION: Pre-compute X'WX and X'Wy (don't change during optimization)
+        // This avoids O(np²) recomputation every iteration
+        use crate::reml::compute_xtwx;
+        let xtwx_start = Instant::now();
+        let xtwx = compute_xtwx(x, w);
+
+        // Compute X'Wy (also constant)
+        let x_weighted = {
+            let mut x_w = x.clone();
+            for i in 0..x.nrows() {
+                for j in 0..x.ncols() {
+                    x_w[[i, j]] *= w[i].sqrt();
+                }
+            }
+            x_w
+        };
+        let mut y_weighted = Array1::zeros(y.len());
+        for i in 0..y.len() {
+            y_weighted[i] = y[i] * w[i].sqrt();
+        }
+        let xtwy = x_weighted.t().dot(&y_weighted);
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            let xtwx_time = xtwx_start.elapsed();
+            eprintln!("[PROFILE] Pre-computed X'WX and X'Wy: {:.2}ms", xtwx_time.as_secs_f64() * 1000.0);
+        }
+
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter()
             .map(|l| l.ln())
@@ -250,9 +278,19 @@ impl SmoothingParameter {
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
-            // OPTIMIZATION: Pass cached sqrt_penalties to avoid recomputing eigendecomposition
-            let gradient = reml_gradient_multi_qr_adaptive_cached(y, x, w, &lambdas, penalties, Some(&sqrt_penalties))?;
+            // OPTIMIZATION: Pass cached sqrt_penalties, X'WX, X'Wy to avoid recomputation
+            let t_grad = Instant::now();
+            let gradient = reml_gradient_multi_qr_adaptive_cached(y, x, w, &lambdas, penalties, Some(&sqrt_penalties), Some(&xtwx), Some(&xtwy))?;
+            let grad_time = t_grad.elapsed().as_micros();
+
+            let t_hess = Instant::now();
             let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+            let hess_time = t_hess.elapsed().as_micros();
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE]     Gradient: {:.2}ms, Hessian: {:.2}ms",
+                         grad_time as f64 / 1000.0, hess_time as f64 / 1000.0);
+            }
 
             // Debug output: show raw Hessian before conditioning
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
@@ -394,6 +432,7 @@ impl SmoothingParameter {
                          step_size_clamped, current_reml);
             }
 
+            let t_linesearch = Instant::now();
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
 
@@ -434,6 +473,11 @@ impl SmoothingParameter {
                         continue;
                     }
                 }
+            }
+            let linesearch_time = t_linesearch.elapsed().as_micros();
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE]     Line search: {:.2}ms", linesearch_time as f64 / 1000.0);
             }
 
             // Update log_lambda
