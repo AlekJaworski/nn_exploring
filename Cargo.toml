@@ -127,6 +127,16 @@ path = "benchmark_rust_performance.rs"
 required-features = ["blas"]
 
 [[bin]]
+name = "benchmark_comprehensive"
+path = "benchmark_comprehensive.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_rust_comprehensive"
+path = "benchmark_rust_comprehensive.rs"
+required-features = ["blas"]
+
+[[bin]]
 name = "debug_multidim"
 path = "debug_multidim.rs"
 required-features = ["blas"]
