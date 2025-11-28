@@ -120,3 +120,8 @@ required-features = ["blas"]
 name = "test_newton_reml"
 path = "test_newton_reml.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_rust_performance"
+path = "benchmark_rust_performance.rs"
+required-features = ["blas"]
