@@ -135,3 +135,8 @@ required-features = ["blas"]
 name = "test_high_d"
 path = "test_high_d.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "test_d8_n5000_rust"
+path = "test_d8_n5000_rust.rs"
+required-features = ["blas"]
