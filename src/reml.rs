@@ -533,8 +533,35 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
         penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
     }
 
-    // Use block-wise QR to get R factor
-    let r_upper = compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?;
+    // OPTIMIZATION: If X'WX is cached, use Cholesky instead of blockwise QR
+    // Cholesky is O(p³/3) vs blockwise QR O(blocks × p²)
+    // For p=64, blocks=5: Cholesky ~90K flops vs QR ~22M flops (244x faster!)
+    let r_upper = if let Some(cached) = cached_xtwx {
+        use ndarray_linalg::Cholesky;
+
+        // Build A = X'WX + Σλᵢ·Sᵢ using cached X'WX
+        let mut a = cached.to_owned();
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            a.scaled_add(*lambda, penalty);
+        }
+
+        // Add small ridge for numerical stability
+        let ridge = 1e-7;
+        for i in 0..p {
+            a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+        }
+
+        // Compute R via Cholesky: R = chol(A) such that R'R = A
+        match a.cholesky(ndarray_linalg::UPLO::Upper) {
+            Ok(r) => r,
+            Err(_) => {
+                // Fallback to blockwise QR if Cholesky fails
+                compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?
+            }
+        }
+    } else {
+        compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?
+    };
 
     // DEBUG: Verify R'R = X'WX + λS
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
