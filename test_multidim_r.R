@@ -1,27 +1,36 @@
-#!/usr/bin/env Rscript
+# Test multi-dimensional convergence in R to compare with Rust
+
 library(mgcv)
 
-set.seed(42)
-n <- 1000
-n_dims <- 3
+set.seed(123)
+n <- 500
+k <- 15
 
-X <- matrix(runif(n * n_dims), nrow=n, ncol=n_dims)
-y <- numeric(n)
+x1 <- runif(n)
+x2 <- runif(n)
+y <- sin(2 * pi * x1) + cos(2 * pi * x2) + rnorm(n, 0, 0.3)
 
-y <- y + sin(2 * pi * X[,1])
-y <- y + 0.5 * cos(3 * pi * X[,2])
-y <- y + 0.3 * (X[,3]^2)
-y <- y + rnorm(n, 0, 0.2)
+cat("=== Testing d=2 convergence in R ===\n\n")
 
-df <- data.frame(y=y, x1=X[,1], x2=X[,2], x3=X[,3])
+# Test with gam
+cat("1. gam(method='REML'):\n")
+m_gam <- gam(y ~ s(x1, k=k, bs='cr') + s(x2, k=k, bs='cr'), method="REML")
+cat("   λ₁:", m_gam$sp[1], "\n")
+cat("   λ₂:", m_gam$sp[2], "\n")
+cat("   Iterations:", m_gam$outer.info$iter, "\n")
+cat("   Gradient norm:", max(abs(m_gam$outer.info$grad)), "\n")
+cat("   REML:", m_gam$gcv.ubre, "\n\n")
 
-cat("Fitting R's mgcv...\n")
-fit <- gam(y ~ s(x1, bs='cr', k=10) + s(x2, bs='cr', k=10) + s(x3, bs='cr', k=10),
-           data=df, method='REML')
+# Test with bam
+cat("2. bam(method='REML'):\n")
+m_bam <- bam(y ~ s(x1, k=k, bs='cr') + s(x2, k=k, bs='cr'), method="REML")
+cat("   λ₁:", m_bam$sp[1], "\n")
+cat("   λ₂:", m_bam$sp[2], "\n")
+cat("   Iterations:", m_bam$outer.info$iter, "\n")
+cat("   REML:", m_bam$gcv.ubre, "\n\n")
 
-cat("\nResults:\n")
-cat(sprintf("Lambdas: %s\n", paste(sprintf("%.6f", fit$sp), collapse=", ")))
-cat(sprintf("EDF: %.2f\n", sum(fit$edf)))
-cat(sprintf("REML: %.6f\n", fit$gcv.ubre))
-cat(sprintf("Iterations: %d\n", fit$outer.info$iter))
-cat(sprintf("Converged: %s\n", fit$outer.info$conv))
+cat("3. Rust result for comparison:\n")
+cat("   λ₁: 35.071968\n")
+cat("   λ₂: 42.481781\n")
+cat("   Gradient L∞: 0.068\n")
+cat("   REML: 112.061347\n")

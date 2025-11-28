@@ -125,3 +125,13 @@ required-features = ["blas"]
 name = "benchmark_rust_performance"
 path = "benchmark_rust_performance.rs"
 required-features = ["blas"]
+
+[[bin]]
+name = "debug_multidim"
+path = "debug_multidim.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "test_high_d"
+path = "test_high_d.rs"
+required-features = ["blas"]

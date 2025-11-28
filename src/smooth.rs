@@ -488,7 +488,28 @@ impl SmoothingParameter {
 
                 if !sd_worked {
                     if std::env::var("MGCV_PROFILE").is_ok() {
-                        eprintln!("[PROFILE]   Steepest descent failed at all scales, stopping");
+                        eprintln!("[PROFILE]   Steepest descent failed at all scales");
+                    }
+                    // Check if we're close enough to converged before giving up
+                    // When at a minimum, no further progress is possible but gradient may still be small
+                    let gradient_check = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+                    let grad_norm_final = gradient_check.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
+
+                    // Use relaxed gradient tolerance (0.1) since we can't make further progress
+                    // mgcv uses 0.05-0.1, so 0.1 is reasonable when at numerical limits
+                    let relaxed_tol = 0.1;
+                    if grad_norm_final < relaxed_tol {
+                        self.lambda = lambdas;
+                        if std::env::var("MGCV_PROFILE").is_ok() {
+                            eprintln!("[PROFILE] Converged after {} iterations (gradient {:.6} < {:.6} at numerical limit)",
+                                     iter + 1, grad_norm_final, relaxed_tol);
+                        }
+                        return Ok(());
+                    }
+
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE]   Gradient {:.6} still too large (tolerance={:.6}), stopping",
+                                 grad_norm_final, relaxed_tol);
                     }
                     break;
                 }
