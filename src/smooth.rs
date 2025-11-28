@@ -379,15 +379,14 @@ impl SmoothingParameter {
                 return Ok(());
             }
 
-            // REML change convergence: DISABLED for now to test gradient convergence
-            // The Hessian may be approximate, causing tiny REML steps even with large gradient
-            // Better to rely on gradient criterion
-            let relative_reml_change = reml_change / current_reml.abs().max(1.0);
-            if false && iter > 5 && relative_reml_change < 1e-6 {
+            // REML change convergence: Stop if making negligible progress
+            // After a few iterations, if REML barely changes, we're done
+            // Use relative change to be scale-invariant
+            if iter >= 2 && reml_change < 1e-5 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] Converged after {} iterations (REML relative change: {:.2e} < 1e-6)",
-                             iter + 1, relative_reml_change);
+                    eprintln!("[PROFILE] Converged after {} iterations (REML change: {:.2e} < 1e-5)",
+                             iter + 1, reml_change);
                 }
                 return Ok(());
             }
