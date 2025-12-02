@@ -13,14 +13,22 @@ approx = "0.5"
 thiserror = "2.0"
 pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 numpy = { version = "0.22", optional = true }
-ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-system"] }
 rand = { version = "0.8", optional = true }
 rand_chacha = { version = "0.3", optional = true }
+
+[target.'cfg(not(feature = "static-blas"))'.dependencies]
+# Development: use system OpenBLAS (fast builds, requires libopenblas-dev)
+ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-system"] }
+
+[target.'cfg(feature = "static-blas")'.dependencies]
+# Release: use static OpenBLAS (no system deps, but slower builds)
+ndarray-linalg = { version = "0.17", optional = true, features = ["openblas-static"] }
 
 [features]
 default = []
 python = ["pyo3", "numpy"]
-blas = ["ndarray-linalg", "rand", "rand_chacha"]  # Enable optimized BLAS/LAPACK backend
+blas = ["ndarray-linalg", "rand", "rand_chacha"]
+static-blas = []  # Use static OpenBLAS linking for PyPI releases
 
 [dev-dependencies]
 approx = "0.5"

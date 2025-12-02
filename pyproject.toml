@@ -37,5 +37,7 @@ Repository = "https://github.com/YourUsername/nn_exploring"
 Issues = "https://github.com/YourUsername/nn_exploring/issues"
 
 [tool.maturin]
-features = ["python", "blas"]
+# For PyPI releases: use static-blas feature (bundles OpenBLAS, no system deps)
+# For development: use `maturin develop` which uses system OpenBLAS (faster)
+features = ["python", "blas", "static-blas"]
 module-name = "mgcv_rust"
