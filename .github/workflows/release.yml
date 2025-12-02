@@ -68,6 +68,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install OpenBLAS
+        run: brew install openblas
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
