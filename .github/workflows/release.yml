@@ -29,7 +29,12 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: 'true'
           manylinux: auto
-          before-script-linux: yum install -y openssl-devel perl-IPC-Cmd
+          before-script-linux: |
+            if command -v yum &> /dev/null; then
+              yum install -y openssl-devel perl-IPC-Cmd
+            else
+              apt-get update && apt-get install -y libssl-dev perl
+            fi
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
