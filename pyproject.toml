@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Your Name", email = "your.email@example.com" }
+    { name = "Aleksander Jaworski", email = "ale.jaworski@gmail.com" }
 ]
 keywords = ["statistics", "machine-learning", "gam", "regression", "splines"]
 classifiers = [
@@ -32,9 +32,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YourUsername/nn_exploring"
-Repository = "https://github.com/YourUsername/nn_exploring"
-Issues = "https://github.com/YourUsername/nn_exploring/issues"
+Homepage = "https://github.com/AlekJaworski/nn_exploring"
+Repository = "https://github.com/AlekJaworski/nn_exploring"
+Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 
 [tool.maturin]
 # For PyPI releases: use static-blas feature (bundles OpenBLAS, no system deps)
