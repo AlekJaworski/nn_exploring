@@ -8,13 +8,33 @@ version = "0.1.0"
 description = "Rust implementation of Generalized Additive Models with Python bindings"
 readme = "README.md"
 requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+keywords = ["statistics", "machine-learning", "gam", "regression", "splines"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering",
 ]
 dependencies = [
     "numpy>=1.20.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/YourUsername/nn_exploring"
+Repository = "https://github.com/YourUsername/nn_exploring"
+Issues = "https://github.com/YourUsername/nn_exploring/issues"
 
 [tool.maturin]
 features = ["python", "blas"]
