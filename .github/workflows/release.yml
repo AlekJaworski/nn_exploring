@@ -23,14 +23,14 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas
+          args: --release --out dist --find-interpreter --features python,blas,static-blas
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openblas-devel openssl-devel
+              yum install -y gfortran openssl-devel
             else
-              apt-get update && apt-get install -y libopenblas-dev libssl-dev pkg-config
+              apt-get update && apt-get install -y gfortran libssl-dev pkg-config
             fi
 
       - name: Upload wheels
