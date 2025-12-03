@@ -31,9 +31,9 @@ jobs:
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openssl-devel perl-IPC-Cmd pkgconfig
+              yum install -y openssl-devel perl-IPC-Cmd pkgconfig gcc-gfortran make
             else
-              apt-get update && apt-get install -y libssl-dev perl pkg-config
+              apt-get update && apt-get install -y libssl-dev perl pkg-config gfortran make
             fi
 
       - name: Upload wheels
