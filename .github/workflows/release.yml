@@ -26,7 +26,7 @@ jobs:
           OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas,static-blas
+          args: --release --out dist --find-interpreter --features python,blas
           sccache: 'true'
           manylinux: auto
           before-script-linux: |

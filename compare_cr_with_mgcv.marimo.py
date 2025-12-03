@@ -109,9 +109,9 @@ def _(k_basis, mgcv_rust, mo, np, ro, x, y):
 
     | Implementation | Basis | λ (smoothing) | Deviance |
     |----------------|-------|---------------|----------|
-    | mgcv_rust      | CR (cubic regression) | {lambda_rust:.6f} | {result_rust['deviance']:.4f} |
-    | R mgcv         | CR (cubic regression) | {lambda_r:.6f} | - |
-    | Ratio (Rust/R) | - | {lambda_rust/lambda_r:.4f} | - |
+    | mgcv_rust      | CR (cubic regression) | {lambda_rust} | {result_rust['deviance']} |
+    | R mgcv         | CR (cubic regression) | {lambda_r} | - |
+    | Ratio (Rust/R) | - | {lambda_rust/lambda_r} | - |
     """)
     return X, gam_rust, lambda_r, lambda_rust, pred_r, pred_rust, result_rust
 
