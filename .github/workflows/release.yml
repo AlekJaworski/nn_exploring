@@ -21,19 +21,16 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          OPENSSL_STATIC: "1"
-          OPENSSL_LIB_DIR: "/usr/lib64"
-          OPENSSL_INCLUDE_DIR: "/usr/include"
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features python,blas
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openssl-devel perl-IPC-Cmd pkgconfig gcc-gfortran make
+              yum install -y openblas-devel
             else
-              apt-get update && apt-get install -y libssl-dev perl pkg-config gfortran make
+              apt-get update && apt-get install -y libopenblas-dev
             fi
 
       - name: Upload wheels
@@ -50,21 +47,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up vcpkg
+      - name: Install OpenBLAS via vcpkg
         run: |
-          echo "VCPKG_ROOT=C:/vcpkg" >> $GITHUB_ENV
-          C:/vcpkg/vcpkg integrate install
-          C:/vcpkg/vcpkg install openblas:x64-windows-static-md
-        shell: bash
+          $env:VCPKG_ROOT = "C:\vcpkg"
+          C:\vcpkg\vcpkg integrate install
+          C:\vcpkg\vcpkg install openblas:x64-windows
+        shell: pwsh
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          VCPKG_ROOT: C:/vcpkg
+          VCPKG_ROOT: C:\vcpkg
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features python,blas
           sccache: 'true'
 
       - name: Upload wheels
@@ -90,7 +87,7 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features python,blas
           sccache: 'true'
 
       - name: Upload wheels
