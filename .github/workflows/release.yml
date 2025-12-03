@@ -50,15 +50,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OpenBLAS via vcpkg
+      - name: Set up vcpkg
         run: |
-          vcpkg install openblas:x64-windows-static-md
+          echo "VCPKG_ROOT=C:/vcpkg" >> $GITHUB_ENV
+          C:/vcpkg/vcpkg integrate install
+          C:/vcpkg/vcpkg install openblas:x64-windows-static-md
         shell: bash
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          VCPKG_ROOT: C:/vcpkg
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter
