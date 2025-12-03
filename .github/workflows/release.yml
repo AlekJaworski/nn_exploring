@@ -28,9 +28,9 @@ jobs:
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openblas-devel
+              yum install -y openblas-devel openssl-devel
             else
-              apt-get update && apt-get install -y libopenblas-dev
+              apt-get update && apt-get install -y libopenblas-dev libssl-dev pkg-config
             fi
 
       - name: Upload wheels
