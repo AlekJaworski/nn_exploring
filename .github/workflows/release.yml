@@ -31,9 +31,9 @@ jobs:
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openssl-devel perl-IPC-Cmd
+              yum install -y openssl-devel perl-IPC-Cmd pkgconfig
             else
-              apt-get update && apt-get install -y libssl-dev perl
+              apt-get update && apt-get install -y libssl-dev perl pkg-config
             fi
 
       - name: Upload wheels
