@@ -26,11 +26,9 @@ default-features = false
 default = []
 python = ["pyo3", "numpy"]
 # BLAS features:
-# - Use 'blas,static-blas' for static OpenBLAS (PyPI releases, no system deps)
 # - Use 'blas,blas-system' for system OpenBLAS (development, requires libopenblas-dev)
 blas = ["ndarray-linalg", "rand", "rand_chacha"]
 blas-system = ["ndarray-linalg/openblas-system"]  # Use system OpenBLAS
-static-blas = ["ndarray-linalg/openblas-static"]   # Use static OpenBLAS (for releases)
 
 [dev-dependencies]
 approx = "0.5"
