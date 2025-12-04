@@ -4,12 +4,9 @@ This guide explains how to publish `mgcv-rust` to PyPI for cross-platform distri
 
 ## Architecture Strategy
 
-We use a **dual-configuration approach** for OpenBLAS:
+We use system OpenBLAS for all builds:
 
-- **Development**: Uses `openblas-system` (requires system OpenBLAS, fast builds)
-- **PyPI Releases**: Uses `openblas-static` (bundles OpenBLAS, no system deps needed by users)
-
-This is controlled by the `static-blas` Cargo feature.
+- Uses `openblas-system` (requires system OpenBLAS to be installed)
 
 ## Supported Platforms
 
@@ -19,7 +16,6 @@ The GitHub Actions workflow builds wheels for:
 |----------|---------------|
 | Linux    | x86_64, aarch64 (ARM64) |
 | macOS    | x86_64 (Intel), aarch64 (Apple Silicon) |
-| Windows  | x64 |
 
 ## Manual Publishing
 
@@ -37,12 +33,12 @@ Edit `pyproject.toml` and `Cargo.toml` to bump the version number.
 
 For your current platform:
 ```bash
-maturin build --release --features static-blas
+maturin build --release --features python,blas
 ```
 
 For multiple Python versions:
 ```bash
-maturin build --release --features static-blas --interpreter python3.8 python3.9 python3.10 python3.11 python3.12
+maturin build --release --features python,blas --interpreter python3.8 python3.9 python3.10 python3.11 python3.12
 ```
 
 Wheels will be in `target/wheels/`.
@@ -109,30 +105,28 @@ You'll be prompted for your PyPI credentials or API token.
 
 ## Development Builds
 
-For fast iteration during development, use system OpenBLAS:
+For fast iteration during development:
 
 ```bash
 # Install system OpenBLAS first
 # Ubuntu/Debian: sudo apt-get install libopenblas-dev
 # macOS: brew install openblas
 
-# Build without static-blas feature
+# Build with maturin
 maturin develop --features python,blas
 
 # Or with cargo
 cargo build --release --features python,blas
 ```
 
-This is much faster because it doesn't compile OpenBLAS from source.
-
 ## Troubleshooting
 
 ### Build Fails with OpenBLAS Errors
 
-If `openblas-static` build fails:
-1. Check you have build tools: `gcc`, `gfortran`, `make`
-2. Try increasing timeout in GitHub Actions
-3. Check the OpenBLAS compilation logs
+If build fails due to OpenBLAS:
+1. Ensure system OpenBLAS is installed (`libopenblas-dev` on Ubuntu, `brew install openblas` on macOS)
+2. Check you have build tools: `gcc`, `gfortran`, `make`
+3. Check the OpenBLAS linking logs
 
 ### Missing Wheels for a Platform
 
@@ -141,12 +135,6 @@ The GitHub Actions workflow might fail for specific platforms. Check:
 2. Whether that platform has the required build tools
 3. Update the workflow if platform-specific config is needed
 
-### Wheel Size Too Large
-
-Static OpenBLAS adds ~10-20 MB per wheel. If this is problematic:
-1. Consider using Intel MKL instead (`intel-mkl-static` feature)
-2. Or require users to install system OpenBLAS (document this clearly)
-
 ## Alternative: Manual Cross-Platform Builds
 
 If you can't use GitHub Actions:
@@ -154,7 +142,7 @@ If you can't use GitHub Actions:
 ### Linux (Docker)
 
 ```bash
-docker run --rm -v $(pwd):/io ghcr.io/pyo3/maturin build --release --features static-blas
+docker run --rm -v $(pwd):/io ghcr.io/pyo3/maturin build --release --features python,blas
 ```
 
 ### macOS Cross-Compile
@@ -162,12 +150,8 @@ docker run --rm -v $(pwd):/io ghcr.io/pyo3/maturin build --release --features st
 ```bash
 # For Apple Silicon from Intel Mac
 rustup target add aarch64-apple-darwin
-maturin build --release --features static-blas --target aarch64-apple-darwin
+maturin build --release --features python,blas --target aarch64-apple-darwin
 ```
-
-### Windows
-
-Use the native tools or cross-compile from Linux using `mingw-w64`.
 
 ## Wheel Naming Convention
 
