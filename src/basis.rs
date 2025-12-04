@@ -4,8 +4,8 @@ use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
 
 /// Trait for basis function implementations
-/// Note: Send is required for PyO3 thread safety with pyclass
-pub trait BasisFunction: Send {
+/// Note: Send + Sync is required for PyO3 thread safety with pyclass (PyO3 0.27+)
+pub trait BasisFunction: Send + Sync {
     /// Evaluate the basis functions at given points
     fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>>;
 

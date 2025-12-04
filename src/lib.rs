@@ -59,6 +59,9 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
 #[cfg(feature = "python")]
+use pyo3::types::PyAny;
+
+#[cfg(feature = "python")]
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyArrayMethods};
 
 /// Parse formula string like "s(0, k=10) + s(1, k=15)"
@@ -168,7 +171,7 @@ impl PyGAM {
         y: PyReadonlyArray1<f64>,
         method: &str,
         max_iter: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let x_array = x.as_array().to_owned();
         let y_array = y.as_array().to_owned();
 
@@ -183,12 +186,12 @@ impl PyGAM {
         self.inner.fit(&x_array, &y_array, opt_method, max_outer, 100, 1e-6)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
-        let result = pyo3::types::PyDict::new_bound(py);
+        let result = pyo3::types::PyDict::new(py);
 
         if let Some(ref params) = self.inner.smoothing_params {
             // Return lambda as array (for multi-variable GAMs)
             // For single variable, this will be a 1-element array
-            let lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            let lambdas = PyArray1::from_vec(py, params.lambda.clone());
             result.set_item("lambda", lambdas)?;
         }
 
@@ -198,7 +201,7 @@ impl PyGAM {
 
         // Return fitted values if available
         if let Some(ref fitted_values) = self.inner.fitted_values {
-            let fitted_array = PyArray1::from_vec_bound(py, fitted_values.to_vec());
+            let fitted_array = PyArray1::from_vec(py, fitted_values.to_vec());
             result.set_item("fitted_values", fitted_array)?;
         }
 
@@ -229,7 +232,7 @@ impl PyGAM {
         method: &str,
         bs: Option<&str>,
         max_iter: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let x_array = x.as_array().to_owned();
         let (n, d) = x_array.dim();
 
@@ -297,7 +300,7 @@ impl PyGAM {
         method: &str,
         bs: Option<&str>,
         max_iter: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use crate::gam_optimized::*;
 
         let x_array = x.as_array().to_owned();
@@ -364,11 +367,11 @@ impl PyGAM {
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
         // Return results
-        let result = pyo3::types::PyDict::new_bound(py);
+        let result = pyo3::types::PyDict::new(py);
 
         if let Some(ref params) = self.inner.smoothing_params {
             // Return all lambdas as array (consistent with fit_auto)
-            let all_lambdas = PyArray1::from_vec_bound(py, params.lambda.clone());
+            let all_lambdas = PyArray1::from_vec(py, params.lambda.clone());
             result.set_item("lambda", all_lambdas.clone())?;
             result.set_item("all_lambdas", all_lambdas)?;
         }
@@ -378,7 +381,7 @@ impl PyGAM {
         }
 
         if let Some(ref fitted_values) = self.inner.fitted_values {
-            let fitted_array = PyArray1::from_vec_bound(py, fitted_values.to_vec());
+            let fitted_array = PyArray1::from_vec(py, fitted_values.to_vec());
             result.set_item("fitted_values", fitted_array)?;
         }
 
@@ -407,7 +410,7 @@ impl PyGAM {
         formula: &str,
         method: &str,
         max_iter: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let x_array = x.as_array().to_owned();
 
         // Parse formula
@@ -444,7 +447,7 @@ impl PyGAM {
         let predictions = self.inner.predict(&x_array)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
-        Ok(PyArray1::from_vec_bound(py, predictions.to_vec()))
+        Ok(PyArray1::from_vec(py, predictions.to_vec()))
     }
 
     fn get_lambda(&self) -> PyResult<f64> {
@@ -461,7 +464,7 @@ impl PyGAM {
             .map(|p| p.lambda.clone())
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
-        Ok(PyArray1::from_vec_bound(py, lambdas))
+        Ok(PyArray1::from_vec(py, lambdas))
     }
 
     fn get_fitted_values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
@@ -469,7 +472,7 @@ impl PyGAM {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
-        Ok(PyArray1::from_vec_bound(py, fitted.to_vec()))
+        Ok(PyArray1::from_vec(py, fitted.to_vec()))
     }
 
     /// Get the family (distribution) used by this GAM
@@ -488,7 +491,7 @@ impl PyGAM {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
-        Ok(PyArray1::from_vec_bound(py, coefficients.to_vec()))
+        Ok(PyArray1::from_vec(py, coefficients.to_vec()))
     }
 
     /// Get the design matrix (predictor matrix)
@@ -499,7 +502,7 @@ impl PyGAM {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
-        Ok(PyArray2::from_owned_array_bound(py, design_matrix.clone()))
+        Ok(PyArray2::from_owned_array(py, design_matrix.clone()))
     }
 }
 
@@ -521,7 +524,7 @@ fn compute_penalty_matrix<'py>(
     let penalty = penalty::compute_penalty(basis_type, num_basis, Some(&knots_array), 1)
         .map_err(|e| PyValueError::new_err(format!("Failed to compute penalty: {}", e)))?;
 
-    Ok(PyArray2::from_owned_array_bound(py, penalty))
+    Ok(PyArray2::from_owned_array(py, penalty))
 }
 
 /// Evaluate REML gradient at fixed lambda (for testing/comparison)
@@ -590,7 +593,7 @@ fn evaluate_gradient<'py>(
     let gradient = reml::reml_gradient_multi_qr(&y_array, &x_full, &w, &lambdas, &penalties_vec)
         .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
-    Ok(PyArray1::from_owned_array_bound(py, gradient))
+    Ok(PyArray1::from_owned_array(py, gradient))
 }
 
 #[cfg(feature = "python")]
@@ -616,7 +619,7 @@ fn reml_gradient_multi_qr_py<'py>(
     let gradient = reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
         .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
-    Ok(PyArray1::from_owned_array_bound(py, gradient))
+    Ok(PyArray1::from_owned_array(py, gradient))
 }
 
 #[cfg(feature = "python")]
@@ -642,7 +645,7 @@ fn reml_hessian_multi_qr_py<'py>(
     let hessian = reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
         .map_err(|e| PyValueError::new_err(format!("Hessian computation failed: {}", e)))?;
 
-    Ok(PyArray2::from_owned_array_bound(py, hessian))
+    Ok(PyArray2::from_owned_array(py, hessian))
 }
 
 #[cfg(feature = "python")]
@@ -685,8 +688,8 @@ fn newton_pirls_py<'py>(
         .map_err(|e| PyValueError::new_err(format!("Newton-PIRLS optimization failed: {}", e)))?;
 
     Ok((
-        PyArray1::from_owned_array_bound(py, result.log_lambda),
-        PyArray1::from_owned_array_bound(py, result.lambda),
+        PyArray1::from_owned_array(py, result.log_lambda),
+        PyArray1::from_owned_array(py, result.lambda),
         result.reml_value,
         result.iterations,
         result.converged,
