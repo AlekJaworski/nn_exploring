@@ -50,10 +50,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install OpenBLAS via vcpkg (static)
+        run: |
+          vcpkg install openblas --triplet x64-windows-static
+          vcpkg integrate install
+        shell: pwsh
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          VCPKGRS_DYNAMIC: "0"
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features python,blas,static-blas
