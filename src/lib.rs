@@ -13,6 +13,7 @@ pub mod gam;
 pub mod gam_optimized;
 pub mod utils;
 pub mod linalg;
+#[cfg(feature = "blas")]
 pub mod newton_optimizer;
 pub mod blockwise_qr;
 pub mod chunked_qr;
@@ -649,6 +650,7 @@ fn reml_hessian_multi_qr_py<'py>(
 }
 
 #[cfg(feature = "python")]
+#[cfg(feature = "blas")]
 #[pyfunction]
 fn newton_pirls_py<'py>(
     py: Python<'py>,

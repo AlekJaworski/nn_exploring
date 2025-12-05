@@ -9,7 +9,7 @@ use ndarray_linalg::{Solve, Determinant, Inverse};
 /// Solve linear system Ax = b
 /// Uses BLAS/LAPACK when available for large matrices (n >= 1000)
 /// Falls back to Gaussian elimination for small matrices (BLAS overhead dominates for n < 1000)
-pub fn solve(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>> {
+pub fn solve(a: Array2<f64>, b: Array1<f64>) -> Result<Array1<f64>> {
     #[cfg(feature = "blas")]
     {
         let n = a.nrows();

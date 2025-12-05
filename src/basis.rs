@@ -1,7 +1,7 @@
 //! Basis functions for smoothing splines
 
 use ndarray::{Array1, Array2};
-use crate::{Result, GAMError};
+use crate::Result;
 
 /// Trait for basis function implementations
 /// Note: Send + Sync is required for PyO3 thread safety with pyclass (PyO3 0.27+)
@@ -529,7 +529,6 @@ impl BasisFunction for ThinPlateSpline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_abs_diff_eq;
 
     #[test]
     fn test_cubic_spline_creation() {

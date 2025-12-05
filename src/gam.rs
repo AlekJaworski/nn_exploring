@@ -5,9 +5,8 @@ use crate::{
     Result, GAMError,
     basis::{BasisFunction, CubicSpline, CubicRegressionSpline, BoundaryCondition},
     penalty::compute_penalty,
-    pirls::{fit_pirls, Family, PiRLSResult},
+    pirls::{fit_pirls, Family},
     smooth::{SmoothingParameter, OptimizationMethod},
-    linalg::{sum_to_zero_constraint_matrix, apply_constraint_to_penalty},
 };
 
 /// A smooth term in a GAM
@@ -302,7 +301,7 @@ impl GAM {
         // Outer loop: optimize smoothing parameters
         let mut weights = Array1::ones(n);
 
-        for outer_iter in 0..max_outer_iter {
+        for _outer_iter in 0..max_outer_iter {
             // Inner loop: PiRLS with current smoothing parameters
             let pirls_result = fit_pirls(
                 y,
@@ -314,7 +313,7 @@ impl GAM {
                 tolerance,
             )?;
 
-            weights = pirls_result.weights.clone();
+            weights = pirls_result.weights;
 
             // Update smoothing parameters using REML/GCV
             let old_lambda = smoothing_params.lambda.clone();
@@ -331,7 +330,7 @@ impl GAM {
             // Check convergence of smoothing parameters
             let max_lambda_change = old_lambda.iter()
                 .zip(smoothing_params.lambda.iter())
-                .map(|(old, new)| ((old.ln() - new.ln()).abs()))
+                .map(|(old, new)| (old.ln() - new.ln()).abs())
                 .fold(0.0f64, f64::max);
 
             if max_lambda_change < tolerance {
@@ -346,15 +345,15 @@ impl GAM {
                     tolerance,
                 )?;
 
-                self.coefficients = Some(final_result.coefficients.clone());
-                self.fitted_values = Some(final_result.fitted_values.clone());
-                self.linear_predictor = Some(final_result.linear_predictor.clone());
-                self.weights = Some(final_result.weights.clone());
+                self.coefficients = Some(final_result.coefficients);
+                self.fitted_values = Some(final_result.fitted_values);
+                self.linear_predictor = Some(final_result.linear_predictor);
+                self.weights = Some(final_result.weights);
                 self.design_matrix = Some(full_design.clone());
 
                 // Recompute deviance from fitted values to ensure consistency
                 // Note: fit_pirls may return incorrect deviance due to penalty scaling
-                let fitted = &final_result.fitted_values;
+                let fitted = self.fitted_values.as_ref().unwrap();
                 let mut correct_deviance = 0.0;
                 for i in 0..y.len() {
                     correct_deviance += (y[i] - fitted[i]).powi(2);
@@ -379,14 +378,14 @@ impl GAM {
             tolerance,
         )?;
 
-        self.coefficients = Some(final_result.coefficients.clone());
-        self.fitted_values = Some(final_result.fitted_values.clone());
-        self.linear_predictor = Some(final_result.linear_predictor.clone());
-        self.weights = Some(final_result.weights.clone());
+        self.coefficients = Some(final_result.coefficients);
+        self.fitted_values = Some(final_result.fitted_values);
+        self.linear_predictor = Some(final_result.linear_predictor);
+        self.weights = Some(final_result.weights);
         self.design_matrix = Some(full_design.clone());
 
         // Recompute deviance from fitted values to ensure consistency
-        let fitted = &final_result.fitted_values;
+        let fitted = self.fitted_values.as_ref().unwrap();
         let mut correct_deviance = 0.0;
         for i in 0..y.len() {
             correct_deviance += (y[i] - fitted[i]).powi(2);
@@ -470,14 +469,14 @@ impl GAM {
         y: &Array1<f64>,
         design_matrix: &Array2<f64>,
     ) {
-        self.coefficients = Some(pirls_result.coefficients.clone());
-        self.fitted_values = Some(pirls_result.fitted_values.clone());
-        self.linear_predictor = Some(pirls_result.linear_predictor.clone());
-        self.weights = Some(pirls_result.weights.clone());
+        self.coefficients = Some(pirls_result.coefficients);
+        self.fitted_values = Some(pirls_result.fitted_values);
+        self.linear_predictor = Some(pirls_result.linear_predictor);
+        self.weights = Some(pirls_result.weights);
         self.design_matrix = Some(design_matrix.clone());
 
         // Recompute deviance for consistency
-        let fitted = &pirls_result.fitted_values;
+        let fitted = self.fitted_values.as_ref().unwrap();
         let mut correct_deviance = 0.0;
         for i in 0..y.len() {
             correct_deviance += (y[i] - fitted[i]).powi(2);
@@ -527,7 +526,7 @@ mod tests {
             })
             .collect();
 
-        let x_matrix = x_data.clone().into_shape((n, 1)).unwrap();
+        let x_matrix = x_data.clone().to_shape((n, 1)).unwrap().to_owned();
 
         let mut gam = GAM::new(Family::Gaussian);
         let smooth = SmoothTerm::cubic_spline(

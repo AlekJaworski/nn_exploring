@@ -1,7 +1,6 @@
 //! Utility functions for GAM fitting
 
 use ndarray::{Array1, Array2};
-use crate::Result;
 
 /// Check if a matrix is positive definite
 pub fn is_positive_definite(matrix: &Array2<f64>, tolerance: f64) -> bool {
@@ -86,7 +85,7 @@ mod tests {
     #[test]
     fn test_standardize() {
         let x = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let (standardized, mean, std) = standardize(&x);
+        let (standardized, mean, _std) = standardize(&x);
 
         assert_abs_diff_eq!(mean, 3.0, epsilon = 1e-10);
         assert_abs_diff_eq!(standardized.sum(), 0.0, epsilon = 1e-10);
