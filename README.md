@@ -142,9 +142,27 @@ See `examples/simple_gam.rs` for a complete working example:
 cargo run --example simple_gam --release
 ```
 
+## Project Structure
+
+```
+├── src/                    # Core Rust library code
+├── examples/               # Rust usage examples
+├── benches/               # Rust benchmarks
+├── tests/                 # Rust tests
+├── scripts/               # Testing and benchmarking scripts
+│   ├── python/            # Python scripts
+│   │   ├── tests/         # Python test scripts
+│   │   └── benchmarks/    # Python benchmark scripts
+│   └── r/                 # R scripts
+│       ├── tests/         # R test scripts
+│       └── benchmarks/    # R benchmark scripts
+├── docs/                  # Documentation and analysis
+└── test_data/            # Test data and results
+```
+
 ## Testing
 
-Run the test suite:
+Run the Rust test suite:
 
 ```bash
 cargo test
@@ -157,6 +175,8 @@ All 20 tests should pass, covering:
 - REML/GCV criteria
 - PiRLS convergence
 - Full GAM fitting pipeline
+
+Additional tests and benchmarks are available in the `scripts/` directory.
 
 ## Implementation Notes
 
