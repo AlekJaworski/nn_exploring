@@ -15,6 +15,8 @@ pub mod utils;
 pub mod linalg;
 #[cfg(feature = "blas")]
 pub mod newton_optimizer;
+#[cfg(feature = "blas")]
+pub mod reml_optimized;
 pub mod blockwise_qr;
 pub mod chunked_qr;
 

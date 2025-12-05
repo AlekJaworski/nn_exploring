@@ -51,14 +51,14 @@ def benchmark_rust_1d(x, y, k=10, method='REML', n_runs=5):
         gam = mgcv_rust.GAM()
 
         start = time.perf_counter()
-        result = gam.fit_auto(X, y, k=[k], method=method, bs='cr')
+        result = gam.fit_auto(X, y, k=[k], method=method, bs='cr', max_iter=10)
         end = time.perf_counter()
 
         times.append(end - start)
 
     # Get final fit for results
     gam = mgcv_rust.GAM()
-    result = gam.fit_auto(X, y, k=[k], method=method, bs='cr')
+    result = gam.fit_auto(X, y, k=[k], method=method, bs='cr', max_iter=10)
 
     return {
         'mean_time': np.mean(times),
@@ -77,14 +77,14 @@ def benchmark_rust_multidim(X, y, k_values, method='REML', n_runs=3):
         gam = mgcv_rust.GAM()
 
         start = time.perf_counter()
-        result = gam.fit_auto(X, y, k=k_values, method=method, bs='cr')
+        result = gam.fit_auto(X, y, k=k_values, method=method, bs='cr', max_iter=10)
         end = time.perf_counter()
 
         times.append(end - start)
 
     # Get final fit for results
     gam = mgcv_rust.GAM()
-    result = gam.fit_auto(X, y, k=k_values, method=method, bs='cr')
+    result = gam.fit_auto(X, y, k=k_values, method=method, bs='cr', max_iter=10)
 
     return {
         'mean_time': np.mean(times),

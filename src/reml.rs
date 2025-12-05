@@ -6,16 +6,17 @@ use crate::linalg::{solve, determinant, inverse};
 use crate::GAMError;
 
 /// Helper: Create weighted design matrix X_w[i,j] = sqrt(w[i]) * X[i,j]
-/// Optimized with column-wise operations for better cache locality
+/// Optimized with row-wise operations for better memory access patterns
 #[inline]
 fn create_weighted_x(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
     let (n, p) = x.dim();
     let mut x_weighted = x.to_owned();
 
-    // Column-wise weighting: better cache locality than row-wise
-    for j in 0..p {
-        for i in 0..n {
-            x_weighted[[i, j]] *= w[i].sqrt();
+    // Row-wise weighting: process each row at once for better cache locality
+    for i in 0..n {
+        let sqrt_wi = w[i].sqrt();
+        for j in 0..p {
+            x_weighted[[i, j]] *= sqrt_wi;
         }
     }
 
@@ -28,7 +29,7 @@ pub fn compute_xtwx(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
     let x_weighted = create_weighted_x(x, w);
 
     // Use BLAS matrix multiplication: X'WX = X_w' * X_w
-    // This will automatically use optimized BLAS GEMM or SYRK
+    // This will automatically use optimized BLAS SYRK or GEMM
     x_weighted.t().dot(&x_weighted)
 }
 
