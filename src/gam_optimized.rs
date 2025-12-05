@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::{
     Result, GAMError,
     gam::{GAM, SmoothTerm},
-    pirls::{fit_pirls, Family},
+    pirls::fit_pirls,
     smooth::{SmoothingParameter, OptimizationMethod},
 };
 
@@ -243,7 +243,7 @@ impl GAM {
             // Check convergence with adaptive tolerance
             let max_lambda_change = old_lambda.iter()
                 .zip(smoothing_params.lambda.iter())
-                .map(|(old, new)| ((old.ln() - new.ln()).abs()))
+                .map(|(old, new)| (old.ln() - new.ln()).abs())
                 .fold(0.0f64, f64::max);
 
             // Adaptive convergence: also check if objective is changing

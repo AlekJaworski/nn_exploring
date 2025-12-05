@@ -1,6 +1,6 @@
 //! REML (Restricted Maximum Likelihood) criterion for smoothing parameter selection
 
-use ndarray::{Array1, Array2, Axis, s};
+use ndarray::{Array1, Array2, s};
 use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
 use crate::GAMError;
@@ -364,6 +364,7 @@ pub fn reml_criterion_multi(
 ///
 /// For a symmetric positive semi-definite matrix S, computes L such that S = L'L
 /// Uses eigenvalue decomposition: S = Q Λ Q', so L = Q Λ^{1/2} Q' (taking transpose)
+#[cfg(feature = "blas")]
 pub fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
     use ndarray_linalg::Eigh;
 
@@ -435,6 +436,7 @@ pub fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
 /// the full augmented matrix. Complexity is O(blocks × p²) instead of O(np²).
 ///
 /// For n < 2000, falls back to full QR for simplicity.
+#[cfg(feature = "blas")]
 pub fn reml_gradient_multi_qr_adaptive(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -446,6 +448,7 @@ pub fn reml_gradient_multi_qr_adaptive(
 }
 
 /// Adaptive QR gradient with optional cached sqrt_penalties
+#[cfg(feature = "blas")]
 pub fn reml_gradient_multi_qr_adaptive_cached(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -749,6 +752,7 @@ pub fn reml_gradient_multi_qr_blockwise(
 /// This avoids explicit formation of A^{-1} and cross-coupling issues.
 ///
 /// NOTE: For large n (>= 2000), use reml_gradient_multi_qr_blockwise instead
+#[cfg(feature = "blas")]
 pub fn reml_gradient_multi_qr(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -761,6 +765,7 @@ pub fn reml_gradient_multi_qr(
 
 /// QR-based REML gradient with optional cached sqrt_penalties
 /// If cached_sqrt_penalties is provided, skips expensive eigendecomposition
+#[cfg(feature = "blas")]
 pub fn reml_gradient_multi_qr_cached(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -1423,6 +1428,7 @@ pub fn reml_gradient_multi_cholesky_cached(
 /// where ∂REML/∂ρᵢ = [tr(A⁻¹·λᵢ·Sᵢ) - rank(Sᵢ) + ∂(P/φ)/∂ρᵢ + (n-r)·(1/φ)·∂φ/∂ρᵢ] / 2
 ///
 /// The Hessian accounts for all implicit dependencies through the Implicit Function Theorem.
+#[cfg(feature = "blas")]
 pub fn reml_hessian_multi_qr(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -2228,7 +2234,7 @@ pub fn reml_hessian_multi(
     Ok(hessian)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "blas"))]
 mod tests {
     use super::*;
 

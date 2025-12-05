@@ -270,7 +270,7 @@ fn forward_substitute_transpose(r: &Array2<f64>, b: &Array1<f64>) -> Result<Arra
     Ok(x)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "blas"))]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;

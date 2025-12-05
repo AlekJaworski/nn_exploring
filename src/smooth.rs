@@ -2,10 +2,13 @@
 
 use ndarray::{Array1, Array2};
 use crate::{Result, GAMError};
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt, compute_xtwx};
-use crate::linalg::{solve, inverse};
+use crate::linalg::solve;
 use crate::chunked_qr::IncrementalQR;
 use std::time::Instant;
+#[cfg(feature = "blas")]
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt};
+#[cfg(not(feature = "blas"))]
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi};
 
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -202,6 +205,7 @@ impl SmoothingParameter {
     ///
     /// Optimizes all λᵢ jointly using Newton's method on log(λᵢ)
     /// Following Wood (2011) JRSS-B algorithm
+    #[cfg(feature = "blas")]
     fn optimize_reml_newton_multi(
         &mut self,
         y: &Array1<f64>,
@@ -587,6 +591,22 @@ impl SmoothingParameter {
 
         Ok(())
     }
+
+    #[cfg(not(feature = "blas"))]
+    fn optimize_reml_newton_multi(
+        &mut self,
+        _y: &Array1<f64>,
+        _x: &Array2<f64>,
+        _w: &Array1<f64>,
+        _penalties: &[Array2<f64>],
+        _max_iter: usize,
+        _tolerance: f64,
+    ) -> Result<()> {
+        Err(GAMError::InvalidParameter(
+            "Newton REML optimization requires the 'blas' feature. Use Fellner-Schall or GCV instead.".to_string()
+        ))
+    }
+
     /// Optimize using REML with Fellner-Schall iteration (fREML)
     ///
     /// This is a simpler, faster alternative to Newton's method.
@@ -596,6 +616,7 @@ impl SmoothingParameter {
     /// Typically converges in 3-5 iterations vs 7-10 for Newton
     ///
     /// OPTIMIZED: Uses Cholesky decomposition instead of full inverse (~3x faster)
+    #[cfg(feature = "blas")]
     fn optimize_reml_fellner_schall(
         &mut self,
         y: &Array1<f64>,
@@ -759,6 +780,21 @@ impl SmoothingParameter {
         Ok(())
     }
 
+    #[cfg(not(feature = "blas"))]
+    fn optimize_reml_fellner_schall(
+        &mut self,
+        _y: &Array1<f64>,
+        _x: &Array2<f64>,
+        _w: &Array1<f64>,
+        _penalties: &[Array2<f64>],
+        _max_iter: usize,
+        _tolerance: f64,
+    ) -> Result<()> {
+        Err(GAMError::InvalidParameter(
+            "Fellner-Schall REML optimization requires the 'blas' feature. Use GCV or coordinate descent instead.".to_string()
+        ))
+    }
+
     /// Optimize using REML with Fellner-Schall iteration in chunked mode
     ///
     /// This version processes data in chunks to avoid forming the full design matrix.
@@ -772,6 +808,7 @@ impl SmoothingParameter {
     /// * `chunk_size` - Number of rows to process at a time
     /// * `max_iter` - Maximum Fellner-Schall iterations
     /// * `tolerance` - Convergence tolerance for log(λ)
+    #[cfg(feature = "blas")]
     fn optimize_reml_fellner_schall_chunked(
         &mut self,
         y: &Array1<f64>,
@@ -893,6 +930,22 @@ impl SmoothingParameter {
         }
 
         Ok(())
+    }
+
+    #[cfg(not(feature = "blas"))]
+    fn optimize_reml_fellner_schall_chunked(
+        &mut self,
+        _y: &Array1<f64>,
+        _x: &Array2<f64>,
+        _w: &Array1<f64>,
+        _penalties: &[Array2<f64>],
+        _chunk_size: usize,
+        _max_iter: usize,
+        _tolerance: f64,
+    ) -> Result<()> {
+        Err(GAMError::InvalidParameter(
+            "Chunked Fellner-Schall REML optimization requires the 'blas' feature. Use GCV or coordinate descent instead.".to_string()
+        ))
     }
 
     /// Optimize using GCV criterion
