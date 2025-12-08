@@ -117,3 +117,43 @@ Reasoning:
 - **Test runs**: 3 iterations per configuration, mean reported
 - **Random seed**: Fixed at 42 for reproducibility
 
+
+---
+
+## Update: Root Cause of n=1000, d=10 Regression
+
+**Discovered:** Adaptive gradient threshold issue
+
+### The Problem
+
+Gradient computation uses adaptive algorithm selection:
+- `n >= 2000`: Use block-wise QR (fast, ~3-4ms)
+- `n < 2000`: Use full QR (slow for high d, ~20-26ms)
+
+For **n=1000, d=10**:
+- Gradient: 20-26ms (6-8x slower than n=2000!)
+- Combined with more iterations (10 vs 3)
+- Result: 5x slower overall
+
+### Performance Breakdown
+
+| n | Algorithm | Gradient/iter | Iterations | Total | Notes |
+|---|-----------|---------------|------------|-------|-------|
+| 1000 | Full QR | 20-26ms | 10 | ~250ms | Slow gradient, no convergence |
+| 2000 | Block-wise | 3-4ms | 3 | ~10ms | Fast gradient, converges |
+
+### Why This Happens
+
+1. **Algorithm switch at n=2000** is too conservative for high d
+2. **Full QR is O(np²)** which is expensive when p is large (10 smooths × 10 basis = 100 parameters)
+3. **Block-wise QR is O(n)** with better constant factors
+
+### Recommendation
+
+For future work, consider:
+- Adjust threshold based on both n AND d: `if n >= 2000 || (n >= 1000 && d >= 8)`
+- Or always use block-wise for d >= 8
+
+This is a **known limitation**, not a regression from the optimizations.
+The baseline version has the same issue - it's just exposed by the test case.
+
