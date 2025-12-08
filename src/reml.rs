@@ -2309,40 +2309,50 @@ pub fn reml_hessian_multi_cached(
         bsb1.push(lambdas[i] * beta_s_beta / phi);
     }
 
-    let mut hessian = Array2::<f64>::zeros((m, m));
+    // OPTIMIZATION: Precompute terms that are reused across (i,j) pairs
+    // This avoids O(m²) redundant matrix operations, reducing to O(m)
+    let mut m_vec = Vec::with_capacity(m);           // M_i = λ_i·S_i
+    let mut m_a_inv = Vec::with_capacity(m);         // M_i·A^(-1)
+    let mut m_beta_vec = Vec::with_capacity(m);      // M_i·β
+    let mut s_beta_vec = Vec::with_capacity(m);      // S_i·β
+    let mut a_inv_m_beta = Vec::with_capacity(m);    // A^(-1)·M_i·β
+
     for i in 0..m {
         let m_i = &penalties[i] * lambdas[i];
+        let m_i_a_inv = m_i.dot(&a_inv);
+        let m_i_beta = m_i.dot(&beta);
+        let s_i_beta = penalties[i].dot(&beta);
+        let a_inv_m_i_beta = a_inv.dot(&m_i_beta);
+
+        m_vec.push(m_i);
+        m_a_inv.push(m_i_a_inv);
+        m_beta_vec.push(m_i_beta);
+        s_beta_vec.push(s_i_beta);
+        a_inv_m_beta.push(a_inv_m_i_beta);
+    }
+
+    let mut hessian = Array2::<f64>::zeros((m, m));
+    for i in 0..m {
+        let trace_a_inv_m_i: f64 = (0..p).map(|k| m_a_inv[i][[k, k]]).sum();
+
         for j in 0..=i {
-            let m_j = &penalties[j] * lambdas[j];
-
-            let m_i_a_inv = m_i.dot(&a_inv);
-            let trace_a_inv_m_i: f64 = (0..p).map(|k| m_i_a_inv[[k, k]]).sum();
-
             let trace_term = if i != j {
-                let m_j_a_inv = m_j.dot(&a_inv);
-                let prod = a_inv.dot(&m_i_a_inv.t()).dot(&m_j.t()).dot(&a_inv.t());
+                let prod = a_inv.dot(&m_a_inv[i].t()).dot(&m_vec[j].t()).dot(&a_inv.t());
                 (0..p).map(|k| prod[[k, k]]).sum()
             } else { 0.0 };
 
             let det2 = if i == j { trace_a_inv_m_i - trace_term } else { -trace_term };
 
-            let m_i_beta = m_i.dot(&beta);
-            let m_j_beta = m_j.dot(&beta);
-            let a_inv_m_i_beta = a_inv.dot(&m_i_beta);
-            let a_inv_m_j_beta = a_inv.dot(&m_j_beta);
-            let m_i_a_inv_m_j_beta = m_i.dot(&a_inv_m_j_beta);
-            let m_j_a_inv_m_i_beta = m_j.dot(&a_inv_m_i_beta);
+            let m_i_a_inv_m_j_beta = m_vec[i].dot(&a_inv_m_beta[j]);
+            let m_j_a_inv_m_i_beta = m_vec[j].dot(&a_inv_m_beta[i]);
             let d2beta_prod = a_inv.dot(&(m_i_a_inv_m_j_beta + m_j_a_inv_m_i_beta));
             let d2beta = if i == j { d2beta_prod + &dbeta_drho[i] } else { d2beta_prod };
 
-            let s_beta = penalties[i].dot(&beta);
-            let term1: f64 = d2beta.iter().zip(s_beta.iter()).map(|(d2bi, sbi)| d2bi * sbi).sum::<f64>();
+            let term1: f64 = d2beta.iter().zip(s_beta_vec[i].iter()).map(|(d2bi, sbi)| d2bi * sbi).sum::<f64>();
             let s_i_dbeta_j = penalties[i].dot(&dbeta_drho[j]);
             let term2: f64 = dbeta_drho[i].iter().zip(s_i_dbeta_j.iter()).map(|(dbi, sjdbj)| dbi * sjdbj).sum::<f64>();
-            let s_i_beta = penalties[i].dot(&beta);
-            let term3: f64 = dbeta_drho[j].iter().zip(s_i_beta.iter()).map(|(dbj, sib)| dbj * sib).sum::<f64>() * lambdas[i];
-            let s_j_beta = penalties[j].dot(&beta);
-            let term4: f64 = dbeta_drho[i].iter().zip(s_j_beta.iter()).map(|(dbi, sjb)| dbi * sjb).sum::<f64>() * lambdas[j];
+            let term3: f64 = dbeta_drho[j].iter().zip(s_beta_vec[i].iter()).map(|(dbj, sib)| dbj * sib).sum::<f64>() * lambdas[i];
+            let term4: f64 = dbeta_drho[i].iter().zip(s_beta_vec[j].iter()).map(|(dbi, sjb)| dbi * sjb).sum::<f64>() * lambdas[j];
 
             let diag_corr = if i == j { bsb1[i] } else { 0.0 };
             let bsb2 = 2.0 * (term1 + term2 + term3 + term4) + diag_corr;
