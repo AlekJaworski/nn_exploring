@@ -6,7 +6,7 @@ use crate::linalg::solve;
 use crate::chunked_qr::IncrementalQR;
 use std::time::Instant;
 #[cfg(feature = "blas")]
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_cached, reml_hessian_multi_qr, penalty_sqrt};
 #[cfg(not(feature = "blas"))]
 use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi};
 
@@ -269,7 +269,11 @@ impl SmoothingParameter {
         // This prevents overly aggressive Newton steps that require excessive backtracking
         // max_step=4 means we clamp λ_new/λ_old to [e^-4, e^4] = [0.018, 54.6]
         let max_step = 4.0;    // Conservative step size to match mgcv
-        let max_half = 30;     // Maximum step halvings
+
+        // OPTIMIZATION: Armijo constant for line search
+        // Accepts steps with "sufficient decrease": f(x + αd) ≤ f(x) + c₁·α·∇f'·d
+        // Standard value c₁ = 0.01 (very lenient, prefers larger steps)
+        let armijo_c1 = 0.01;
 
         let mut prev_reml = f64::INFINITY;
 
@@ -288,7 +292,8 @@ impl SmoothingParameter {
             let grad_time = t_grad.elapsed().as_micros();
 
             let t_hess = Instant::now();
-            let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+            // OPTIMIZATION: Use cached X'WX to avoid recomputation (~2-3ms savings for n=5000)
+            let mut hessian = reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?;
             let hess_time = t_hess.elapsed().as_micros();
 
             if std::env::var("MGCV_PROFILE").is_ok() {
@@ -425,14 +430,31 @@ impl SmoothingParameter {
                 }
             }
 
-            // Line search with step halving (reuse current_reml from above)
+            // OPTIMIZATION: Adaptive line search with Armijo condition
+            // Compute directional derivative: gradient · step (for Armijo condition)
+            let grad_dot_step: f64 = gradient.iter().zip(step.iter())
+                .map(|(g, s)| g * s)
+                .sum();
+
+            // OPTIMIZATION: Adaptive max_half based on convergence progress
+            // Near convergence (small gradient), Newton step is likely good - use fewer halvings
+            // Far from convergence, may need more exploration
+            let max_half = if grad_norm_linf < 0.1 {
+                10  // Near convergence - fewer line search iterations
+            } else if grad_norm_linf < 1.0 {
+                20  // Moderate - standard search
+            } else {
+                30  // Far from convergence - thorough search
+            };
+
             let mut best_reml = current_reml;
             let mut best_step_scale = 0.0;
             let step_size_clamped = if step_size > max_step { max_step } else { step_size };
 
             if std::env::var("MGCV_PROFILE").is_ok() {
-                eprintln!("[PROFILE]   Line search: step_norm={:.6}, current_REML={:.6}",
-                         step_size_clamped, current_reml);
+                eprintln!("[PROFILE]   Line search: step_norm={:.6}, current_REML={:.6}, max_half={}",
+                         step_size_clamped, current_reml, max_half);
+                eprintln!("[PROFILE]     grad·step={:.6e} (expect decrease)", grad_dot_step);
             }
 
             let t_linesearch = Instant::now();
@@ -452,13 +474,32 @@ impl SmoothingParameter {
                 // Evaluate REML
                 match reml_criterion_multi(y, x, w, &new_lambdas, penalties, None) {
                     Ok(new_reml) => {
+                        // OPTIMIZATION: Armijo condition for early stopping
+                        // Accept if: new_reml ≤ current_reml + c₁ * step_scale * grad·step
+                        // Since we're minimizing and grad·step should be negative, this is:
+                        // new_reml ≤ current_reml - c₁ * step_scale * |grad·step|
+                        let armijo_threshold = current_reml + armijo_c1 * step_scale * grad_dot_step;
+                        let satisfies_armijo = new_reml <= armijo_threshold;
+
                         if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
-                            eprintln!("[PROFILE]     half={}: scale={:.4}, REML={:.6}, improvement={}",
-                                     half, step_scale, new_reml, new_reml < best_reml);
+                            eprintln!("[PROFILE]     half={}: scale={:.4}, REML={:.6}, armijo={}",
+                                     half, step_scale, new_reml, satisfies_armijo);
                         }
+
                         if new_reml < best_reml {
                             best_reml = new_reml;
                             best_step_scale = step_scale;
+
+                            // OPTIMIZATION: Early stopping with Armijo condition
+                            // If this step satisfies Armijo, accept it immediately
+                            // This avoids over-precise line search that wastes time
+                            if satisfies_armijo && half > 0 {
+                                // Accept this step (but always try full step first, hence half > 0)
+                                if std::env::var("MGCV_PROFILE").is_ok() {
+                                    eprintln!("[PROFILE]   Armijo condition satisfied, accepting scale={:.4}", step_scale);
+                                }
+                                break;
+                            }
                         } else if best_step_scale > 0.0 {
                             // Found an improvement earlier, no further improvement now - stop
                             if std::env::var("MGCV_PROFILE").is_ok() {

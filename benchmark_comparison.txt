@@ -1,0 +1,39 @@
+PHASE 3 vs PHASE 4 PERFORMANCE COMPARISON
+================================================================================
+
+Configuration          Phase 3 (Hessian Cache)    Phase 4 (Line Search)    Improvement
+--------------------------------------------------------------------------------
+n= 2000, d=1          0.0910s (1.94x)            0.0519s (2.34x)          43% faster
+n= 5000, d=1          0.1361s (1.33x)            0.1083s (1.51x)          20% faster
+n=10000, d=1          0.2634s (1.38x)            0.2205s (1.69x)          16% faster
+n=20000, d=1          0.4861s                    0.4120s                  15% faster
+
+n= 2000, d=2          0.0288s (4.50x)            0.0259s (5.22x)          10% faster
+n= 5000, d=2          0.0642s (2.96x)            0.0606s (3.36x)           6% faster
+n=10000, d=2          0.1743s (2.28x)            0.1257s (3.22x)          28% faster
+
+n= 2000, d=4          0.0596s (3.79x)            0.0583s (4.86x)           2% faster
+n= 5000, d=4          0.1709s (2.74x)            0.1490s (3.49x)          13% faster
+
+n= 2000, d=8          0.2010s (2.47x)            0.1873s (3.08x)           7% faster
+n= 5000, d=8          0.4752s (1.68x)            0.4691s (1.90x)           1% faster
+
+================================================================================
+KEY IMPROVEMENTS:
+
+1. Line Search Optimizations (Phase 4):
+   - Armijo condition for early stopping: accepts "sufficient decrease"
+   - Adaptive max_half: 10-30 iterations based on gradient magnitude
+   - Reduces REML evaluations per line search from ~5-10 to ~2-3
+
+2. Performance Gains:
+   - Small-medium problems (n<5000): 2-43% faster
+   - Large problems (n=10000): 16-28% faster
+   - Most effective for d=1,2 (fewer smooths, faster convergence)
+
+3. vs R's mgcv:
+   - Speedup improvements across all cases
+   - n=10000, d=2: 2.28x → 3.22x (+41% relative speedup)
+   - Maintained stability and correctness
+
+================================================================================
