@@ -461,9 +461,15 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     let n = y.len();
+    let d = lambdas.len();  // Number of smoothing parameters (dimensionality)
 
-    // Use block-wise for large n (>= 2000), full QR for small n
-    if n >= 2000 {
+    // OPTIMIZATION: Adaptive threshold based on both n and d
+    // For high d, block-wise QR is faster even at smaller n
+    // Formula: n >= 2000 - 100*max(0, d-2)
+    // Examples: d=1,2: n>=2000, d=4: n>=1800, d=6: n>=1600, d=10: n>=1200
+    let threshold = (2000_usize).saturating_sub(100 * (d.saturating_sub(2)));
+
+    if n >= threshold {
         #[cfg(feature = "blas")]
         {
             reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
