@@ -1,0 +1,107 @@
+================================================================================
+LARGE-N PERFORMANCE ANALYSIS
+================================================================================
+
+
+Testing: n=2000, d=1, k=[20]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0519s ± 0.0011s
+  R:      0.1215s ± 0.0562s
+  Speedup: 2.34x
+
+Testing: n=5000, d=1, k=[20]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.1083s ± 0.0020s
+  R:      0.1633s ± 0.0474s
+  Speedup: 1.51x
+
+Testing: n=10000, d=1, k=[20]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.2205s ± 0.0025s
+  R:      0.3728s ± 0.0602s
+  Speedup: 1.69x
+
+Testing: n=20000, d=1, k=[20]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Skipping R (too slow for n=20000)
+  Rust:   0.4120s ± 0.0119s
+
+Testing: n=2000, d=2, k=[10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0259s ± 0.0019s
+  R:      0.1354s ± 0.0520s
+  Speedup: 5.22x
+
+Testing: n=5000, d=2, k=[10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0606s ± 0.0018s
+  R:      0.2032s ± 0.0442s
+  Speedup: 3.36x
+
+Testing: n=10000, d=2, k=[10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.1257s ± 0.0026s
+  R:      0.4046s ± 0.1252s
+  Speedup: 3.22x
+
+Testing: n=2000, d=4, k=[10, 10, 10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.0583s ± 0.0020s
+  R:      0.2834s ± 0.0696s
+  Speedup: 4.86x
+
+Testing: n=5000, d=4, k=[10, 10, 10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.1490s ± 0.0033s
+  R:      0.5206s ± 0.0096s
+  Speedup: 3.49x
+
+Testing: n=2000, d=8, k=[10, 10, 10, 10, 10, 10, 10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.1873s ± 0.0041s
+  R:      0.5775s ± 0.0437s
+  Speedup: 3.08x
+
+Testing: n=5000, d=8, k=[10, 10, 10, 10, 10, 10, 10, 10]
+--------------------------------------------------------------------------------
+  Running Rust benchmark...
+  Running R benchmark...
+  Rust:   0.4691s ± 0.0025s
+  R:      0.8895s ± 0.1236s
+  Speedup: 1.90x
+
+================================================================================
+SUMMARY: Performance by Problem Size
+================================================================================
+n= 2000, d=1, Rust= 0.0519s, Speedup= 2.34x
+n= 5000, d=1, Rust= 0.1083s, Speedup= 1.51x
+n=10000, d=1, Rust= 0.2205s, Speedup= 1.69x
+n=20000, d=1, Rust= 0.4120s, Speedup=N/A
+n= 2000, d=2, Rust= 0.0259s, Speedup= 5.22x
+n= 5000, d=2, Rust= 0.0606s, Speedup= 3.36x
+n=10000, d=2, Rust= 0.1257s, Speedup= 3.22x
+n= 2000, d=4, Rust= 0.0583s, Speedup= 4.86x
+n= 5000, d=4, Rust= 0.1490s, Speedup= 3.49x
+n= 2000, d=8, Rust= 0.1873s, Speedup= 3.08x
+n= 5000, d=8, Rust= 0.4691s, Speedup= 1.90x
+
+Results saved to: large_n_benchmark_results.json
