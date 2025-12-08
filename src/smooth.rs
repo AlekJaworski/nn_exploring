@@ -6,7 +6,7 @@ use crate::linalg::solve;
 use crate::chunked_qr::IncrementalQR;
 use std::time::Instant;
 #[cfg(feature = "blas")]
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_qr, penalty_sqrt};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_cached, reml_hessian_multi_qr, penalty_sqrt};
 #[cfg(not(feature = "blas"))]
 use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi};
 
@@ -288,7 +288,8 @@ impl SmoothingParameter {
             let grad_time = t_grad.elapsed().as_micros();
 
             let t_hess = Instant::now();
-            let mut hessian = reml_hessian_multi(y, x, w, &lambdas, penalties)?;
+            // OPTIMIZATION: Use cached X'WX to avoid recomputation (~2-3ms savings for n=5000)
+            let mut hessian = reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?;
             let hess_time = t_hess.elapsed().as_micros();
 
             if std::env::var("MGCV_PROFILE").is_ok() {
