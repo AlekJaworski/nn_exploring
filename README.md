@@ -27,6 +27,34 @@ ndarray = "0.16"
 
 ## Quick Start
 
+### Python (Recommended)
+
+```python
+import numpy as np
+from mgcv_rust import GAM
+
+# Generate data: y = sin(2πx) + noise
+X = np.random.uniform(0, 1, (500, 2))
+y = np.sin(2 * np.pi * X[:, 0]) + 0.5 * (X[:, 1] - 0.5)**2
+
+# Fit GAM with automatic smooth setup
+gam = GAM()
+result = gam.fit(X, y, k=[10, 15])  # That's it!
+
+print(f"Lambda values: {result['lambda']}")
+print(f"Deviance: {result['deviance']}")
+
+# Make predictions
+X_test = np.random.uniform(0, 1, (100, 2))
+predictions = gam.predict(X_test)
+```
+
+**Performance**: 1.5x - 65x faster than R's mgcv (problem-dependent)
+
+See `API_SIMPLIFICATION.md` for more details on the simplified Python API.
+
+### Rust
+
 ```rust
 use mgcv_rust::{GAM, Family, SmoothTerm, OptimizationMethod};
 use ndarray::{Array1, Array2};

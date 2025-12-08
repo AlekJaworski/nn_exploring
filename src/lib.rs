@@ -167,7 +167,42 @@ impl PyGAM {
         Ok(())
     }
 
+    /// Fit GAM with automatic smooth setup and all optimizations (recommended)
+    ///
+    /// This is the main fitting method with sensible defaults and best performance.
+    /// It automatically sets up smooths for each column and uses all optimizations.
+    ///
+    /// Args:
+    ///     x: Input data (n x d array)
+    ///     y: Response variable (n array)
+    ///     k: List of basis dimensions for each column (like k in mgcv)
+    ///     method: "REML" (default) or "GCV"
+    ///     bs: Basis type: "cr" (cubic regression splines, default) or "bs" (B-splines)
+    ///     max_iter: Maximum iterations (default: 10)
+    ///
+    /// Example:
+    ///     gam = GAM()
+    ///     result = gam.fit(X, y, k=[10, 15, 20])
+    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None))]
     fn fit<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+        y: PyReadonlyArray1<f64>,
+        k: Vec<usize>,
+        method: &str,
+        bs: Option<&str>,
+        max_iter: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        // Route to the optimized implementation
+        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter)
+    }
+
+    /// Low-level fit method for users who manually configure smooths
+    ///
+    /// Most users should use `fit()` instead, which provides automatic setup.
+    /// This method is for advanced users who want full control over smooth configuration.
+    fn fit_manual<'py>(
         &mut self,
         py: Python<'py>,
         x: PyReadonlyArray2<f64>,
@@ -286,8 +321,8 @@ impl PyGAM {
             self.inner.add_smooth(smooth);
         }
 
-        // Call regular fit
-        self.fit(py, x, y, method, max_iter)
+        // Call manual fit with pre-configured smooths
+        self.fit_manual(py, x, y, method, max_iter)
     }
 
     /// Fit GAM with automatic smooth setup (optimized version with caching)
@@ -436,8 +471,8 @@ impl PyGAM {
             self.inner.add_smooth(smooth);
         }
 
-        // Call regular fit
-        self.fit(py, x, y, method, max_iter)
+        // Call manual fit with pre-configured smooths
+        self.fit_manual(py, x, y, method, max_iter)
     }
 
     fn predict<'py>(
