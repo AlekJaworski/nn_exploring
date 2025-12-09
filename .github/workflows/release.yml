@@ -26,7 +26,7 @@ jobs:
           OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas
+          args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
@@ -59,7 +59,7 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas
+          args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
 
       - name: Upload wheels

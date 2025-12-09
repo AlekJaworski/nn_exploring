@@ -37,6 +37,6 @@ Repository = "https://github.com/AlekJaworski/nn_exploring"
 Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 
 [tool.maturin]
-# Use system OpenBLAS (installed in CI), wheel repair tools bundle it
-features = ["python", "blas"]
+# Statically link OpenBLAS (includes LAPACK) for self-contained wheels
+features = ["python", "blas", "blas-static"]
 module-name = "mgcv_rust"
