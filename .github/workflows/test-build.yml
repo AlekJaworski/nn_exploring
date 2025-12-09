@@ -1,0 +1,130 @@
+name: Test Build
+
+on:
+  push:
+    branches:
+      - 'claude/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    name: Test Linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          OPENBLAS_STATIC: "1"
+          OPENBLAS_NO_DYNAMIC_ARCH: "1"
+          OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
+          RUST_BACKTRACE: "1"
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter --features python,blas,blas-static
+          sccache: 'true'
+          manylinux: auto
+          before-script-linux: |
+            set -e
+            echo "=== Installing build dependencies ==="
+            if command -v yum &> /dev/null; then
+              echo "Using yum package manager"
+              yum install -y gcc-gfortran openssl-devel make cmake perl
+              yum list installed | grep -E "(gfortran|openssl|make|cmake|perl)"
+            else
+              echo "Using apt package manager"
+              apt-get update
+              apt-get install -y gfortran libssl-dev pkg-config make cmake perl
+              dpkg -l | grep -E "(gfortran|libssl|make|cmake|perl)"
+            fi
+            echo "=== Build tools installed ==="
+            which gfortran make cmake perl || true
+            gfortran --version || true
+            echo "=== Environment variables ==="
+            env | grep -E "(OPENBLAS|RUST|CARGO|TARGET)" || true
+
+      - name: Verify wheel
+        run: |
+          echo "=== Built wheels ==="
+          ls -lh dist/
+          echo "=== Wheel info ==="
+          python -m pip install --upgrade pip
+          python -m pip install wheel
+          for wheel in dist/*.whl; do
+            echo "Checking $wheel"
+            python -m wheel tags "$wheel" || true
+            unzip -l "$wheel" | grep -E "\.so$" || true
+          done
+
+      - name: Test wheel
+        run: |
+          echo "=== Installing wheel ==="
+          python -m pip install dist/*.whl
+          echo "=== Testing import ==="
+          python -c "import mgcv_rust; print('Import successful!')"
+          echo "=== Checking dependencies ==="
+          ldd $(python -c "import mgcv_rust; import os; print(os.path.dirname(mgcv_rust.__file__))")/mgcv_rust*.so || true
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-wheels-linux-${{ matrix.target }}
+          path: dist
+
+  test-macos:
+    name: Test macOS ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenBLAS
+        run: |
+          echo "=== Installing OpenBLAS ==="
+          brew install openblas
+          echo "=== OpenBLAS location ==="
+          brew --prefix openblas
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          OPENBLAS_STATIC: "1"
+          OPENBLAS_NO_DYNAMIC_ARCH: "1"
+          OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'VORTEX' || 'NEHALEM' }}
+          RUST_BACKTRACE: "1"
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter --features python,blas,blas-static
+          sccache: 'true'
+
+      - name: Verify wheel (native only)
+        if: matrix.target == 'x86_64'
+        run: |
+          echo "=== Built wheels ==="
+          ls -lh dist/
+          echo "=== Installing wheel ==="
+          python3 -m pip install dist/*.whl
+          echo "=== Testing import ==="
+          python3 -c "import mgcv_rust; print('Import successful!')"
+          echo "=== Checking dependencies ==="
+          otool -L $(python3 -c "import mgcv_rust; import os; print(os.path.dirname(mgcv_rust.__file__))")/mgcv_rust*.so || true
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-wheels-macos-${{ matrix.target }}
+          path: dist
