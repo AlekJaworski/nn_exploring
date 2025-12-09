@@ -21,16 +21,19 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          OPENBLAS_STATIC: "1"
+          OPENBLAS_NO_DYNAMIC_ARCH: "1"
+          OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas,blas-system
+          args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openblas-devel openssl-devel
+              yum install -y gcc-gfortran openssl-devel make cmake perl
             else
-              apt-get update && apt-get install -y libopenblas-dev libssl-dev pkg-config
+              apt-get update && apt-get install -y gfortran libssl-dev pkg-config make cmake perl
             fi
 
       - name: Upload wheels
