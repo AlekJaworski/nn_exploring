@@ -23,6 +23,8 @@ pub mod chunked_qr;
 pub use gam::{GAM, SmoothTerm};
 pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
 pub use smooth::{SmoothingParameter, OptimizationMethod};
+#[cfg(feature = "blas")]
+pub use reml::ScaleParameterMethod;
 pub use pirls::Family;
 
 use thiserror::Error;

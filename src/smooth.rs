@@ -6,7 +6,9 @@ use crate::linalg::solve;
 use crate::chunked_qr::IncrementalQR;
 use std::time::Instant;
 #[cfg(feature = "blas")]
-use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi, reml_gradient_multi_qr, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached, reml_gradient_multi_cholesky, reml_hessian_multi, reml_hessian_multi_cached, reml_hessian_multi_qr, penalty_sqrt};
+use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_multi_cached, penalty_sqrt, compute_xtwx_cholesky};
+#[cfg(feature = "blas")]
+pub use crate::reml::ScaleParameterMethod;
 #[cfg(not(feature = "blas"))]
 use crate::reml::{reml_criterion, gcv_criterion, reml_criterion_multi, reml_gradient_multi};
 
@@ -30,6 +32,11 @@ pub struct SmoothingParameter {
     pub lambda: Vec<f64>,
     pub method: OptimizationMethod,
     pub reml_algorithm: REMLAlgorithm,
+    /// Method for computing scale parameter φ (only used with BLAS feature)
+    /// - Rank: Fast O(1) using penalty matrix ranks (default)
+    /// - EDF: Exact O(p³/3) using effective degrees of freedom (matches mgcv)
+    #[cfg(feature = "blas")]
+    pub scale_method: ScaleParameterMethod,
 }
 
 impl SmoothingParameter {
@@ -39,6 +46,8 @@ impl SmoothingParameter {
             lambda: vec![0.1; num_smooths],  // Will be refined in optimize()
             method,
             reml_algorithm: REMLAlgorithm::Newton,  // Default to Newton (matches bam())
+            #[cfg(feature = "blas")]
+            scale_method: ScaleParameterMethod::Rank,  // Default to fast method
         }
     }
 
@@ -48,7 +57,31 @@ impl SmoothingParameter {
             lambda: vec![0.1; num_smooths],
             method,
             reml_algorithm: algorithm,
+            #[cfg(feature = "blas")]
+            scale_method: ScaleParameterMethod::Rank,
         }
+    }
+    
+    /// Create with EDF-based scale parameter (matches mgcv exactly)
+    /// 
+    /// This uses Effective Degrees of Freedom instead of penalty ranks
+    /// for computing the scale parameter φ. More accurate for ill-conditioned
+    /// problems (k >> n) but adds O(p³/3) cost per iteration.
+    #[cfg(feature = "blas")]
+    pub fn new_with_edf(num_smooths: usize, method: OptimizationMethod) -> Self {
+        Self {
+            lambda: vec![0.1; num_smooths],
+            method,
+            reml_algorithm: REMLAlgorithm::Newton,
+            scale_method: ScaleParameterMethod::EDF,
+        }
+    }
+    
+    /// Set the scale parameter method
+    #[cfg(feature = "blas")]
+    pub fn with_scale_method(mut self, method: ScaleParameterMethod) -> Self {
+        self.scale_method = method;
+        self
     }
 
     /// Optimize smoothing parameters using REML or GCV with adaptive initialization
@@ -259,6 +292,18 @@ impl SmoothingParameter {
             let xtwx_time = xtwx_start.elapsed();
             eprintln!("[PROFILE] Pre-computed X'WX and X'Wy: {:.2}ms", xtwx_time.as_secs_f64() * 1000.0);
         }
+        
+        // Pre-compute Cholesky of X'WX for EDF computation (if using EDF method)
+        let xtwx_chol: Option<Array2<f64>> = if self.scale_method == ScaleParameterMethod::EDF {
+            let chol_start = Instant::now();
+            let chol = compute_xtwx_cholesky(&xtwx)?;
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE] Pre-computed X'WX Cholesky for EDF: {:.2}ms", chol_start.elapsed().as_secs_f64() * 1000.0);
+            }
+            Some(chol)
+        } else {
+            None
+        };
 
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter()
@@ -288,7 +333,11 @@ impl SmoothingParameter {
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
             // OPTIMIZATION: Pass cached sqrt_penalties, X'WX, X'Wy to avoid recomputation
             let t_grad = Instant::now();
-            let gradient = reml_gradient_multi_qr_adaptive_cached(y, x, w, &lambdas, penalties, Some(&sqrt_penalties), Some(&xtwx), Some(&xtwy))?;
+            let gradient = reml_gradient_multi_qr_adaptive_cached_edf(
+                y, x, w, &lambdas, penalties, 
+                Some(&sqrt_penalties), Some(&xtwx), Some(&xtwy),
+                xtwx_chol.as_ref(), self.scale_method
+            )?;
             let grad_time = t_grad.elapsed().as_micros();
 
             let t_hess = Instant::now();

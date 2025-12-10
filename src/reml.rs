@@ -5,6 +5,85 @@ use crate::Result;
 use crate::linalg::{solve, determinant, inverse};
 use crate::GAMError;
 
+/// Method for computing the scale parameter φ in REML
+/// 
+/// The scale parameter φ = RSS / (n - df) affects the Hessian scaling
+/// and convergence behavior. Two methods are available:
+/// 
+/// - `Rank`: Uses penalty matrix ranks (constant, O(1) per iteration)
+///   φ = RSS / (n - Σ rank(Sᵢ))
+///   Fast but approximate; can cause issues when k >> n
+/// 
+/// - `EDF`: Uses Effective Degrees of Freedom (O(p³/3) per iteration)
+///   φ = RSS / (n - EDF) where EDF = tr(A⁻¹·X'WX)
+///   Exact method matching mgcv; better for ill-conditioned problems
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ScaleParameterMethod {
+    /// Use penalty matrix ranks (fast, approximate)
+    /// φ = RSS / (n - Σ rank(Sᵢ))
+    #[default]
+    Rank,
+    /// Use Effective Degrees of Freedom (slower, exact)
+    /// φ = RSS / (n - EDF) where EDF = tr(A⁻¹·X'WX)
+    EDF,
+}
+
+/// Compute Effective Degrees of Freedom using the trace-Frobenius trick
+/// 
+/// EDF = tr(A⁻¹·X'WX)
+/// 
+/// Using Cholesky A = R'R:
+/// EDF = tr(R⁻¹·R'⁻¹·X'WX) = ||R'⁻¹·L||²_F
+/// where X'WX = L·L' (Cholesky factorization of X'WX)
+/// 
+/// # Arguments
+/// * `r_t` - R' (transpose of Cholesky factor of A, lower triangular)
+/// * `xtwx_chol` - Cholesky factor L of X'WX (lower triangular)
+/// 
+/// # Returns
+/// EDF value (sum of squared elements of R'⁻¹·L)
+#[cfg(feature = "blas")]
+pub fn compute_edf_from_cholesky(
+    r_t: &Array2<f64>,
+    xtwx_chol: &Array2<f64>,
+) -> Result<f64> {
+    use ndarray_linalg::{SolveTriangular, UPLO, Diag};
+    
+    // Solve R'·Y = L where L is the Cholesky factor of X'WX
+    // R' is lower triangular, L is lower triangular
+    let sol = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, xtwx_chol)
+        .map_err(|e| GAMError::InvalidParameter(format!("EDF triangular solve failed: {:?}", e)))?;
+    
+    // EDF = ||Y||²_F = sum of all squared elements
+    let edf: f64 = sol.iter().map(|x| x * x).sum();
+    
+    Ok(edf)
+}
+
+/// Compute Cholesky factor of X'WX for EDF computation
+/// 
+/// This should be pre-computed once at the start of optimization
+/// since X'WX doesn't change during lambda optimization.
+#[cfg(feature = "blas")]
+pub fn compute_xtwx_cholesky(xtwx: &Array2<f64>) -> Result<Array2<f64>> {
+    use ndarray_linalg::{Cholesky, UPLO};
+    
+    // Add small ridge for numerical stability (X'WX might be ill-conditioned)
+    let p = xtwx.nrows();
+    let mut xtwx_reg = xtwx.clone();
+    let max_diag = (0..p).map(|i| xtwx[[i, i]].abs()).fold(0.0f64, f64::max);
+    let ridge = max_diag * 1e-10;
+    for i in 0..p {
+        xtwx_reg[[i, i]] += ridge;
+    }
+    
+    // Compute Cholesky: X'WX = L·L' (L is lower triangular)
+    let l = xtwx_reg.cholesky(UPLO::Lower)
+        .map_err(|e| GAMError::InvalidParameter(format!("X'WX Cholesky failed: {:?}", e)))?;
+    
+    Ok(l)
+}
+
 /// Helper: Create weighted design matrix X_w[i,j] = sqrt(w[i]) * X[i,j]
 /// Optimized with row-wise operations for better memory access patterns
 #[inline]
@@ -460,6 +539,38 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     cached_xtwx: Option<&Array2<f64>>,
     cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
+    // Default to rank-based phi for backward compatibility
+    reml_gradient_multi_qr_adaptive_cached_edf(
+        y, x, w, lambdas, penalties, 
+        cached_sqrt_penalties, cached_xtwx, cached_xtwy, 
+        None, ScaleParameterMethod::Rank
+    )
+}
+
+/// Adaptive QR gradient with EDF support
+/// 
+/// This version supports both rank-based and EDF-based scale parameter computation.
+/// 
+/// # Arguments
+/// * `cached_xtwx_chol` - Pre-computed Cholesky factor of X'WX (required for EDF method)
+/// * `scale_method` - Method for computing scale parameter φ
+/// 
+/// # Performance
+/// - `ScaleParameterMethod::Rank`: O(1) for φ computation (default, fast)
+/// - `ScaleParameterMethod::EDF`: O(p³/3) for φ computation (exact, matches mgcv)
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_qr_adaptive_cached_edf(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    cached_xtwx_chol: Option<&Array2<f64>>,
+    scale_method: ScaleParameterMethod,
+) -> Result<Array1<f64>> {
     let n = y.len();
     let d = lambdas.len();  // Number of smoothing parameters (dimensionality)
 
@@ -472,14 +583,22 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     if n >= threshold {
         #[cfg(feature = "blas")]
         {
-            reml_gradient_multi_qr_blockwise_cached(y, x, w, lambdas, penalties, 1000, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
+            reml_gradient_multi_qr_blockwise_cached_edf(
+                y, x, w, lambdas, penalties, 1000, 
+                cached_sqrt_penalties, cached_xtwx, cached_xtwy,
+                cached_xtwx_chol, scale_method
+            )
         }
         #[cfg(not(feature = "blas"))]
         {
             reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
         }
     } else {
-        reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, cached_sqrt_penalties, cached_xtwx, cached_xtwy)
+        reml_gradient_multi_qr_cached_edf(
+            y, x, w, lambdas, penalties, 
+            cached_sqrt_penalties, cached_xtwx, cached_xtwy,
+            cached_xtwx_chol, scale_method
+        )
     }
 }
 
@@ -510,7 +629,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     cached_xtwx: Option<&Array2<f64>>,
     cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
-    use ndarray_linalg::Inverse;
+    
     use ndarray_linalg::{SolveTriangular, UPLO, Diag};
     use crate::blockwise_qr::compute_r_blockwise;
 
@@ -734,6 +853,235 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     Ok(gradient)
 }
 
+/// Block-wise QR gradient with EDF support for scale parameter
+/// 
+/// This version supports both rank-based and EDF-based scale parameter computation.
+/// For EDF mode, requires pre-computed Cholesky factor of X'WX.
+/// 
+/// # Performance
+/// - `ScaleParameterMethod::Rank`: O(1) for φ computation
+/// - `ScaleParameterMethod::EDF`: O(p³/3) additional for φ computation via trace trick
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_qr_blockwise_cached_edf(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    block_size: usize,
+    cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    cached_xtwx_chol: Option<&Array2<f64>>,
+    scale_method: ScaleParameterMethod,
+) -> Result<Array1<f64>> {
+    
+    use ndarray_linalg::{SolveTriangular, UPLO, Diag};
+    use crate::blockwise_qr::compute_r_blockwise;
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Use cached sqrt_penalties if provided, otherwise compute them
+    let computed_sqrt_penalties: Vec<Array2<f64>>;
+    let sqrt_penalties: &[Array2<f64>];
+    let penalty_ranks: Vec<usize>;
+
+    if let Some(cached) = cached_sqrt_penalties {
+        sqrt_penalties = cached.as_slice();
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
+    } else {
+        let mut sp = Vec::new();
+        let mut pr = Vec::new();
+        for penalty in penalties.iter() {
+            let sqrt_pen = penalty_sqrt(penalty)?;
+            let rank = sqrt_pen.ncols();
+            sp.push(sqrt_pen);
+            pr.push(rank);
+        }
+        computed_sqrt_penalties = sp;
+        sqrt_penalties = &computed_sqrt_penalties;
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
+    }
+
+    // Get X'WX (cached or compute)
+    let xtwx_owned: Array2<f64>;
+    let xtwx = if let Some(cached) = cached_xtwx {
+        cached
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+
+    // OPTIMIZATION: If X'WX is cached, use Cholesky instead of blockwise QR
+    let r_upper = if cached_xtwx.is_some() {
+        use ndarray_linalg::Cholesky;
+
+        let mut a = xtwx.to_owned();
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            a.scaled_add(*lambda, penalty);
+        }
+
+        let ridge = 1e-7;
+        for i in 0..p {
+            a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+        }
+
+        match a.cholesky(ndarray_linalg::UPLO::Upper) {
+            Ok(r) => r,
+            Err(_) => {
+                compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?
+            }
+        }
+    } else {
+        compute_r_blockwise(x, w, lambdas, &sqrt_penalties, block_size)?
+    };
+
+    let r_t = r_upper.t().to_owned();
+
+    // Compute X'Wy
+    let xtwy_owned: Array1<f64>;
+    let xtwy = if let Some(cached) = cached_xtwy {
+        cached
+    } else {
+        xtwy_owned = compute_xtwy(x, w, y);
+        &xtwy_owned
+    };
+
+    let mut a = xtwx.to_owned();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a.scaled_add(*lambda, penalty);
+    }
+
+    let ridge = 1e-7 * (1.0 + (m as f64).sqrt());
+    for i in 0..p {
+        a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+    }
+
+    let beta = solve(a.clone(), xtwy.to_owned())?;
+
+    // Compute RSS
+    let fitted = x.dot(&beta);
+    let mut rss = 0.0;
+    let mut residuals = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        residuals[i] = y[i] - fitted[i];
+        rss += residuals[i] * residuals[i] * w[i];
+    }
+
+    // Compute φ based on selected method
+    let total_rank: usize = penalty_ranks.iter().sum();
+    let (phi, n_minus_edf) = match scale_method {
+        ScaleParameterMethod::Rank => {
+            let n_minus_r = n as f64 - total_rank as f64;
+            let phi = rss / n_minus_r;
+            (phi, n_minus_r)
+        }
+        ScaleParameterMethod::EDF => {
+            // Compute EDF = tr(A⁻¹·X'WX) using trace-Frobenius trick
+            // Need Cholesky of X'WX
+            let xtwx_chol = if let Some(cached) = cached_xtwx_chol {
+                cached.clone()
+            } else {
+                compute_xtwx_cholesky(xtwx)?
+            };
+            
+            let edf = compute_edf_from_cholesky(&r_t, &xtwx_chol)?;
+            let n_minus_edf = n as f64 - edf;
+            
+            // Guard against negative or zero denominator
+            let n_minus_edf_safe = n_minus_edf.max(1.0);
+            let phi = rss / n_minus_edf_safe;
+            
+            if std::env::var("MGCV_EDF_DEBUG").is_ok() {
+                eprintln!("[EDF_DEBUG] n={}, total_rank={}, EDF={:.4}, n-EDF={:.4}, n-rank={:.4}, phi_edf={:.6e}, phi_rank={:.6e}",
+                    n, total_rank, edf, n_minus_edf, n as f64 - total_rank as f64, 
+                    phi, rss / (n as f64 - total_rank as f64));
+            }
+            
+            (phi, n_minus_edf_safe)
+        }
+    };
+
+    let inv_phi = 1.0 / phi;
+    let phi_sq = phi * phi;
+
+    // Pre-compute P = RSS + Σλⱼ·β'·Sⱼ·β
+    let mut penalty_sum = 0.0;
+    for j in 0..m {
+        let s_j_beta = penalties[j].dot(&beta);
+        let beta_s_j_beta: f64 = beta.iter().zip(s_j_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambdas[j] * beta_s_j_beta;
+    }
+    let p_value = rss + penalty_sum;
+
+    let mut gradient = Array1::<f64>::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = penalty_ranks[i] as f64;
+        let sqrt_penalty = &sqrt_penalties[i];
+
+        // Term 1: tr(A^{-1}·λᵢ·Sᵢ) using batch triangular solve
+        let x_batch = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
+        let trace = lambda_i * trace_term;
+
+        // Term 2: -rank(Sᵢ)
+        let rank_term = -rank_i;
+
+        // Compute ∂β/∂ρᵢ
+        let s_i_beta = penalty_i.dot(&beta);
+        let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
+
+        let y_solve = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let dbeta_drho = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y_solve)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
+
+        // Compute ∂RSS/∂ρᵢ
+        let x_dbeta = x.dot(&dbeta_drho);
+        let drss_drho: f64 = -2.0 * residuals.iter().zip(x_dbeta.iter())
+            .map(|(ri, xdbi)| ri * xdbi)
+            .sum::<f64>();
+
+        let dphi_drho = drss_drho / n_minus_edf;
+
+        // Compute ∂P/∂ρᵢ
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        let explicit_pen = lambda_i * beta_s_i_beta;
+
+        let mut implicit_pen = 0.0;
+        for j in 0..m {
+            let s_j_beta = penalties[j].dot(&beta);
+            let s_j_dbeta = penalties[j].dot(&dbeta_drho);
+            let term1: f64 = s_j_beta.iter().zip(dbeta_drho.iter())
+                .map(|(sj, dbi)| sj * dbi)
+                .sum();
+            let term2: f64 = beta.iter().zip(s_j_dbeta.iter())
+                .map(|(bi, sjd)| bi * sjd)
+                .sum();
+            implicit_pen += lambdas[j] * (term1 + term2);
+        }
+
+        let dp_drho = drss_drho + explicit_pen + implicit_pen;
+        let penalty_quotient_deriv = dp_drho * inv_phi - (p_value / phi_sq) * dphi_drho;
+        let log_phi_deriv = n_minus_edf * dphi_drho * inv_phi;
+
+        gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
+    }
+
+    Ok(gradient)
+}
+
 #[cfg(not(feature = "blas"))]
 pub fn reml_gradient_multi_qr_blockwise(
     _y: &Array1<f64>,
@@ -783,7 +1131,7 @@ pub fn reml_gradient_multi_qr_cached(
     _cached_xtwx: Option<&Array2<f64>>,
     _cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
-    use ndarray_linalg::Inverse;
+    
     use ndarray_linalg::QR;
     use ndarray_linalg::{SolveTriangular, UPLO, Diag};
 
@@ -1051,6 +1399,235 @@ pub fn reml_gradient_multi_qr_cached(
         let log_phi_deriv = n_minus_r * dphi_drho * inv_phi;
 
         // Total gradient (divide by 2)
+        gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
+    }
+
+    Ok(gradient)
+}
+
+/// QR-based REML gradient with EDF support for scale parameter
+/// 
+/// This version supports both rank-based and EDF-based scale parameter computation.
+/// 
+/// # Arguments
+/// * `cached_xtwx_chol` - Pre-computed Cholesky factor of X'WX (required for EDF method)
+/// * `scale_method` - Method for computing scale parameter φ
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_qr_cached_edf(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
+    _cached_xtwx: Option<&Array2<f64>>,
+    _cached_xtwy: Option<&Array1<f64>>,
+    cached_xtwx_chol: Option<&Array2<f64>>,
+    scale_method: ScaleParameterMethod,
+) -> Result<Array1<f64>> {
+    
+    use ndarray_linalg::QR;
+    use ndarray_linalg::{SolveTriangular, UPLO, Diag};
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Create weighted design matrix
+    let mut sqrt_w_x = Array2::<f64>::zeros((n, p));
+    for i in 0..n {
+        let weight_sqrt = w[i].sqrt();
+        for j in 0..p {
+            sqrt_w_x[[i, j]] = x[[i, j]] * weight_sqrt;
+        }
+    }
+
+    // Use cached sqrt_penalties if provided
+    let computed_sqrt_penalties: Vec<Array2<f64>>;
+    let sqrt_penalties: &[Array2<f64>];
+    let penalty_ranks: Vec<usize>;
+
+    if let Some(cached) = cached_sqrt_penalties {
+        sqrt_penalties = cached.as_slice();
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
+    } else {
+        let mut sp = Vec::new();
+        let mut pr = Vec::new();
+        for penalty in penalties.iter() {
+            let sqrt_pen = penalty_sqrt(penalty)?;
+            let rank = sqrt_pen.ncols();
+            sp.push(sqrt_pen);
+            pr.push(rank);
+        }
+        computed_sqrt_penalties = sp;
+        sqrt_penalties = &computed_sqrt_penalties;
+        penalty_ranks = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
+    }
+
+    // Build augmented matrix Z
+    let mut total_rows = n;
+    for sqrt_pen in sqrt_penalties.iter() {
+        total_rows += sqrt_pen.ncols();
+    }
+
+    let mut z = Array2::<f64>::zeros((total_rows, p));
+
+    for i in 0..n {
+        for j in 0..p {
+            z[[i, j]] = sqrt_w_x[[i, j]];
+        }
+    }
+
+    let mut row_offset = n;
+    for (sqrt_pen, &lambda) in sqrt_penalties.iter().zip(lambdas.iter()) {
+        let sqrt_lambda = lambda.sqrt();
+        let rank = sqrt_pen.ncols();
+        for i in 0..rank {
+            for j in 0..p {
+                z[[row_offset + i, j]] = sqrt_lambda * sqrt_pen[[j, i]];
+            }
+        }
+        row_offset += rank;
+    }
+
+    // QR decomposition
+    let (_, r) = z.qr()
+        .map_err(|e| GAMError::InvalidParameter(format!("QR decomposition failed: {:?}", e)))?;
+
+    let mut r_upper = Array2::<f64>::zeros((p, p));
+    for i in 0..p {
+        for j in i..p {
+            r_upper[[i, j]] = r[[i, j]];
+        }
+    }
+
+    let r_t = r_upper.t().to_owned();
+
+    // Compute coefficients
+    let xtwx = compute_xtwx(x, w);
+    let xtwy = compute_xtwy(x, w, y);
+
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        a.scaled_add(*lambda, penalty);
+    }
+
+    let ridge = 1e-7 * (1.0 + (m as f64).sqrt());
+    for i in 0..p {
+        a[[i, i]] += ridge * a[[i, i]].abs().max(1.0);
+    }
+
+    let beta = solve(a.clone(), xtwy)?;
+
+    // Compute RSS
+    let fitted = x.dot(&beta);
+    let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+    let rss: f64 = residuals.iter().zip(w.iter())
+        .map(|(r, wi)| r * r * wi)
+        .sum();
+
+    // Compute φ based on selected method
+    let total_rank: usize = penalty_ranks.iter().sum();
+    let (phi, n_minus_edf) = match scale_method {
+        ScaleParameterMethod::Rank => {
+            let n_minus_r = n as f64 - total_rank as f64;
+            let phi = rss / n_minus_r;
+            (phi, n_minus_r)
+        }
+        ScaleParameterMethod::EDF => {
+            let xtwx_chol = if let Some(cached) = cached_xtwx_chol {
+                cached.clone()
+            } else {
+                compute_xtwx_cholesky(&xtwx)?
+            };
+            
+            let edf = compute_edf_from_cholesky(&r_t, &xtwx_chol)?;
+            let n_minus_edf = n as f64 - edf;
+            let n_minus_edf_safe = n_minus_edf.max(1.0);
+            let phi = rss / n_minus_edf_safe;
+            
+            if std::env::var("MGCV_EDF_DEBUG").is_ok() {
+                eprintln!("[EDF_DEBUG] n={}, total_rank={}, EDF={:.4}, n-EDF={:.4}, phi_edf={:.6e}, phi_rank={:.6e}",
+                    n, total_rank, edf, n_minus_edf, phi, rss / (n as f64 - total_rank as f64));
+            }
+            
+            (phi, n_minus_edf_safe)
+        }
+    };
+
+    let inv_phi = 1.0 / phi;
+    let phi_sq = phi * phi;
+
+    // Pre-compute P
+    let mut penalty_sum = 0.0;
+    for j in 0..m {
+        let s_j_beta = penalties[j].dot(&beta);
+        let beta_s_j_beta: f64 = beta.iter().zip(s_j_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        penalty_sum += lambdas[j] * beta_s_j_beta;
+    }
+    let p_value = rss + penalty_sum;
+
+    let mut gradient = Array1::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let rank_i = penalty_ranks[i] as f64;
+
+        // Trace term
+        let sqrt_penalty = &sqrt_penalties[i];
+        let x_batch = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
+        let trace = lambda_i * trace_term;
+
+        let rank_term = -rank_i;
+
+        // Beta derivatives
+        let s_i_beta = penalty_i.dot(&beta);
+        let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
+
+        let y_solve = r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let dbeta_drho = r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y_solve)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
+
+        // RSS derivative
+        let x_dbeta = x.dot(&dbeta_drho);
+        let drss_drho: f64 = -2.0 * residuals.iter().zip(x_dbeta.iter())
+            .map(|(ri, xdbi)| ri * xdbi)
+            .sum::<f64>();
+
+        let dphi_drho = drss_drho / n_minus_edf;
+
+        // Penalty derivatives
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter())
+            .map(|(bi, sbi)| bi * sbi)
+            .sum();
+        let explicit_pen = lambda_i * beta_s_i_beta;
+
+        let mut implicit_pen = 0.0;
+        for j in 0..m {
+            let s_j_beta = penalties[j].dot(&beta);
+            let s_j_dbeta = penalties[j].dot(&dbeta_drho);
+            let term1: f64 = s_j_beta.iter().zip(dbeta_drho.iter())
+                .map(|(sj, dbi)| sj * dbi)
+                .sum();
+            let term2: f64 = beta.iter().zip(s_j_dbeta.iter())
+                .map(|(bi, sjd)| bi * sjd)
+                .sum();
+            implicit_pen += lambdas[j] * (term1 + term2);
+        }
+
+        let dp_drho = drss_drho + explicit_pen + implicit_pen;
+        let penalty_quotient_deriv = dp_drho * inv_phi - (p_value / phi_sq) * dphi_drho;
+        let log_phi_deriv = n_minus_edf * dphi_drho * inv_phi;
+
         gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
     }
 
