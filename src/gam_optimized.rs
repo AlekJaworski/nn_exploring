@@ -6,7 +6,7 @@ use crate::{
     Result, GAMError,
     gam::{GAM, SmoothTerm},
     pirls::fit_pirls,
-    smooth::{SmoothingParameter, OptimizationMethod},
+    smooth::{SmoothingParameter, OptimizationMethod, ScaleParameterMethod},
 };
 
 /// Helper struct to cache computations during GAM fitting
@@ -172,6 +172,22 @@ impl GAM {
         max_inner_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
+        self.fit_optimized_with_scale_method(
+            x, y, opt_method, max_outer_iter, max_inner_iter, tolerance,
+            ScaleParameterMethod::Rank
+        )
+    }
+
+    pub fn fit_optimized_with_scale_method(
+        &mut self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        opt_method: OptimizationMethod,
+        max_outer_iter: usize,
+        max_inner_iter: usize,
+        tolerance: f64,
+        scale_method: ScaleParameterMethod,
+    ) -> Result<()> {
         let n = y.len();
 
         if x.nrows() != n {
@@ -194,7 +210,7 @@ impl GAM {
         let mut smoothing_params = SmoothingParameter::new(
             self.smooth_terms.len(),
             opt_method
-        );
+        ).with_scale_method(scale_method);
 
         // Smart initialization for lambda
         if !cache.penalties.is_empty() {
