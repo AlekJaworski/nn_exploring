@@ -36,7 +36,7 @@ jobs:
             echo "=== Installing build dependencies ==="
             if command -v yum &> /dev/null; then
               echo "Using yum package manager"
-              yum install -y openblas-devel openssl-devel pkg-config
+              yum install -y openblas-devel openssl-devel pkgconfig
               yum list installed | grep -E "(openblas|openssl)"
             else
               echo "Using apt package manager"

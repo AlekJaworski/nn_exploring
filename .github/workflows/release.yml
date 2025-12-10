@@ -28,7 +28,7 @@ jobs:
           manylinux: auto
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y openblas-devel openssl-devel pkg-config
+              yum install -y openblas-devel openssl-devel pkgconfig
             else
               apt-get update && apt-get install -y libopenblas-dev libssl-dev pkg-config
             fi
