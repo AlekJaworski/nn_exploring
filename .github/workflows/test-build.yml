@@ -25,14 +25,10 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          OPENBLAS_STATIC: "1"
-          OPENBLAS_NO_DYNAMIC_ARCH: "1"
-          OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
-          OPENBLAS_FC: ${{ matrix.target == 'aarch64' && 'aarch64-unknown-linux-gnu-gfortran' || '' }}
           RUST_BACKTRACE: "1"
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas,blas-static
+          args: --release --out dist --find-interpreter --features python,blas
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
@@ -40,17 +36,16 @@ jobs:
             echo "=== Installing build dependencies ==="
             if command -v yum &> /dev/null; then
               echo "Using yum package manager"
-              yum install -y gcc-gfortran openssl-devel make cmake perl
-              yum list installed | grep -E "(gfortran|openssl|make|cmake|perl)"
+              yum install -y openblas-devel openssl-devel pkg-config
+              yum list installed | grep -E "(openblas|openssl)"
             else
               echo "Using apt package manager"
               apt-get update
-              apt-get install -y gfortran libssl-dev pkg-config make cmake perl
-              dpkg -l | grep -E "(gfortran|libssl|make|cmake|perl)"
+              apt-get install -y libopenblas-dev libssl-dev pkg-config
+              dpkg -l | grep -E "(openblas|libssl)"
             fi
             echo "=== Build tools installed ==="
-            which gfortran make cmake perl || true
-            gfortran --version || true
+            pkg-config --libs openblas || true
             echo "=== Environment variables ==="
             env | grep -E "(OPENBLAS|RUST|CARGO|TARGET)" || true
 
@@ -99,13 +94,10 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
-          OPENBLAS_STATIC: "1"
-          OPENBLAS_NO_DYNAMIC_ARCH: "1"
-          OPENBLAS_TARGET: "VORTEX"
           RUST_BACKTRACE: "1"
         with:
           target: aarch64
-          args: --release --out dist --find-interpreter --features python,blas,blas-static
+          args: --release --out dist --find-interpreter --features python,blas
           sccache: 'true'
 
       - name: Verify wheel
