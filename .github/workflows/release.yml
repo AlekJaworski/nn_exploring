@@ -27,8 +27,7 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
-          manylinux: ${{ matrix.target == 'aarch64' && '2014' || 'auto' }}
-          container: ${{ matrix.target == 'aarch64' && 'false' || '' }}
+          manylinux: ${{ matrix.target == 'aarch64' && false || 'auto' }}
           before-script-linux: |
             if command -v yum &> /dev/null; then
               yum install -y gcc-gfortran openssl-devel pkgconfig make cmake perl
