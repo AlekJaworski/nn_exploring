@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mgcv-rust"
-version = "0.1.5"
+version = "0.1.7"
 description = "Rust implementation of Generalized Additive Models with Python bindings"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -37,7 +37,6 @@ Repository = "https://github.com/AlekJaworski/nn_exploring"
 Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 
 [tool.maturin]
-# Statically link OpenBLAS (includes LAPACK) for portable, self-contained wheels
-# This works for both native and cross-compilation builds
-features = ["python", "blas", "blas-static"]
+# Use system OpenBLAS (dynamically linked) for reliable cross-platform builds
+features = ["python", "blas"]
 module-name = "mgcv_rust"
