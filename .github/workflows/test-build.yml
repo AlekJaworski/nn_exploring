@@ -28,6 +28,7 @@ jobs:
           OPENBLAS_STATIC: "1"
           OPENBLAS_NO_DYNAMIC_ARCH: "1"
           OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
+          OPENBLAS_FC: ${{ matrix.target == 'aarch64' && 'aarch64-unknown-linux-gnu-gfortran' || '' }}
           RUST_BACKTRACE: "1"
         with:
           target: ${{ matrix.target }}
@@ -82,12 +83,8 @@ jobs:
           path: dist
 
   test-macos:
-    name: Test macOS ${{ matrix.target }}
+    name: Test macOS aarch64
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
 
@@ -104,15 +101,14 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           OPENBLAS_STATIC: "1"
           OPENBLAS_NO_DYNAMIC_ARCH: "1"
-          OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'VORTEX' || 'NEHALEM' }}
+          OPENBLAS_TARGET: "VORTEX"
           RUST_BACKTRACE: "1"
         with:
-          target: ${{ matrix.target }}
+          target: aarch64
           args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
 
-      - name: Verify wheel (native only)
-        if: matrix.target == 'x86_64'
+      - name: Verify wheel
         run: |
           echo "=== Built wheels ==="
           ls -lh dist/
@@ -126,5 +122,5 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: test-wheels-macos-${{ matrix.target }}
+          name: test-wheels-macos-aarch64
           path: dist

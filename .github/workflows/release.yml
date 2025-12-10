@@ -24,6 +24,8 @@ jobs:
           OPENBLAS_STATIC: "1"
           OPENBLAS_NO_DYNAMIC_ARCH: "1"
           OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'ARMV8' || 'GENERIC' }}
+          # For aarch64, set gfortran to use the cross-compiler
+          OPENBLAS_FC: ${{ matrix.target == 'aarch64' && 'aarch64-unknown-linux-gnu-gfortran' || '' }}
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features python,blas,blas-static
@@ -44,9 +46,6 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
 
@@ -59,16 +58,16 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           OPENBLAS_STATIC: "1"
           OPENBLAS_NO_DYNAMIC_ARCH: "1"
-          OPENBLAS_TARGET: ${{ matrix.target == 'aarch64' && 'VORTEX' || 'NEHALEM' }}
+          OPENBLAS_TARGET: "VORTEX"
         with:
-          target: ${{ matrix.target }}
+          target: aarch64
           args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-macos-aarch64
           path: dist
 
   sdist:
