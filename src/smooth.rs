@@ -47,7 +47,7 @@ impl SmoothingParameter {
             method,
             reml_algorithm: REMLAlgorithm::Newton,  // Default to Newton (matches bam())
             #[cfg(feature = "blas")]
-            scale_method: ScaleParameterMethod::Rank,  // Default to fast method
+            scale_method: ScaleParameterMethod::EDF,  // Default to EDF (matches mgcv)
         }
     }
 

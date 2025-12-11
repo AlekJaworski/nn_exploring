@@ -6,8 +6,10 @@ use crate::{
     Result, GAMError,
     gam::{GAM, SmoothTerm},
     pirls::fit_pirls,
-    smooth::{SmoothingParameter, OptimizationMethod, ScaleParameterMethod},
+    smooth::{SmoothingParameter, OptimizationMethod},
 };
+#[cfg(feature = "blas")]
+use crate::reml::ScaleParameterMethod;
 
 /// Helper struct to cache computations during GAM fitting
 struct FitCache {
@@ -163,6 +165,7 @@ impl GAM {
     /// - Better lambda initialization
     /// - Adaptive tolerance for early stopping
     /// - Caches X'X computation
+    #[cfg(feature = "blas")]
     pub fn fit_optimized(
         &mut self,
         x: &Array2<f64>,
@@ -174,10 +177,11 @@ impl GAM {
     ) -> Result<()> {
         self.fit_optimized_with_scale_method(
             x, y, opt_method, max_outer_iter, max_inner_iter, tolerance,
-            ScaleParameterMethod::Rank
+            crate::reml::ScaleParameterMethod::EDF
         )
     }
 
+    #[cfg(feature = "blas")]
     pub fn fit_optimized_with_scale_method(
         &mut self,
         x: &Array2<f64>,
@@ -186,7 +190,7 @@ impl GAM {
         max_outer_iter: usize,
         max_inner_iter: usize,
         tolerance: f64,
-        scale_method: ScaleParameterMethod,
+        scale_method: crate::reml::ScaleParameterMethod,
     ) -> Result<()> {
         let n = y.len();
 
@@ -210,7 +214,8 @@ impl GAM {
         let mut smoothing_params = SmoothingParameter::new(
             self.smooth_terms.len(),
             opt_method
-        ).with_scale_method(scale_method);
+        );
+        smoothing_params.scale_method = scale_method;
 
         // Smart initialization for lambda
         if !cache.penalties.is_empty() {
@@ -246,12 +251,23 @@ impl GAM {
             let reml_start = Instant::now();
             let old_lambda = smoothing_params.lambda.clone();
 
+            // Adaptive iteration count: use more iterations for larger/more complex problems
+            // For k >= n, we need more Newton iterations to converge
+            let num_basis: usize = cache.design_matrix.ncols();
+            let newton_max_iter = if num_basis >= n {
+                50  // More iterations for overparameterized case
+            } else if num_basis >= n / 2 {
+                30  // Moderate iterations for k close to n
+            } else {
+                10  // Standard for well-posed problems
+            };
+            
             smoothing_params.optimize(
                 y,
                 &cache.design_matrix,
                 &weights,
                 &cache.penalties,
-                10,  // max iterations for lambda optimization (same as non-optimized version)
+                newton_max_iter,
                 tolerance,
             )?;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;

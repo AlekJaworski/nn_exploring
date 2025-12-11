@@ -234,19 +234,25 @@ pub fn reml_criterion(
     // The correct REML criterion (matching mgcv's fast-REML.r implementation):
     // REML = ((RSS + λβ'Sβ)/φ + (n-rank(S))*log(2π φ) + log|X'WX + λS| - rank(S)*log(λ) - log|S_+|) / 2
     //
-    // For now, we ignore the constant log|S_+| term (pseudo-determinant of S)
-    // since it doesn't affect optimization over λ
+    // Now we include the pseudo-determinant term log|S_+|
     let log_lambda_term = if lambda > 1e-10 && rank_s > 0 {
         (rank_s as f64) * lambda.ln()
     } else {
         0.0
     };
 
+    // Compute pseudo-determinant of penalty matrix
+    #[cfg(feature = "blas")]
+    let log_pseudo_det = pseudo_determinant(penalty)?;
+    #[cfg(not(feature = "blas"))]
+    let log_pseudo_det = 0.0; // Fallback when BLAS not available
+
     let pi = std::f64::consts::PI;
     let reml = (rss_bsb / phi
                 + ((n - rank_s) as f64) * (2.0 * pi * phi).ln()
                 + log_det_a
-                - log_lambda_term) / 2.0;
+                - log_lambda_term
+                - log_pseudo_det) / 2.0;
 
     Ok(reml)
 }
@@ -329,7 +335,7 @@ pub fn gcv_criterion(
 /// Compute the REML criterion for multiple smoothing parameters
 ///
 /// The REML criterion with multiple penalties is:
-/// REML = n*log(RSS/n) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)
+/// REML = n*log(RSS/n) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ) - Σlog|Sᵢ_+|
 ///
 /// Where:
 /// - RSS: residual sum of squares
@@ -337,6 +343,11 @@ pub fn gcv_criterion(
 /// - W: weight matrix (from IRLS)
 /// - λᵢ: smoothing parameters
 /// - Sᵢ: penalty matrices
+/// - log|Sᵢ_+|: pseudo-determinant of penalty matrix Sᵢ
+///
+/// # Scale Parameter Method
+/// This function uses EDF (Effective Degrees of Freedom) for the scale parameter φ
+/// when BLAS is available, matching mgcv's implementation. Otherwise falls back to rank.
 pub fn reml_criterion_multi(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -413,9 +424,11 @@ pub fn reml_criterion_multi(
     a_reg.diag_mut().iter_mut().for_each(|x| *x += ridge);
     let log_det_a = determinant(&a_reg)?.ln();
 
-    // Compute total rank and -Σrank(Sᵢ)·log(λᵢ)
+    // Compute total rank and -Σrank(Sᵢ)·log(λᵢ) and -Σlog|Sᵢ_+|
     let mut total_rank = 0;
     let mut log_lambda_sum = 0.0;
+    let mut log_pseudo_det_sum = 0.0;
+
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         if *lambda > 1e-10 {
             let rank_s = estimate_rank(penalty);
@@ -424,20 +437,99 @@ pub fn reml_criterion_multi(
                 log_lambda_sum += (rank_s as f64) * lambda.ln();
             }
         }
+
+        // Add pseudo-determinant term
+        #[cfg(feature = "blas")]
+        {
+            log_pseudo_det_sum += pseudo_determinant(penalty)?;
+        }
+        #[cfg(not(feature = "blas"))]
+        {
+            // Fallback when BLAS not available - use rank approximation
+            let rank_s = estimate_rank(penalty);
+            log_pseudo_det_sum += (rank_s as f64) * 0.0; // No contribution
+        }
     }
 
-    // Compute scale parameter: φ = RSS / (n - Σrank(Sᵢ))
-    let phi = rss / (n - total_rank) as f64;
+    // Compute scale parameter using EDF (matching mgcv)
+    #[cfg(feature = "blas")]
+    let (phi, n_minus_edf) = {
+        // Compute EDF = tr(A^{-1}·X'WX) using trace-Frobenius trick
+        let a_inv = inverse(&a_reg)?;
+        let edf = (xtwx.dot(&a_inv)).diag().sum();
+        let n_minus_edf = n as f64 - edf;
+        let phi = rss / n_minus_edf.max(1.0); // Guard against negative/zero denominator
+        (phi, n_minus_edf)
+    };
+    #[cfg(not(feature = "blas"))]
+    let (phi, n_minus_edf) = {
+        // Fallback to rank-based when BLAS not available
+        let phi = rss / (n - total_rank) as f64;
+        let n_minus_edf = (n - total_rank) as f64;
+        (phi, n_minus_edf)
+    };
 
-    // The correct REML criterion:
-    // REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-Σrank(Sᵢ))*log(2πφ) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ)) / 2
+    // The correct REML criterion (matching mgcv):
+    // REML = ((RSS + Σλᵢ·β'·Sᵢ·β)/φ + (n-EDF)*log(2πφ) + log|X'WX + Σλᵢ·Sᵢ| - Σrank(Sᵢ)·log(λᵢ) - Σlog|Sᵢ_+|) / 2
     let pi = std::f64::consts::PI;
     let reml = (rss_bsb / phi
-                + ((n - total_rank) as f64) * (2.0 * pi * phi).ln()
+                + n_minus_edf * (2.0 * pi * phi).ln()
                 + log_det_a
-                - log_lambda_sum) / 2.0;
+                - log_lambda_sum
+                - log_pseudo_det_sum) / 2.0;
 
     Ok(reml)
+}
+
+/// Compute the pseudo-determinant of a penalty matrix
+///
+/// The pseudo-determinant is log|S_+| = Σ log(λ_i) for all positive eigenvalues λ_i > threshold
+/// This is used in the REML criterion to match mgcv's implementation.
+///
+/// # Arguments
+/// * `penalty` - Symmetric positive semi-definite penalty matrix
+///
+/// # Returns
+/// log|S_+| = sum of log(positive eigenvalues)
+#[cfg(feature = "blas")]
+pub fn pseudo_determinant(penalty: &Array2<f64>) -> Result<f64> {
+    use ndarray_linalg::Eigh;
+
+    let n = penalty.nrows();
+    if n != penalty.ncols() {
+        return Err(GAMError::InvalidParameter(
+            "Penalty matrix must be square".to_string()
+        ));
+    }
+
+    // Compute eigenvalue decomposition: S = Q Λ Q'
+    let (eigenvalues, _) = penalty.eigh(ndarray_linalg::UPLO::Upper)
+        .map_err(|e| GAMError::InvalidParameter(format!("Eigenvalue decomposition failed: {:?}", e)))?;
+
+    // Threshold for considering eigenvalue as zero
+    let max_eigenvalue = eigenvalues.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let threshold = 1e-10 * max_eigenvalue.max(1.0);
+
+    // Sum log of positive eigenvalues
+    let mut log_det = 0.0;
+    let mut positive_count = 0;
+
+    for &eigenval in eigenvalues.iter() {
+        if eigenval > threshold {
+            log_det += eigenval.ln();
+            positive_count += 1;
+        }
+    }
+
+    if std::env::var("MGCV_REML_DEBUG").is_ok() {
+        eprintln!("[PSEUDO_DET_DEBUG] Matrix size: {}×{}", n, n);
+        eprintln!("[PSEUDO_DET_DEBUG] Max eigenvalue: {:.6e}", max_eigenvalue);
+        eprintln!("[PSEUDO_DET_DEBUG] Threshold: {:.6e}", threshold);
+        eprintln!("[PSEUDO_DET_DEBUG] Positive eigenvalues: {}", positive_count);
+        eprintln!("[PSEUDO_DET_DEBUG] log|S_+| = {:.6e}", log_det);
+    }
+
+    Ok(log_det)
 }
 
 /// Compute square root of a penalty matrix using eigenvalue decomposition
