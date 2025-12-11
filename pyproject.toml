@@ -37,6 +37,6 @@ Repository = "https://github.com/AlekJaworski/nn_exploring"
 Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 
 [tool.maturin]
-# Statically link OpenBLAS for self-contained wheels
-features = ["python", "blas", "blas-static"]
+# Full features with BLAS for complete functionality
+features = ["python", "blas"]
 module-name = "mgcv_rust"

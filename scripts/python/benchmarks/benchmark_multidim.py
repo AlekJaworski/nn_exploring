@@ -64,7 +64,7 @@ def benchmark_rust_multidim(X, y, k, n_runs=3, verbose=False):
         gam = mgcv_rust.GAM()
 
         start = time.perf_counter()
-        result = gam.fit_auto(X, y, k=[k] * n_dims, method='REML', bs='cr')
+        result = gam.fit_auto(X, y, k=[k] * n_dims, method='REML', bs='cr', max_iter=100)
         end = time.perf_counter()
 
         elapsed = end - start
