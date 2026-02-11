@@ -1,7 +1,7 @@
 //! Basis functions for smoothing splines
 
-use ndarray::{Array1, Array2};
 use crate::Result;
+use ndarray::{Array1, Array2};
 
 /// Trait for basis function implementations
 /// Note: Send + Sync is required for PyO3 thread safety with pyclass (PyO3 0.27+)
@@ -44,7 +44,12 @@ impl CubicSpline {
     }
 
     /// Create a cubic spline with evenly spaced knots
-    pub fn with_num_knots(min: f64, max: f64, num_knots: usize, boundary: BoundaryCondition) -> Self {
+    pub fn with_num_knots(
+        min: f64,
+        max: f64,
+        num_knots: usize,
+        boundary: BoundaryCondition,
+    ) -> Self {
         let knots = Array1::linspace(min, max, num_knots);
         Self::new(knots, boundary)
     }
@@ -54,7 +59,11 @@ impl CubicSpline {
     ///
     /// For B-splines with repeated boundary knots, this places interior knots
     /// strictly between the data boundaries to avoid numerical issues.
-    pub fn with_quantile_knots(x_data: &Array1<f64>, num_knots: usize, boundary: BoundaryCondition) -> Self {
+    pub fn with_quantile_knots(
+        x_data: &Array1<f64>,
+        num_knots: usize,
+        boundary: BoundaryCondition,
+    ) -> Self {
         // Sort data to compute quantiles
         let mut sorted_x = x_data.to_vec();
         sorted_x.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -125,16 +134,14 @@ impl CubicSpline {
             if i + k < t.len() {
                 let denom1 = t[i + k] - t[i];
                 if denom1.abs() > 1e-10 {
-                    result += (x - t[i]) / denom1
-                        * self.b_spline_basis(x, i, k - 1, t);
+                    result += (x - t[i]) / denom1 * self.b_spline_basis(x, i, k - 1, t);
                 }
             }
 
             if i + k + 1 < t.len() {
                 let denom2 = t[i + k + 1] - t[i + 1];
                 if denom2.abs() > 1e-10 {
-                    result += (t[i + k + 1] - x) / denom2
-                        * self.b_spline_basis(x, i + 1, k - 1, t);
+                    result += (t[i + k + 1] - x) / denom2 * self.b_spline_basis(x, i + 1, k - 1, t);
                 }
             }
 
@@ -152,16 +159,14 @@ impl CubicSpline {
             if i + k < t.len() {
                 let denom1 = t[i + k] - t[i];
                 if denom1.abs() > 1e-10 {
-                    result += (k as f64) / denom1
-                        * self.b_spline_basis(x, i, k - 1, t);
+                    result += (k as f64) / denom1 * self.b_spline_basis(x, i, k - 1, t);
                 }
             }
 
             if i + k + 1 < t.len() {
                 let denom2 = t[i + k + 1] - t[i + 1];
                 if denom2.abs() > 1e-10 {
-                    result -= (k as f64) / denom2
-                        * self.b_spline_basis(x, i + 1, k - 1, t);
+                    result -= (k as f64) / denom2 * self.b_spline_basis(x, i + 1, k - 1, t);
                 }
             }
 
@@ -195,7 +200,7 @@ impl BasisFunction for CubicSpline {
         let x_max = self.knots[knots_len - 1];
 
         // Evaluate basis functions with linear extrapolation (like mgcv)
-        let eps = 1e-10;  // Small tolerance for boundary detection
+        let eps = 1e-10; // Small tolerance for boundary detection
 
         // Evaluate slightly inside boundaries to avoid repeated knot issues
         // Both boundaries handled symmetrically
@@ -207,16 +212,20 @@ impl BasisFunction for CubicSpline {
                 // Linear extrapolation below range
                 // b_j(x) ≈ b_j(x_boundary_left) + b_j'(x_boundary_left) * (x - x_boundary_left)
                 for j in 0..self.num_basis {
-                    let basis_val = self.b_spline_basis(x_boundary_left, j, degree, &extended_knots);
-                    let basis_deriv = self.b_spline_derivative(x_boundary_left, j, degree, &extended_knots);
+                    let basis_val =
+                        self.b_spline_basis(x_boundary_left, j, degree, &extended_knots);
+                    let basis_deriv =
+                        self.b_spline_derivative(x_boundary_left, j, degree, &extended_knots);
                     design_matrix[[i, j]] = basis_val + basis_deriv * (xi - x_boundary_left);
                 }
             } else if xi > x_max + eps {
                 // Linear extrapolation above range
                 // b_j(x) ≈ b_j(x_boundary_right) + b_j'(x_boundary_right) * (x - x_boundary_right)
                 for j in 0..self.num_basis {
-                    let basis_val = self.b_spline_basis(x_boundary_right, j, degree, &extended_knots);
-                    let basis_deriv = self.b_spline_derivative(x_boundary_right, j, degree, &extended_knots);
+                    let basis_val =
+                        self.b_spline_basis(x_boundary_right, j, degree, &extended_knots);
+                    let basis_deriv =
+                        self.b_spline_derivative(x_boundary_right, j, degree, &extended_knots);
                     design_matrix[[i, j]] = basis_val + basis_deriv * (xi - x_boundary_right);
                 }
             } else {
@@ -264,10 +273,7 @@ impl CubicRegressionSpline {
     /// Create a new cubic regression spline basis with specified knots
     pub fn new(knots: Array1<f64>) -> Self {
         let num_basis = knots.len();
-        Self {
-            knots,
-            num_basis,
-        }
+        Self { knots, num_basis }
     }
 
     /// Create cubic regression spline with evenly spaced knots
@@ -341,32 +347,6 @@ impl CubicRegressionSpline {
     fn evaluate_natural_spline(&self, x: f64, values: &[f64]) -> f64 {
         let n = self.knots.len() - 1;
 
-        // Find the interval
-        let mut interval = 0;
-        for i in 0..n {
-            if x >= self.knots[i] && x <= self.knots[i + 1] {
-                interval = i;
-                break;
-            }
-            if x > self.knots[i + 1] && i == n - 1 {
-                interval = n - 1;
-                break;
-            }
-        }
-
-        // Handle extrapolation (linear continuation)
-        if x < self.knots[0] {
-            // Linear extrapolation at left boundary
-            let h = self.knots[1] - self.knots[0];
-            let slope = (values[1] - values[0]) / h;
-            return values[0] + slope * (x - self.knots[0]);
-        } else if x > self.knots[n] {
-            // Linear extrapolation at right boundary
-            let h = self.knots[n] - self.knots[n - 1];
-            let slope = (values[n] - values[n - 1]) / h;
-            return values[n] + slope * (x - self.knots[n]);
-        }
-
         // Compute h values (knot spacings)
         let mut h = vec![0.0; n];
         for i in 0..n {
@@ -383,12 +363,39 @@ impl CubicRegressionSpline {
         // Solve for second derivatives
         let c = self.solve_tridiagonal(&h, &alpha);
 
-        // Compute b and d coefficients
+        // Compute b and d coefficients for each interval
         let mut b = vec![0.0; n];
         let mut d = vec![0.0; n];
         for i in 0..n {
             b[i] = (values[i + 1] - values[i]) / h[i] - h[i] * (c[i + 1] + 2.0 * c[i]) / 3.0;
             d[i] = (c[i + 1] - c[i]) / (3.0 * h[i]);
+        }
+
+        // Handle extrapolation using true spline derivative at boundaries
+        if x < self.knots[0] {
+            // Linear extrapolation at left boundary
+            // True derivative at x_0: f'(x_0) = b[0] (since dx=0 at the knot)
+            let slope = b[0];
+            return values[0] + slope * (x - self.knots[0]);
+        } else if x > self.knots[n] {
+            // Linear extrapolation at right boundary
+            // True derivative at x_n: f'(x_n) = b[n-1] + 2*c[n-1]*h + 3*d[n-1]*h^2
+            let hn = h[n - 1];
+            let slope = b[n - 1] + 2.0 * c[n - 1] * hn + 3.0 * d[n - 1] * hn * hn;
+            return values[n] + slope * (x - self.knots[n]);
+        }
+
+        // Find the interval for interior points
+        let mut interval = 0;
+        for i in 0..n {
+            if x >= self.knots[i] && x <= self.knots[i + 1] {
+                interval = i;
+                break;
+            }
+            if x > self.knots[i + 1] && i == n - 1 {
+                interval = n - 1;
+                break;
+            }
         }
 
         // Evaluate the spline at x
@@ -480,7 +487,7 @@ impl BasisFunction for ThinPlateSpline {
         // For 1D case
         if self.dim != 1 {
             return Err(crate::GAMError::InvalidParameter(
-                "ThinPlateSpline::evaluate currently only supports 1D".to_string()
+                "ThinPlateSpline::evaluate currently only supports 1D".to_string(),
             ));
         }
 
