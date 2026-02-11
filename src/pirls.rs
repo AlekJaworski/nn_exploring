@@ -1,8 +1,8 @@
 //! PiRLS (Penalized Iteratively Reweighted Least Squares) algorithm for GAM fitting
 
-use ndarray::{Array1, Array2};
-use crate::{Result, GAMError};
 use crate::linalg::solve;
+use crate::{GAMError, Result};
+use ndarray::{Array1, Array2};
 
 /// Family and link function for GLM
 #[derive(Debug, Clone, Copy)]
@@ -42,17 +42,17 @@ impl Family {
                 // Clamp eta to avoid overflow in exp
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
-            },
+            }
             Family::Poisson => {
                 // Clamp to avoid overflow
                 let eta_safe = eta.min(20.0);
                 eta_safe.exp()
-            },
+            }
             Family::Gamma => {
                 // Ensure eta is not too close to zero
                 let eta_safe = if eta.abs() < 1e-10 { 1e-10 } else { eta };
                 1.0 / eta_safe
-            },
+            }
         }
     }
 
@@ -63,7 +63,7 @@ impl Family {
             Family::Binomial => {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
-            },
+            }
             Family::Poisson => eta.exp(),
             Family::Gamma => -1.0 / (eta * eta),
         }
@@ -104,14 +104,16 @@ pub fn fit_pirls(
     let p = x.ncols();
 
     if x.nrows() != n {
-        return Err(GAMError::DimensionMismatch(
-            format!("X has {} rows but y has {} elements", x.nrows(), n)
-        ));
+        return Err(GAMError::DimensionMismatch(format!(
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            n
+        )));
     }
 
     if lambda.len() != penalties.len() {
         return Err(GAMError::DimensionMismatch(
-            "Number of lambdas must match number of penalty matrices".to_string()
+            "Number of lambdas must match number of penalty matrices".to_string(),
         ));
     }
 
@@ -122,8 +124,8 @@ pub fn fit_pirls(
     // Initialize eta based on family
     for i in 0..n {
         let safe_y = match family {
-            Family::Binomial => y[i].max(0.01).min(0.99),  // Avoid 0 and 1
-            Family::Poisson | Family::Gamma => y[i].max(0.1),  // Avoid 0
+            Family::Binomial => y[i].max(0.01).min(0.99), // Avoid 0 and 1
+            Family::Poisson | Family::Gamma => y[i].max(0.1), // Avoid 0
             Family::Gaussian => y[i],
         };
         eta[i] = family.link(safe_y);
@@ -136,9 +138,7 @@ pub fn fit_pirls(
         iter = iteration + 1;
 
         // Compute fitted values μ = g^(-1)(η)
-        let mu: Array1<f64> = eta.iter()
-            .map(|&e| family.inverse_link(e))
-            .collect();
+        let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
 
         // Compute working response z = η + (y - μ) / g'(μ)
         let mut z = Array1::zeros(n);
@@ -210,7 +210,9 @@ pub fn fit_pirls(
         eta = x.dot(&beta);
 
         // Check convergence
-        let max_change = beta.iter().zip(beta_old.iter())
+        let max_change = beta
+            .iter()
+            .zip(beta_old.iter())
             .map(|(b, b_old)| (b - b_old).abs())
             .fold(0.0f64, f64::max);
 
@@ -221,15 +223,14 @@ pub fn fit_pirls(
     }
 
     // Compute final fitted values
-    let fitted_values: Array1<f64> = eta.iter()
-        .map(|&e| family.inverse_link(e))
-        .collect();
+    let fitted_values: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
 
     // Compute deviance
     let deviance = compute_deviance(y, &fitted_values, family);
 
     // Compute final weights
-    let weights: Array1<f64> = eta.iter()
+    let weights: Array1<f64> = eta
+        .iter()
         .map(|&e| {
             let mu = family.inverse_link(e);
             let dmu_deta = family.d_inverse_link(e);
@@ -265,17 +266,15 @@ fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f64 {
                 } else {
                     0.0
                 }
-            },
+            }
             Family::Poisson => {
                 if yi > 0.0 {
                     2.0 * (yi * (yi / mui).ln() - (yi - mui))
                 } else {
                     2.0 * mui
                 }
-            },
-            Family::Gamma => {
-                2.0 * ((yi - mui) / mui - (yi / mui).ln())
-            },
+            }
+            Family::Gamma => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
         };
 
         deviance += dev_i;
@@ -305,28 +304,20 @@ mod tests {
         let n = 20;
         let p = 5;
 
-        let x = Array2::from_shape_fn((n, p), |(i, j)| {
-            ((i as f64) * 0.1).powi(j as i32)
-        });
+        let x = Array2::from_shape_fn((n, p), |(i, j)| ((i as f64) * 0.1).powi(j as i32));
 
-        let y: Array1<f64> = (0..n).map(|i| {
-            let xi = i as f64 * 0.1;
-            xi + xi.powi(2) + 0.1 * (i as f64).sin()
-        }).collect();
+        let y: Array1<f64> = (0..n)
+            .map(|i| {
+                let xi = i as f64 * 0.1;
+                xi + xi.powi(2) + 0.1 * (i as f64).sin()
+            })
+            .collect();
 
         let penalty = Array2::eye(p);
         let lambda = vec![0.01];
         let penalties = vec![penalty];
 
-        let result = fit_pirls(
-            &y,
-            &x,
-            &lambda,
-            &penalties,
-            Family::Gaussian,
-            100,
-            1e-6
-        );
+        let result = fit_pirls(&y, &x, &lambda, &penalties, Family::Gaussian, 100, 1e-6);
 
         assert!(result.is_ok());
         let result = result.unwrap();

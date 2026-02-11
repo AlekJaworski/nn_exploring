@@ -1,10 +1,10 @@
 //! Basic linear algebra operations for GAM fitting
 
-use ndarray::{Array1, Array2, s};
-use crate::{Result, GAMError};
+use crate::{GAMError, Result};
+use ndarray::{s, Array1, Array2};
 
 #[cfg(feature = "blas")]
-use ndarray_linalg::{Solve, Determinant, Inverse};
+use ndarray_linalg::{Determinant, Inverse, Solve};
 
 /// Solve linear system Ax = b
 /// Uses BLAS/LAPACK when available for large matrices (n >= 1000)
@@ -35,7 +35,7 @@ fn solve_blas(a: Array2<f64>, b: Array1<f64>) -> Result<Array1<f64>> {
 
     if a.ncols() != n || b.len() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix must be square and match RHS".to_string()
+            "Matrix must be square and match RHS".to_string(),
         ));
     }
 
@@ -43,7 +43,7 @@ fn solve_blas(a: Array2<f64>, b: Array1<f64>) -> Result<Array1<f64>> {
     // In ndarray-linalg 0.17, solve() works directly with 1D arrays
     match Solve::solve(&a, &b) {
         Ok(x) => Ok(x),
-        Err(_) => Err(GAMError::SingularMatrix)
+        Err(_) => Err(GAMError::SingularMatrix),
     }
 }
 
@@ -53,7 +53,7 @@ fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>>
 
     if a.ncols() != n || b.len() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix must be square and match RHS".to_string()
+            "Matrix must be square and match RHS".to_string(),
         ));
     }
 
@@ -91,7 +91,7 @@ fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>>
 
         // Eliminate (optimized but safe)
         let pivot = a[[k, k]];
-        let pivot_row = a.row(k).to_owned();  // Cache pivot row
+        let pivot_row = a.row(k).to_owned(); // Cache pivot row
 
         for i in (k + 1)..n {
             let factor = a[[i, k]] / pivot;
@@ -141,12 +141,11 @@ fn determinant_blas(a: &Array2<f64>) -> Result<f64> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix must be square".to_string()
+            "Matrix must be square".to_string(),
         ));
     }
 
-    Determinant::det(&a.to_owned())
-        .map_err(|_| GAMError::SingularMatrix)
+    Determinant::det(&a.to_owned()).map_err(|_| GAMError::SingularMatrix)
 }
 
 // Always available for hybrid BLAS approach
@@ -154,7 +153,7 @@ fn determinant_lu(a: &Array2<f64>) -> Result<f64> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix must be square".to_string()
+            "Matrix must be square".to_string(),
         ));
     }
 
@@ -239,12 +238,11 @@ fn inverse_blas(a: &Array2<f64>) -> Result<Array2<f64>> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix must be square".to_string()
+            "Matrix must be square".to_string(),
         ));
     }
 
-    Inverse::inv(&a.to_owned())
-        .map_err(|_| GAMError::SingularMatrix)
+    Inverse::inv(&a.to_owned()).map_err(|_| GAMError::SingularMatrix)
 }
 
 // Always available for hybrid BLAS approach
@@ -252,7 +250,7 @@ fn inverse_gauss_jordan(a: &Array2<f64>) -> Result<Array2<f64>> {
     let n = a.nrows();
     if a.ncols() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix must be square".to_string()
+            "Matrix must be square".to_string(),
         ));
     }
 
@@ -356,9 +354,9 @@ pub fn sum_to_zero_constraint_matrix(k: usize) -> Result<Array2<f64>> {
 
         // Subtract projection onto [1,1,...,1]/sqrt(k)
         // projection = (v · [1/sqrt(k),...,1/sqrt(k)]) * [1/sqrt(k),...,1/sqrt(k)]
-        let dot_with_ones = v.sum() / sqrt_k;  // v · [1/sqrt(k),...]
+        let dot_with_ones = v.sum() / sqrt_k; // v · [1/sqrt(k),...]
         for i in 0..k {
-            v[i] -= dot_with_ones / sqrt_k;  // subtract projection
+            v[i] -= dot_with_ones / sqrt_k; // subtract projection
         }
 
         // Orthogonalize against previously computed columns
@@ -397,7 +395,7 @@ pub fn sum_to_zero_constraint_matrix(k: usize) -> Result<Array2<f64>> {
 /// * Constrained penalty matrix (k-1 x k-1)
 pub fn apply_constraint_to_penalty(
     penalty: &Array2<f64>,
-    q_matrix: &Array2<f64>
+    q_matrix: &Array2<f64>,
 ) -> Result<Array2<f64>> {
     // S_constrained = Q^T * S * Q
     let s_q = penalty.dot(q_matrix);
@@ -413,11 +411,8 @@ mod tests {
 
     #[test]
     fn test_solve() {
-        let a = Array2::from_shape_vec((3, 3), vec![
-            2.0, 1.0, 1.0,
-            1.0, 3.0, 2.0,
-            1.0, 2.0, 2.0,
-        ]).unwrap();
+        let a = Array2::from_shape_vec((3, 3), vec![2.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 2.0, 2.0])
+            .unwrap();
 
         let b = Array1::from_vec(vec![4.0, 6.0, 5.0]);
 
@@ -432,10 +427,7 @@ mod tests {
 
     #[test]
     fn test_determinant() {
-        let a = Array2::from_shape_vec((2, 2), vec![
-            1.0, 2.0,
-            3.0, 4.0,
-        ]).unwrap();
+        let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
 
         let det = determinant(&a).unwrap();
         assert_abs_diff_eq!(det, -2.0, epsilon = 1e-10);
@@ -443,10 +435,7 @@ mod tests {
 
     #[test]
     fn test_inverse() {
-        let a = Array2::from_shape_vec((2, 2), vec![
-            4.0, 7.0,
-            2.0, 6.0,
-        ]).unwrap();
+        let a = Array2::from_shape_vec((2, 2), vec![4.0, 7.0, 2.0, 6.0]).unwrap();
 
         let inv = inverse(&a).unwrap();
         let product = a.dot(&inv);

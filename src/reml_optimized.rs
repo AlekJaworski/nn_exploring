@@ -3,11 +3,11 @@
 //! This module provides optimized versions of REML gradient/Hessian calculations
 //! that cache expensive operations like QR decompositions.
 
-use ndarray::{Array1, Array2};
-use crate::{Result, GAMError};
-#[cfg(feature = "blas")]
-use ndarray_linalg::{QR, SolveTriangular, UPLO, Diag};
 use crate::linalg::solve;
+use crate::{GAMError, Result};
+use ndarray::{Array1, Array2};
+#[cfg(feature = "blas")]
+use ndarray_linalg::{Diag, SolveTriangular, QR, UPLO};
 
 /// Cached QR factorization and related matrices for REML optimization
 #[cfg(feature = "blas")]
@@ -81,9 +81,7 @@ impl REMLCache {
         }
 
         // Get penalty ranks
-        let penalty_ranks: Vec<usize> = sqrt_penalties.iter()
-            .map(|sp| sp.ncols())
-            .collect();
+        let penalty_ranks: Vec<usize> = sqrt_penalties.iter().map(|sp| sp.ncols()).collect();
         let total_rank: usize = penalty_ranks.iter().sum();
 
         // Build augmented matrix for QR
@@ -125,7 +123,8 @@ impl REMLCache {
         }
 
         // QR decomposition
-        let (_, r) = z.qr()
+        let (_, r) = z
+            .qr()
             .map_err(|e| GAMError::InvalidParameter(format!("QR decomposition failed: {:?}", e)))?;
 
         // Extract upper triangular part
@@ -200,7 +199,10 @@ impl REMLCache {
         let mut penalty_sum = 0.0;
         for j in 0..m {
             let s_j_beta = penalties[j].dot(&self.beta);
-            let beta_s_j_beta: f64 = self.beta.iter().zip(s_j_beta.iter())
+            let beta_s_j_beta: f64 = self
+                .beta
+                .iter()
+                .zip(s_j_beta.iter())
                 .map(|(bi, sbi)| bi * sbi)
                 .sum();
             penalty_sum += lambdas[j] * beta_s_j_beta;
@@ -219,8 +221,12 @@ impl REMLCache {
             // Term 1: tr(A^{-1}·λᵢ·Sᵢ) using cached R
             let rank = sqrt_penalty.ncols();
 
-            let x_batch = self.r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
-                .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+            let x_batch = self
+                .r_t
+                .solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+                .map_err(|e| {
+                    GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e))
+                })?;
 
             let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
             let trace = lambda_i * trace_term;
@@ -232,23 +238,38 @@ impl REMLCache {
             let s_i_beta = penalty_i.dot(&self.beta);
             let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
 
-            let y = self.r_t.solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
-                .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+            let y = self
+                .r_t
+                .solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+                .map_err(|e| {
+                    GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e))
+                })?;
 
-            let dbeta_drho = self.r_upper.solve_triangular(UPLO::Upper, Diag::NonUnit, &y)
-                .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            let dbeta_drho = self
+                .r_upper
+                .solve_triangular(UPLO::Upper, Diag::NonUnit, &y)
+                .map_err(|e| {
+                    GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e))
+                })?
                 .mapv(|x| -x);
 
             // Compute ∂RSS/∂ρᵢ
             let x_dbeta = x.dot(&dbeta_drho);
-            let drss_drho: f64 = -2.0 * self.residuals.iter().zip(x_dbeta.iter())
-                .map(|(ri, xdbi)| ri * xdbi)
-                .sum::<f64>();
+            let drss_drho: f64 = -2.0
+                * self
+                    .residuals
+                    .iter()
+                    .zip(x_dbeta.iter())
+                    .map(|(ri, xdbi)| ri * xdbi)
+                    .sum::<f64>();
 
             let dphi_drho = drss_drho / n_minus_r;
 
             // Compute ∂P/∂ρᵢ
-            let beta_s_i_beta: f64 = self.beta.iter().zip(s_i_beta.iter())
+            let beta_s_i_beta: f64 = self
+                .beta
+                .iter()
+                .zip(s_i_beta.iter())
                 .map(|(bi, sbi)| bi * sbi)
                 .sum();
             let explicit_pen = lambda_i * beta_s_i_beta;
@@ -257,10 +278,15 @@ impl REMLCache {
             for j in 0..m {
                 let s_j_beta = penalties[j].dot(&self.beta);
                 let s_j_dbeta = penalties[j].dot(&dbeta_drho);
-                let term1: f64 = s_j_beta.iter().zip(dbeta_drho.iter())
+                let term1: f64 = s_j_beta
+                    .iter()
+                    .zip(dbeta_drho.iter())
                     .map(|(sj, dbi)| sj * dbi)
                     .sum();
-                let term2: f64 = self.beta.iter().zip(s_j_dbeta.iter())
+                let term2: f64 = self
+                    .beta
+                    .iter()
+                    .zip(s_j_dbeta.iter())
                     .map(|(bi, sjd)| bi * sjd)
                     .sum();
                 implicit_pen += lambdas[j] * (term1 + term2);
@@ -291,7 +317,9 @@ impl REMLCache {
         penalties: &[Array2<f64>],
     ) -> Result<()> {
         // Only rebuild if lambdas changed significantly
-        let max_change = lambdas.iter().zip(&self.lambdas)
+        let max_change = lambdas
+            .iter()
+            .zip(&self.lambdas)
             .map(|(new, old)| (new / old).ln().abs())
             .fold(0.0f64, f64::max);
 

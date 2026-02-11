@@ -1,15 +1,15 @@
 //! Optimized GAM fitting with caching and improved matrix operations
 
-use ndarray::{Array1, Array2, s};
-use std::time::Instant;
-use crate::{
-    Result, GAMError,
-    gam::{GAM, SmoothTerm},
-    pirls::fit_pirls,
-    smooth::{SmoothingParameter, OptimizationMethod},
-};
 #[cfg(feature = "blas")]
 use crate::reml::ScaleParameterMethod;
+use crate::{
+    gam::{SmoothTerm, GAM},
+    pirls::fit_pirls,
+    smooth::{OptimizationMethod, SmoothingParameter},
+    GAMError, Result,
+};
+use ndarray::{s, Array1, Array2};
+use std::time::Instant;
 
 /// Helper struct to cache computations during GAM fitting
 struct FitCache {
@@ -25,10 +25,7 @@ struct FitCache {
 
 impl FitCache {
     /// Build cache from data and smooth terms
-    fn new(
-        x: &Array2<f64>,
-        smooth_terms: &[SmoothTerm],
-    ) -> Result<Self> {
+    fn new(x: &Array2<f64>, smooth_terms: &[SmoothTerm]) -> Result<Self> {
         let cache_start = Instant::now();
         let n = x.nrows();
 
@@ -45,7 +42,10 @@ impl FitCache {
         }
         let basis_time = basis_start.elapsed();
         if std::env::var("MGCV_PROFILE").is_ok() {
-            eprintln!("[PROFILE] Basis evaluation: {:.2}ms", basis_time.as_secs_f64() * 1000.0);
+            eprintln!(
+                "[PROFILE] Basis evaluation: {:.2}ms",
+                basis_time.as_secs_f64() * 1000.0
+            );
         }
 
         // Build full design matrix using efficient slicing (not loops!)
@@ -55,7 +55,8 @@ impl FitCache {
         for design in &design_matrices {
             let num_cols = design.ncols();
             // Use ndarray slicing - much faster than element-by-element
-            full_design.slice_mut(s![.., col_offset..col_offset + num_cols])
+            full_design
+                .slice_mut(s![.., col_offset..col_offset + num_cols])
                 .assign(design);
             col_offset += num_cols;
         }
@@ -71,14 +72,19 @@ impl FitCache {
             let design = &design_matrices[idx];
 
             // Compute infinity norms (for mgcv-style normalization)
-            let inf_norm_x = design.rows()
+            let inf_norm_x = design
+                .rows()
                 .into_iter()
                 .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
             let ma_xx = inf_norm_x * inf_norm_x;
 
             let inf_norm_s = (0..num_basis)
-                .map(|i| (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
+                .map(|i| {
+                    (0..num_basis)
+                        .map(|j| smooth.penalty[[i, j]].abs())
+                        .sum::<f64>()
+                })
                 .fold(0.0f64, f64::max);
 
             let scale_factor = if inf_norm_s > 1e-10 {
@@ -104,12 +110,18 @@ impl FitCache {
         }
         let penalty_time = penalty_start.elapsed();
         if std::env::var("MGCV_PROFILE").is_ok() {
-            eprintln!("[PROFILE] Penalty computation: {:.2}ms", penalty_time.as_secs_f64() * 1000.0);
+            eprintln!(
+                "[PROFILE] Penalty computation: {:.2}ms",
+                penalty_time.as_secs_f64() * 1000.0
+            );
         }
 
         let cache_time = cache_start.elapsed();
         if std::env::var("MGCV_PROFILE").is_ok() {
-            eprintln!("[PROFILE] Total cache build: {:.2}ms", cache_time.as_secs_f64() * 1000.0);
+            eprintln!(
+                "[PROFILE] Total cache build: {:.2}ms",
+                cache_time.as_secs_f64() * 1000.0
+            );
         }
 
         Ok(FitCache {
@@ -131,11 +143,7 @@ impl FitCache {
 }
 
 /// Initialize lambda with smart heuristic based on data
-fn initialize_lambda_smart(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    penalty: &Array2<f64>,
-) -> f64 {
+fn initialize_lambda_smart(y: &Array1<f64>, x: &Array2<f64>, penalty: &Array2<f64>) -> f64 {
     // Use a heuristic based on the ratio of signal variance to penalty norm
     let y_var = {
         let y_mean = y.sum() / y.len() as f64;
@@ -176,8 +184,13 @@ impl GAM {
         tolerance: f64,
     ) -> Result<()> {
         self.fit_optimized_with_scale_method(
-            x, y, opt_method, max_outer_iter, max_inner_iter, tolerance,
-            crate::reml::ScaleParameterMethod::EDF
+            x,
+            y,
+            opt_method,
+            max_outer_iter,
+            max_inner_iter,
+            tolerance,
+            crate::reml::ScaleParameterMethod::EDF,
         )
     }
 
@@ -192,29 +205,57 @@ impl GAM {
         tolerance: f64,
         scale_method: crate::reml::ScaleParameterMethod,
     ) -> Result<()> {
+        self.fit_optimized_full(
+            x,
+            y,
+            opt_method,
+            max_outer_iter,
+            max_inner_iter,
+            tolerance,
+            scale_method,
+            None,
+        )
+    }
+
+    #[cfg(feature = "blas")]
+    pub fn fit_optimized_full(
+        &mut self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        opt_method: OptimizationMethod,
+        max_outer_iter: usize,
+        max_inner_iter: usize,
+        tolerance: f64,
+        scale_method: crate::reml::ScaleParameterMethod,
+        algorithm: Option<crate::smooth::REMLAlgorithm>,
+    ) -> Result<()> {
         let n = y.len();
 
         if x.nrows() != n {
-            return Err(GAMError::DimensionMismatch(
-                format!("X has {} rows but y has {} elements", x.nrows(), n)
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                n
+            )));
         }
 
         if x.ncols() != self.smooth_terms.len() {
-            return Err(GAMError::DimensionMismatch(
-                format!("X has {} columns but model has {} smooth terms",
-                    x.ncols(), self.smooth_terms.len())
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "X has {} columns but model has {} smooth terms",
+                x.ncols(),
+                self.smooth_terms.len()
+            )));
         }
 
         // Build cache (design matrix, penalties, normalizations)
         let mut cache = FitCache::new(x, &self.smooth_terms)?;
 
-        // Initialize smoothing parameters with better heuristic
-        let mut smoothing_params = SmoothingParameter::new(
-            self.smooth_terms.len(),
-            opt_method
-        );
+        // Initialize smoothing parameters with chosen algorithm
+        let mut smoothing_params = if let Some(algo) = algorithm {
+            SmoothingParameter::new_with_algorithm(self.smooth_terms.len(), opt_method, algo)
+        } else {
+            SmoothingParameter::new(self.smooth_terms.len(), opt_method)
+        };
         smoothing_params.scale_method = scale_method;
 
         // Smart initialization for lambda
@@ -255,32 +296,34 @@ impl GAM {
             // For k >= n, we need more Newton iterations to converge
             let num_basis: usize = cache.design_matrix.ncols();
             let newton_max_iter = if num_basis >= n {
-                50  // More iterations for overparameterized case
+                50 // More iterations for overparameterized case
             } else if num_basis >= n / 2 {
-                30  // Moderate iterations for k close to n
+                30 // Moderate iterations for k close to n
             } else {
-                10  // Standard for well-posed problems
+                10 // Standard for well-posed problems
             };
-            
-            smoothing_params.optimize(
+
+            smoothing_params.optimize_with_beta(
                 y,
                 &cache.design_matrix,
                 &weights,
                 &cache.penalties,
                 newton_max_iter,
                 tolerance,
+                Some(&pirls_result.coefficients),
             )?;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
 
             // Check convergence with adaptive tolerance
-            let max_lambda_change = old_lambda.iter()
+            let max_lambda_change = old_lambda
+                .iter()
                 .zip(smoothing_params.lambda.iter())
                 .map(|(old, new)| (old.ln() - new.ln()).abs())
                 .fold(0.0f64, f64::max);
 
             // Adaptive convergence: also check if objective is changing
             let adaptive_tol = if outer_iter > 3 {
-                tolerance * 2.0  // Relax tolerance after a few iterations
+                tolerance * 2.0 // Relax tolerance after a few iterations
             } else {
                 tolerance
             };

@@ -3,8 +3,8 @@
 //! Implements incremental QR factorization following Wood et al. (2015)
 //! "Generalized Additive Models for Large Data Sets"
 
-use ndarray::{Array1, Array2, s};
-use crate::{Result, GAMError};
+use crate::{GAMError, Result};
+use ndarray::{s, Array1, Array2};
 
 #[cfg(feature = "blas")]
 use ndarray_linalg::QR as QRDecomp;
@@ -59,14 +59,16 @@ impl IncrementalQR {
         let n_chunk = x_chunk.nrows();
 
         if x_chunk.ncols() != self.n_cols {
-            return Err(GAMError::DimensionMismatch(
-                format!("Expected {} columns, got {}", self.n_cols, x_chunk.ncols())
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "Expected {} columns, got {}",
+                self.n_cols,
+                x_chunk.ncols()
+            )));
         }
 
         if y_chunk.len() != n_chunk {
             return Err(GAMError::DimensionMismatch(
-                "y_chunk length must match x_chunk rows".to_string()
+                "y_chunk length must match x_chunk rows".to_string(),
             ));
         }
 
@@ -74,7 +76,7 @@ impl IncrementalQR {
         let (x_weighted, y_weighted) = if let Some(w) = w_chunk {
             if w.len() != n_chunk {
                 return Err(GAMError::DimensionMismatch(
-                    "w_chunk length must match x_chunk rows".to_string()
+                    "w_chunk length must match x_chunk rows".to_string(),
                 ));
             }
 
@@ -108,7 +110,8 @@ impl IncrementalQR {
         // Compute QR of stacked matrix
         #[cfg(feature = "blas")]
         {
-            let (_, r_new) = stacked.qr()
+            let (_, r_new) = stacked
+                .qr()
                 .map_err(|_| GAMError::LinAlgError("QR decomposition failed".to_string()))?;
 
             self.r = r_new;
@@ -118,7 +121,7 @@ impl IncrementalQR {
         {
             // Fallback: use custom QR (we'll implement this if needed)
             return Err(GAMError::NotImplemented(
-                "Incremental QR requires BLAS feature".to_string()
+                "Incremental QR requires BLAS feature".to_string(),
             ));
         }
 
@@ -133,7 +136,8 @@ impl IncrementalQR {
 
             // Recompute QR with y included to get Q'y
             // More efficient would be to extract Q and apply it, but this is simpler for now
-            let (q, _) = stacked.qr()
+            let (q, _) = stacked
+                .qr()
                 .map_err(|_| GAMError::LinAlgError("QR decomposition failed".to_string()))?;
 
             // Q'y = Q^T * qty_stacked
@@ -186,9 +190,10 @@ impl IncrementalQR {
         let p = self.n_cols;
 
         if penalty.nrows() != p || penalty.ncols() != p {
-            return Err(GAMError::DimensionMismatch(
-                format!("Penalty must be {}×{}", p, p)
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "Penalty must be {}×{}",
+                p, p
+            )));
         }
 
         let mut trace = 0.0;
@@ -217,7 +222,7 @@ fn back_substitute(r: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>> {
 
     if r.ncols() != n || b.len() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix dimensions must match".to_string()
+            "Matrix dimensions must match".to_string(),
         ));
     }
 
@@ -246,7 +251,7 @@ fn forward_substitute_transpose(r: &Array2<f64>, b: &Array1<f64>) -> Result<Arra
 
     if r.ncols() != n || b.len() != n {
         return Err(GAMError::DimensionMismatch(
-            "Matrix dimensions must match".to_string()
+            "Matrix dimensions must match".to_string(),
         ));
     }
 
@@ -257,7 +262,7 @@ fn forward_substitute_transpose(r: &Array2<f64>, b: &Array1<f64>) -> Result<Arra
     for i in 0..n {
         let mut sum = 0.0;
         for j in 0..i {
-            sum += r[[j, i]] * x[j];  // R'[i,j] = R[j,i]
+            sum += r[[j, i]] * x[j]; // R'[i,j] = R[j,i]
         }
 
         if r[[i, i]].abs() < 1e-14 {
@@ -278,13 +283,13 @@ mod tests {
     #[test]
     fn test_incremental_qr_single_chunk() {
         // Simple test: single chunk should give same result as direct QR
-        let x = Array2::from_shape_vec((5, 3), vec![
-            1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0,
-            10.0, 11.0, 12.0,
-            13.0, 14.0, 15.0,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (5, 3),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+            ],
+        )
+        .unwrap();
 
         let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 
@@ -313,14 +318,13 @@ mod tests {
     #[test]
     fn test_incremental_qr_two_chunks() {
         // Test that processing in chunks gives same R'R as full matrix
-        let x = Array2::from_shape_vec((6, 2), vec![
-            1.0, 2.0,
-            3.0, 4.0,
-            5.0, 6.0,
-            7.0, 8.0,
-            9.0, 10.0,
-            11.0, 12.0,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (6, 2),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+        )
+        .unwrap();
 
         let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
@@ -349,11 +353,8 @@ mod tests {
     #[test]
     fn test_back_substitute() {
         // Test back-substitution with known solution
-        let r = Array2::from_shape_vec((3, 3), vec![
-            2.0, 1.0, 1.0,
-            0.0, 3.0, 2.0,
-            0.0, 0.0, 4.0,
-        ]).unwrap();
+        let r = Array2::from_shape_vec((3, 3), vec![2.0, 1.0, 1.0, 0.0, 3.0, 2.0, 0.0, 0.0, 4.0])
+            .unwrap();
 
         // R x = b where x = [1, 2, 3]
         // b = [2*1 + 1*2 + 1*3, 3*2 + 2*3, 4*3] = [7, 12, 12]
@@ -369,12 +370,8 @@ mod tests {
     #[test]
     fn test_incremental_qr_weighted() {
         // Test with weights
-        let x = Array2::from_shape_vec((4, 2), vec![
-            1.0, 2.0,
-            3.0, 4.0,
-            5.0, 6.0,
-            7.0, 8.0,
-        ]).unwrap();
+        let x =
+            Array2::from_shape_vec((4, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).unwrap();
 
         let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
         let w = Array1::from_vec(vec![1.0, 2.0, 1.0, 2.0]);
@@ -405,14 +402,11 @@ mod tests {
     fn test_incremental_qr_coefficients() {
         // Test that incremental QR gives same coefficients as batch solve
         // System: X β = y, solve for β using QR
-        let x = Array2::from_shape_vec((6, 2), vec![
-            1.0, 2.0,
-            2.0, 3.0,
-            3.0, 4.0,
-            4.0, 5.0,
-            5.0, 6.0,
-            6.0, 7.0,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (6, 2),
+            vec![1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 6.0, 6.0, 7.0],
+        )
+        .unwrap();
 
         let y = Array1::from_vec(vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
 
@@ -442,11 +436,8 @@ mod tests {
     #[test]
     fn test_forward_substitute_transpose() {
         // Test forward substitution with R' (lower triangular)
-        let r = Array2::from_shape_vec((3, 3), vec![
-            2.0, 1.0, 1.0,
-            0.0, 3.0, 2.0,
-            0.0, 0.0, 4.0,
-        ]).unwrap();
+        let r = Array2::from_shape_vec((3, 3), vec![2.0, 1.0, 1.0, 0.0, 3.0, 2.0, 0.0, 0.0, 4.0])
+            .unwrap();
 
         // R' x = b where x = [1, 2, 3]
         // R' = [2, 0, 0; 1, 3, 0; 1, 2, 4]
@@ -466,14 +457,14 @@ mod tests {
         use crate::linalg::inverse;
 
         // Use well-conditioned data
-        let x = Array2::from_shape_vec((6, 3), vec![
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0,
-            1.0, 1.0, 0.0,
-            1.0, 0.0, 1.0,
-            0.0, 1.0, 1.0,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (6, 3),
+            vec![
+                1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                1.0, 1.0,
+            ],
+        )
+        .unwrap();
 
         let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
@@ -482,11 +473,9 @@ mod tests {
         inc_qr.update_chunk(&x, &y, None).unwrap();
 
         // Test penalty matrix
-        let penalty = Array2::from_shape_vec((3, 3), vec![
-            2.0, 0.5, 0.0,
-            0.5, 3.0, 0.5,
-            0.0, 0.5, 2.0,
-        ]).unwrap();
+        let penalty =
+            Array2::from_shape_vec((3, 3), vec![2.0, 0.5, 0.0, 0.5, 3.0, 0.5, 0.0, 0.5, 2.0])
+                .unwrap();
 
         // Compute trace via QR
         let trace_qr = inc_qr.trace_ainv_s(&penalty).unwrap();
@@ -507,12 +496,8 @@ mod tests {
     #[test]
     fn test_trace_ainv_s_identity() {
         // Special case: tr(A^{-1} · I) should equal tr(A^{-1})
-        let x = Array2::from_shape_vec((4, 2), vec![
-            1.0, 1.0,
-            2.0, 1.0,
-            3.0, 1.0,
-            4.0, 1.0,
-        ]).unwrap();
+        let x =
+            Array2::from_shape_vec((4, 2), vec![1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0, 1.0]).unwrap();
 
         let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
 
@@ -535,18 +520,14 @@ mod tests {
     fn test_incremental_qr_multiple_chunks() {
         // Test with many small chunks to stress-test the incremental updates
         // Use well-conditioned data (not collinear)
-        let x = Array2::from_shape_vec((10, 3), vec![
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0,
-            1.0, 1.0, 0.0,
-            1.0, 0.0, 1.0,
-            0.0, 1.0, 1.0,
-            1.0, 1.0, 1.0,
-            2.0, 1.0, 0.0,
-            1.0, 2.0, 0.0,
-            1.0, 1.0, 2.0,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (10, 3),
+            vec![
+                1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 2.0,
+            ],
+        )
+        .unwrap();
 
         let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
 

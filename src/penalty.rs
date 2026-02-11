@@ -1,7 +1,7 @@
 //! Penalty matrix construction for smoothing splines
 
-use ndarray::{Array1, Array2, s};
-use crate::{Result, GAMError};
+use crate::{GAMError, Result};
+use ndarray::{s, Array1, Array2};
 
 /// Solve a symmetric tridiagonal system Ax=b using Thomas algorithm
 /// a: main diagonal (length n)
@@ -14,7 +14,7 @@ fn solve_tridiagonal_symmetric(a: &[f64], b: &[f64], d: &Array2<f64>) -> Result<
 
     if b.len() != n - 1 || d.nrows() != n {
         return Err(GAMError::DimensionMismatch(
-            "Tridiagonal system dimensions don't match".to_string()
+            "Tridiagonal system dimensions don't match".to_string(),
         ));
     }
 
@@ -57,9 +57,17 @@ fn b_spline_basis(x: f64, i: usize, k: usize, t: &Array1<f64>) -> f64 {
     if k == 0 {
         if i < t.len() - 1 {
             if i == t.len() - 2 {
-                if x >= t[i] && x <= t[i + 1] { 1.0 } else { 0.0 }
+                if x >= t[i] && x <= t[i + 1] {
+                    1.0
+                } else {
+                    0.0
+                }
             } else {
-                if x >= t[i] && x < t[i + 1] { 1.0 } else { 0.0 }
+                if x >= t[i] && x < t[i + 1] {
+                    1.0
+                } else {
+                    0.0
+                }
             }
         } else {
             0.0
@@ -175,7 +183,7 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
     let n_knots = knots.len();
     if n_knots < 2 {
         return Err(GAMError::InvalidParameter(
-            "Need at least 2 knots for penalty matrix".to_string()
+            "Need at least 2 knots for penalty matrix".to_string(),
         ));
     }
 
@@ -243,7 +251,8 @@ pub fn cubic_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Arr
 /// Creates subdivided evaluation points based on interior knot spacings
 /// Formula: h1 = repeat(h / pord, pord), k1 = cumsum([k0[0], ...h1])
 fn create_evaluation_points(interior_knots: &Array1<f64>, pord: usize) -> Array1<f64> {
-    let h = interior_knots.slice(s![1..]).to_owned() - interior_knots.slice(s![..interior_knots.len()-1]);
+    let h = interior_knots.slice(s![1..]).to_owned()
+        - interior_knots.slice(s![..interior_knots.len() - 1]);
 
     // h1 = repeat each h value pord times, divided by pord
     let mut h1_vec = Vec::with_capacity(h.len() * pord);
@@ -328,7 +337,7 @@ fn compute_w1_matrix(pord: usize) -> Result<Array2<f64>> {
         let row = idx % n;
         powers_matrix[[row, col]] = val;
     }
-    let powers_matrix = powers_matrix.t().to_owned();  // Transpose!
+    let powers_matrix = powers_matrix.t().to_owned(); // Transpose!
 
     // Invert to get P
     // For small matrices (pord <= 2), use explicit formula
@@ -350,9 +359,10 @@ fn compute_w1_matrix(pord: usize) -> Result<Array2<f64>> {
         inv
     } else {
         // For larger matrices, would need proper linear algebra library
-        return Err(GAMError::InvalidParameter(
-            format!("Matrix inversion for size {} not implemented", n)
-        ));
+        return Err(GAMError::InvalidParameter(format!(
+            "Matrix inversion for size {} not implemented",
+            n
+        )));
     };
 
     // Build H matrix: H[i,j] = (1 + (-1)^(i+j)) / (i+j-1)
@@ -360,7 +370,7 @@ fn compute_w1_matrix(pord: usize) -> Result<Array2<f64>> {
     let mut h = Array2::zeros((n, n));
     for i in 0..n {
         for j in 0..n {
-            let sum_idx = (i + 1) + (j + 1);  // 1-indexed sum
+            let sum_idx = (i + 1) + (j + 1); // 1-indexed sum
             let numerator = 1.0 + (-1.0_f64).powi((sum_idx - 2) as i32);
             let denominator = (sum_idx - 1) as f64;
             h[[i, j]] = numerator / denominator;
@@ -402,14 +412,14 @@ fn build_ld_vector(w1: &Array2<f64>, h_scaled: &Array1<f64>, pord: usize) -> Arr
     }
     indices.push(ld0.len());
 
-    let mut ld: Vec<f64> = indices.iter().map(|&idx| ld0[idx - 1]).collect();  // R's 1-indexing to 0-indexing
+    let mut ld: Vec<f64> = indices.iter().map(|&idx| ld0[idx - 1]).collect(); // R's 1-indexing to 0-indexing
 
     // Handle overlaps: add contributions from adjacent intervals
     if n_h > 1 {
         for interval_idx in 1..n_h {
-            let i0 = interval_idx * pord;  // Index in ld
-            let i2 = interval_idx * (pord + 1);  // Index in ld0 (1-indexed in R, so no -1 needed)
-            ld[i0] += ld0[i2 - 1];  // Convert to 0-indexing
+            let i0 = interval_idx * pord; // Index in ld
+            let i2 = interval_idx * (pord + 1); // Index in ld0 (1-indexed in R, so no -1 needed)
+            ld[i0] += ld0[i2 - 1]; // Convert to 0-indexing
         }
     }
 
@@ -436,9 +446,7 @@ fn build_and_cholesky_b_matrix(
     for kk in 1..=pord {
         if kk < w1.nrows() {
             // Extract kk-th super-diagonal of W1
-            let diwk: Vec<f64> = (0..(w1.nrows() - kk))
-                .map(|i| w1[[i, i + kk]])
-                .collect();
+            let diwk: Vec<f64> = (0..(w1.nrows() - kk)).map(|i| w1[[i, i + kk]]).collect();
 
             let ind_len = n_ld - kk;
             let pattern_len = diwk.len() + kk - 1;
@@ -498,7 +506,9 @@ fn build_and_cholesky_b_matrix(
 fn cholesky_decomposition(a: &Array2<f64>) -> Result<Array2<f64>> {
     let n = a.nrows();
     if n != a.ncols() {
-        return Err(GAMError::DimensionMismatch("Matrix must be square".to_string()));
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square".to_string(),
+        ));
     }
 
     let mut l = Array2::zeros((n, n));
@@ -575,7 +585,7 @@ pub fn cubic_spline_penalty_mgcv(
     let n_knots = knots.len();
     if n_knots < 2 {
         return Err(GAMError::InvalidParameter(
-            "Need at least 2 knots for penalty matrix".to_string()
+            "Need at least 2 knots for penalty matrix".to_string(),
         ));
     }
 
@@ -583,10 +593,10 @@ pub fn cubic_spline_penalty_mgcv(
     let pord = degree - deriv_order;
 
     if pord < 1 {
-        return Err(GAMError::InvalidParameter(
-            format!("pord = degree - deriv_order = {} - {} = {} must be >= 1",
-                    degree, deriv_order, pord)
-        ));
+        return Err(GAMError::InvalidParameter(format!(
+            "pord = degree - deriv_order = {} - {} = {} must be >= 1",
+            degree, deriv_order, pord
+        )));
     }
 
     // Get data range from interior knots
@@ -603,7 +613,7 @@ pub fn cubic_spline_penalty_mgcv(
     let k0 = extended_knots.slice(s![degree..(degree + nk)]).to_owned();
 
     // Compute h (knot spacings) and scale by 1/2
-    let h_unscaled = k0.slice(s![1..]).to_owned() - k0.slice(s![..k0.len()-1]);
+    let h_unscaled = k0.slice(s![1..]).to_owned() - k0.slice(s![..k0.len() - 1]);
     let h_scaled = &h_unscaled / 2.0;
 
     // Create evaluation points k1
@@ -634,10 +644,7 @@ pub fn cubic_spline_penalty_mgcv(
 /// Returns (point, weight) pairs for n-point quadrature
 fn gauss_legendre_points(n: usize) -> Vec<(f64, f64)> {
     match n {
-        2 => vec![
-            (-0.5773502691896257, 1.0),
-            (0.5773502691896257, 1.0),
-        ],
+        2 => vec![(-0.5773502691896257, 1.0), (0.5773502691896257, 1.0)],
         3 => vec![
             (-0.7745966692414834, 0.5555555555555556),
             (0.0, 0.8888888888888888),
@@ -686,7 +693,11 @@ pub fn thin_plate_penalty(num_basis: usize, dim: usize) -> Result<Array2<f64>> {
     } else {
         // For higher dimensions, the penalty is more complex
         // Simplified version: penalize non-polynomial part
-        let poly_terms = if dim == 1 { 2 } else { (dim + 1) * (dim + 2) / 2 };
+        let poly_terms = if dim == 1 {
+            2
+        } else {
+            (dim + 1) * (dim + 2) / 2
+        };
 
         for i in poly_terms..num_basis {
             for j in poly_terms..num_basis {
@@ -707,10 +718,11 @@ pub fn thin_plate_penalty(num_basis: usize, dim: usize) -> Result<Array2<f64>> {
 /// where h_i is the i-th cardinal basis function.
 pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2<f64>> {
     if knots.len() != num_basis {
-        return Err(GAMError::InvalidParameter(
-            format!("Number of knots ({}) must equal number of basis functions ({}) for cr splines",
-                    knots.len(), num_basis)
-        ));
+        return Err(GAMError::InvalidParameter(format!(
+            "Number of knots ({}) must equal number of basis functions ({}) for cr splines",
+            knots.len(),
+            num_basis
+        )));
     }
 
     // Cardinal regression spline penalty using mgcv's algorithm
@@ -764,26 +776,32 @@ pub fn cr_spline_penalty(num_basis: usize, knots: &Array1<f64>) -> Result<Array2
 }
 
 /// Compute the penalty matrix S for a given basis
-pub fn compute_penalty(basis_type: &str, num_basis: usize, knots: Option<&Array1<f64>>, dim: usize) -> Result<Array2<f64>> {
+pub fn compute_penalty(
+    basis_type: &str,
+    num_basis: usize,
+    knots: Option<&Array1<f64>>,
+    dim: usize,
+) -> Result<Array2<f64>> {
     match basis_type {
         "cubic" => {
-            let knots = knots.ok_or_else(|| GAMError::InvalidParameter(
-                "Cubic spline penalty requires knots".to_string()
-            ))?;
+            let knots = knots.ok_or_else(|| {
+                GAMError::InvalidParameter("Cubic spline penalty requires knots".to_string())
+            })?;
             cubic_spline_penalty(num_basis, knots)
-        },
+        }
         "cr" | "cubic_regression" => {
-            let knots = knots.ok_or_else(|| GAMError::InvalidParameter(
-                "Cubic regression spline penalty requires knots".to_string()
-            ))?;
+            let knots = knots.ok_or_else(|| {
+                GAMError::InvalidParameter(
+                    "Cubic regression spline penalty requires knots".to_string(),
+                )
+            })?;
             cr_spline_penalty(num_basis, knots)
-        },
-        "tps" | "thin_plate" => {
-            thin_plate_penalty(num_basis, dim)
-        },
-        _ => Err(GAMError::InvalidParameter(
-            format!("Unknown basis type: {}", basis_type)
-        ))
+        }
+        "tps" | "thin_plate" => thin_plate_penalty(num_basis, dim),
+        _ => Err(GAMError::InvalidParameter(format!(
+            "Unknown basis type: {}",
+            basis_type
+        ))),
     }
 }
 
@@ -841,8 +859,14 @@ mod tests {
         // Penalty matrix should be symmetric
         for i in 0..12 {
             for j in 0..12 {
-                assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10,
-                    "Penalty not symmetric at ({}, {}): {} vs {}", i, j, penalty[[i, j]], penalty[[j, i]]);
+                assert!(
+                    (penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10,
+                    "Penalty not symmetric at ({}, {}): {} vs {}",
+                    i,
+                    j,
+                    penalty[[i, j]],
+                    penalty[[j, i]]
+                );
             }
         }
 
@@ -883,10 +907,14 @@ mod tests {
             max_row_sum_finite = max_row_sum_finite.max(row_sum_finite);
         }
         // Both methods should produce non-zero penalties
-        assert!(max_row_sum_analytical > 0.0,
-            "Analytical penalty should be non-zero");
-        assert!(max_row_sum_finite > 0.0,
-            "Finite diff penalty should be non-zero");
+        assert!(
+            max_row_sum_analytical > 0.0,
+            "Analytical penalty should be non-zero"
+        );
+        assert!(
+            max_row_sum_finite > 0.0,
+            "Finite diff penalty should be non-zero"
+        );
 
         // Print comparison for inspection
         println!("\nAnalytical penalty (normalized):");
@@ -943,8 +971,11 @@ mod tests {
             }
             max_row_sum = max_row_sum.max(row_sum);
         }
-        assert!(max_row_sum > 0.0,
-            "Penalty should be non-zero, got max row sum: {}", max_row_sum);
+        assert!(
+            max_row_sum > 0.0,
+            "Penalty should be non-zero, got max row sum: {}",
+            max_row_sum
+        );
     }
 
     #[test]
@@ -976,11 +1007,19 @@ mod tests {
         }
 
         // Both should be non-zero
-        assert!(max_sum_wide > 0.0, "Wide spacing penalty should be non-zero");
-        assert!(max_sum_narrow > 0.0, "Narrow spacing penalty should be non-zero");
+        assert!(
+            max_sum_wide > 0.0,
+            "Wide spacing penalty should be non-zero"
+        );
+        assert!(
+            max_sum_narrow > 0.0,
+            "Narrow spacing penalty should be non-zero"
+        );
         // Narrower spacing typically has larger penalty values
-        assert!(max_sum_narrow > max_sum_wide,
-            "Narrow spacing penalty should be larger than wide spacing");
+        assert!(
+            max_sum_narrow > max_sum_wide,
+            "Narrow spacing penalty should be larger than wide spacing"
+        );
     }
 
     #[test]
@@ -1012,18 +1051,27 @@ mod tests {
             }
         }
         // Most mass should be on/near diagonal
-        assert!(diagonal_mass > off_diagonal_mass,
-            "CR penalty should have most mass near diagonal");
+        assert!(
+            diagonal_mass > off_diagonal_mass,
+            "CR penalty should have most mass near diagonal"
+        );
 
         // Diagonal elements should be non-negative
         // (boundary knots may have zero second derivative for natural splines)
         for i in 0..5 {
-            assert!(penalty[[i, i]] >= 0.0,
-                "Diagonal element {} should be non-negative: {}", i, penalty[[i, i]]);
+            assert!(
+                penalty[[i, i]] >= 0.0,
+                "Diagonal element {} should be non-negative: {}",
+                i,
+                penalty[[i, i]]
+            );
         }
 
         // At least interior knots should have positive diagonal
-        assert!(penalty[[2, 2]] > 0.0, "Interior knot diagonal should be positive");
+        assert!(
+            penalty[[2, 2]] > 0.0,
+            "Interior knot diagonal should be positive"
+        );
     }
 
     #[test]
@@ -1053,7 +1101,9 @@ mod tests {
         // For cubic B-splines, the second derivative has support on fewer intervals
         // than the original basis, so penalty should show some structure
         let first_row_sum: f64 = (0..num_basis).map(|j| penalty[[0, j]].abs()).sum();
-        let last_row_sum: f64 = (0..num_basis).map(|j| penalty[[num_basis-1, j]].abs()).sum();
+        let last_row_sum: f64 = (0..num_basis)
+            .map(|j| penalty[[num_basis - 1, j]].abs())
+            .sum();
         let middle_row_sum: f64 = (0..num_basis).map(|j| penalty[[3, j]].abs()).sum();
 
         println!("\nFirst row sum: {}", first_row_sum);
@@ -1062,14 +1112,18 @@ mod tests {
 
         // Note: mgcv does NOT normalize penalty matrices
         // Just verify the penalty is non-zero and symmetric
-        assert!(first_row_sum > 0.0 || last_row_sum > 0.0 || middle_row_sum > 0.0,
-            "Penalty should have non-zero elements");
+        assert!(
+            first_row_sum > 0.0 || last_row_sum > 0.0 || middle_row_sum > 0.0,
+            "Penalty should have non-zero elements"
+        );
 
         // Verify symmetry
         for i in 0..num_basis {
             for j in 0..num_basis {
-                assert!((penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10,
-                    "Penalty should be symmetric");
+                assert!(
+                    (penalty[[i, j]] - penalty[[j, i]]).abs() < 1e-10,
+                    "Penalty should be symmetric"
+                );
             }
         }
     }
@@ -1080,7 +1134,7 @@ mod tests {
         let num_basis = 20;
         let x_min = 0.0;
         let x_max = 1.0;
-        let deriv_order = 2;  // Second derivative penalty
+        let deriv_order = 2; // Second derivative penalty
 
         // Create simple interior knots for data range
         let knots = Array1::from_vec(vec![x_min, x_max]);
@@ -1112,12 +1166,18 @@ mod tests {
         println!("  Frobenius relative error: {:.2}%", frob_rel_error * 100.0);
         println!("  Trace relative error: {:.2}%", trace_rel_error * 100.0);
 
-        assert!(frob_rel_error < 0.01,
-                "Frobenius norm should match mgcv within 1%: got {:.1}, expected {:.1}",
-                frobenius, expected_frobenius);
-        assert!(trace_rel_error < 0.01,
-                "Trace should match mgcv within 1%: got {:.1}, expected {:.1}",
-                trace, expected_trace);
+        assert!(
+            frob_rel_error < 0.01,
+            "Frobenius norm should match mgcv within 1%: got {:.1}, expected {:.1}",
+            frobenius,
+            expected_frobenius
+        );
+        assert!(
+            trace_rel_error < 0.01,
+            "Trace should match mgcv within 1%: got {:.1}, expected {:.1}",
+            trace,
+            expected_trace
+        );
     }
 
     #[test]
@@ -1130,10 +1190,22 @@ mod tests {
         let knots = Array1::from_vec(vec![0.0, 1.0]);
         let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
 
-        assert_eq!(penalty.nrows(), num_basis, "Penalty should be {}x{}", num_basis, num_basis);
-        assert_eq!(penalty.ncols(), num_basis, "Penalty should be {}x{}", num_basis, num_basis);
+        assert_eq!(
+            penalty.nrows(),
+            num_basis,
+            "Penalty should be {}x{}",
+            num_basis,
+            num_basis
+        );
+        assert_eq!(
+            penalty.ncols(),
+            num_basis,
+            "Penalty should be {}x{}",
+            num_basis,
+            num_basis
+        );
 
-        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        let frobenius = penalty.iter().map(|&x| x * x).sum::<f64>().sqrt();
         println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
         println!("  Frobenius: {:.1}", frobenius);
         assert!(frobenius > 0.0, "Frobenius norm should be positive");
@@ -1144,7 +1216,7 @@ mod tests {
         let knots = Array1::from_vec(vec![0.0, 2.0]);
         let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
 
-        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        let frobenius = penalty.iter().map(|&x| x * x).sum::<f64>().sqrt();
         println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
         println!("  Frobenius: {:.1}", frobenius);
         assert!(frobenius > 0.0, "Frobenius norm should be positive");
@@ -1158,7 +1230,7 @@ mod tests {
         assert_eq!(penalty.nrows(), num_basis);
         assert_eq!(penalty.ncols(), num_basis);
 
-        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        let frobenius = penalty.iter().map(|&x| x * x).sum::<f64>().sqrt();
         println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
         println!("  Frobenius: {:.1}", frobenius);
         assert!(frobenius > 0.0, "Frobenius norm should be positive");
@@ -1169,7 +1241,7 @@ mod tests {
         let knots = Array1::from_vec(vec![0.0, 0.1]);
         let penalty = cubic_spline_penalty_mgcv(num_basis, &knots, 2).unwrap();
 
-        let frobenius = penalty.iter().map(|&x| x*x).sum::<f64>().sqrt();
+        let frobenius = penalty.iter().map(|&x| x * x).sum::<f64>().sqrt();
         println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
         println!("  Frobenius: {:.1}", frobenius);
         assert!(frobenius > 0.0, "Frobenius norm should be positive");

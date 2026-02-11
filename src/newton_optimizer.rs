@@ -2,9 +2,9 @@
 //!
 //! Implements Newton's method with line search, matching mgcv's approach.
 
-use ndarray::{Array1, Array2};
-use crate::{Result, GAMError};
 use crate::reml::{reml_gradient_multi_qr, reml_hessian_multi_qr};
+use crate::{GAMError, Result};
+use ndarray::{Array1, Array2};
 
 #[cfg(feature = "blas")]
 use ndarray_linalg::Solve;
@@ -73,10 +73,10 @@ impl Default for NewtonPIRLS {
             backtrack_factor: 0.5,
             max_line_search: 20,
             verbose: false,
-            use_trust_region: false,  // Disable: gradient has ~30% error, needs refinement
+            use_trust_region: false, // Disable: gradient has ~30% error, needs refinement
             initial_trust_radius: 1.0,
             max_trust_radius: 10.0,
-            eta: 0.15,  // Accept step if actual/predicted reduction > 0.15
+            eta: 0.15, // Accept step if actual/predicted reduction > 0.15
         }
     }
 }
@@ -109,9 +109,11 @@ impl NewtonPIRLS {
         let m = initial_log_lambda.len();
 
         if penalties.len() != m {
-            return Err(GAMError::DimensionMismatch(
-                format!("Number of penalties ({}) must match log_lambda ({})", penalties.len(), m)
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "Number of penalties ({}) must match log_lambda ({})",
+                penalties.len(),
+                m
+            )));
         }
 
         let mut log_lambda = initial_log_lambda.clone();
@@ -142,14 +144,20 @@ impl NewtonPIRLS {
             let grad_norm = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
 
             if self.verbose {
-                eprintln!("\nIteration {}: max|grad| = {:.6e}", iteration,
-                         gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max));
+                eprintln!(
+                    "\nIteration {}: max|grad| = {:.6e}",
+                    iteration,
+                    gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max)
+                );
             }
 
             // Check convergence
             if grad_norm < self.grad_tol {
                 converged = true;
-                message = format!("Converged: gradient norm {:.6e} < {:.6e}", grad_norm, self.grad_tol);
+                message = format!(
+                    "Converged: gradient norm {:.6e} < {:.6e}",
+                    grad_norm, self.grad_tol
+                );
                 break;
             }
 
@@ -165,19 +173,31 @@ impl NewtonPIRLS {
             let delta_rho = self.solve_newton_system(&hessian, &gradient)?;
 
             // Check if we have a descent direction: g'·Δρ should be negative
-            let descent_check: f64 = gradient.iter().zip(delta_rho.iter())
+            let descent_check: f64 = gradient
+                .iter()
+                .zip(delta_rho.iter())
                 .map(|(g, d)| g * d)
                 .sum();
 
             if self.verbose {
-                eprintln!("  Descent check (g'·Δρ): {:.6e} (should be < 0)", descent_check);
+                eprintln!(
+                    "  Descent check (g'·Δρ): {:.6e} (should be < 0)",
+                    descent_check
+                );
             }
 
             // Choose between trust region and line search
             let step = if self.use_trust_region {
                 // Trust region method
                 let (step, new_radius) = self.trust_region_step(
-                    y, x, w, &log_lambda, &gradient, &hessian, penalties, trust_radius
+                    y,
+                    x,
+                    w,
+                    &log_lambda,
+                    &gradient,
+                    &hessian,
+                    penalties,
+                    trust_radius,
                 )?;
                 trust_radius = new_radius;
 
@@ -205,22 +225,23 @@ impl NewtonPIRLS {
                     if self.verbose {
                         eprintln!("  WARNING: Not a descent direction, using steepest descent");
                     }
-                    gradient.mapv(|g| -g)  // Steepest descent: -g
+                    gradient.mapv(|g| -g) // Steepest descent: -g
                 } else {
                     delta_rho
                 };
 
                 // Line search to find step size
-                let step_size = self.line_search(
-                    y, x, w, &log_lambda, &delta_rho, penalties
-                )?;
+                let step_size = self.line_search(y, x, w, &log_lambda, &delta_rho, penalties)?;
 
                 if self.verbose {
                     eprintln!("  Line search result: step = {:.6e}", step_size);
                 }
 
                 if step_size < self.min_step {
-                    message = format!("Line search failed: step size {:.6e} < {:.6e}", step_size, self.min_step);
+                    message = format!(
+                        "Line search failed: step size {:.6e} < {:.6e}",
+                        step_size, self.min_step
+                    );
                     break;
                 }
 
@@ -265,7 +286,11 @@ impl NewtonPIRLS {
     }
 
     /// Solve Newton system H·Δρ = -g
-    fn solve_newton_system(&self, hessian: &Array2<f64>, gradient: &Array1<f64>) -> Result<Array1<f64>> {
+    fn solve_newton_system(
+        &self,
+        hessian: &Array2<f64>,
+        gradient: &Array1<f64>,
+    ) -> Result<Array1<f64>> {
         let neg_gradient = gradient.mapv(|g| -g);
 
         #[cfg(feature = "blas")]
@@ -276,11 +301,17 @@ impl NewtonPIRLS {
                 Err(_) => {
                     // Hessian might be singular, add ridge
                     let mut h_ridge = hessian.clone();
-                    let ridge = 1e-6 * hessian.diag().iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+                    let ridge = 1e-6
+                        * hessian
+                            .diag()
+                            .iter()
+                            .map(|x| x.abs())
+                            .fold(0.0f64, f64::max);
                     for i in 0..h_ridge.nrows() {
                         h_ridge[[i, i]] += ridge;
                     }
-                    h_ridge.solve(&neg_gradient)
+                    h_ridge
+                        .solve(&neg_gradient)
                         .map_err(|_| GAMError::SingularMatrix)
                 }
             }
@@ -324,8 +355,12 @@ impl NewtonPIRLS {
             match self.compute_reml(y, x, w, &lambda_new, penalties) {
                 Ok(reml_new) => {
                     if self.verbose && iter < 5 {
-                        eprintln!("    step={:.3e}: REML={:.6}, Δ={:.3e}",
-                                 step, reml_new, reml_new - reml_current);
+                        eprintln!(
+                            "    step={:.3e}: REML={:.6}, Δ={:.3e}",
+                            step,
+                            reml_new,
+                            reml_new - reml_current
+                        );
                     }
 
                     // Check if REML decreased
@@ -390,8 +425,12 @@ impl NewtonPIRLS {
 
         // Add ridge to ensure positive definiteness
         // Use stronger ridge since gradient has ~30% error
-        let max_diag = hessian_reg.diag().iter().map(|x| x.abs()).fold(0.0f64, f64::max);
-        let ridge = 1e-2 * max_diag.max(1.0);  // Increased from 1e-4 to 1e-2
+        let max_diag = hessian_reg
+            .diag()
+            .iter()
+            .map(|x| x.abs())
+            .fold(0.0f64, f64::max);
+        let ridge = 1e-2 * max_diag.max(1.0); // Increased from 1e-4 to 1e-2
         for i in 0..m {
             hessian_reg[[i, i]] += ridge;
         }
@@ -400,14 +439,19 @@ impl NewtonPIRLS {
         delta_rho_newton = self.solve_newton_system(&hessian_reg, gradient)?;
 
         // Check if Newton step is a descent direction: g'·Δρ < 0
-        let descent_check: f64 = gradient.iter().zip(delta_rho_newton.iter())
+        let descent_check: f64 = gradient
+            .iter()
+            .zip(delta_rho_newton.iter())
             .map(|(g, d)| g * d)
             .sum();
 
         // If not descent, set Newton step to zero (will use Cauchy instead)
         if descent_check > 0.0 {
             if self.verbose {
-                eprintln!("  Trust region: Newton step not descent (g'·Δρ={:.3e}), using Cauchy", descent_check);
+                eprintln!(
+                    "  Trust region: Newton step not descent (g'·Δρ={:.3e}), using Cauchy",
+                    descent_check
+                );
             }
             delta_rho_newton = Array1::zeros(m);
         }
@@ -440,7 +484,10 @@ impl NewtonPIRLS {
         let delta_rho = if newton_norm > 1e-10 && newton_norm <= trust_radius {
             // Newton step is within trust region
             if self.verbose {
-                eprintln!("  Trust region: Using Newton step (norm={:.3e} ≤ Δ={:.3e})", newton_norm, trust_radius);
+                eprintln!(
+                    "  Trust region: Using Newton step (norm={:.3e} ≤ Δ={:.3e})",
+                    newton_norm, trust_radius
+                );
             }
             delta_rho_newton
         } else if cauchy_norm >= trust_radius {
@@ -454,7 +501,12 @@ impl NewtonPIRLS {
             // ||δ_C + β·(δ_N - δ_C))||² = Δ²
             let diff = &delta_rho_newton - &delta_rho_cauchy;
             let a: f64 = diff.iter().map(|x| x * x).sum::<f64>();
-            let b: f64 = 2.0 * delta_rho_cauchy.iter().zip(diff.iter()).map(|(c, d)| c * d).sum::<f64>();
+            let b: f64 = 2.0
+                * delta_rho_cauchy
+                    .iter()
+                    .zip(diff.iter())
+                    .map(|(c, d)| c * d)
+                    .sum::<f64>();
             let c: f64 = cauchy_norm * cauchy_norm - trust_radius * trust_radius;
 
             let beta = if a > 1e-10 {
@@ -479,10 +531,17 @@ impl NewtonPIRLS {
 
         // Predicted reduction: m(0) - m(δ) = -g'·δ - (1/2)·δ'·H·δ
         let h_delta = hessian.dot(&delta_rho);
-        let predicted_reduction = -(
-            gradient.iter().zip(delta_rho.iter()).map(|(g, d)| g * d).sum::<f64>()
-            + 0.5 * delta_rho.iter().zip(h_delta.iter()).map(|(d, hd)| d * hd).sum::<f64>()
-        );
+        let predicted_reduction = -(gradient
+            .iter()
+            .zip(delta_rho.iter())
+            .map(|(g, d)| g * d)
+            .sum::<f64>()
+            + 0.5
+                * delta_rho
+                    .iter()
+                    .zip(h_delta.iter())
+                    .map(|(d, hd)| d * hd)
+                    .sum::<f64>());
 
         let rho = if predicted_reduction.abs() < 1e-10 {
             0.0
@@ -491,15 +550,19 @@ impl NewtonPIRLS {
         };
 
         if self.verbose {
-            eprintln!("  Trust region: actual={:.3e}, predicted={:.3e}, ρ={:.3}",
-                     actual_reduction, predicted_reduction, rho);
+            eprintln!(
+                "  Trust region: actual={:.3e}, predicted={:.3e}, ρ={:.3}",
+                actual_reduction, predicted_reduction, rho
+            );
         }
 
         // Update trust region radius based on agreement
         let new_radius = if rho < 0.25 {
             // Poor agreement: shrink trust region
             0.25 * trust_radius
-        } else if rho > 0.75 && (delta_rho.iter().map(|x| x * x).sum::<f64>().sqrt() - trust_radius).abs() < 1e-6 {
+        } else if rho > 0.75
+            && (delta_rho.iter().map(|x| x * x).sum::<f64>().sqrt() - trust_radius).abs() < 1e-6
+        {
             // Good agreement and at boundary: expand trust region
             (2.0 * trust_radius).min(self.max_trust_radius)
         } else {
@@ -517,7 +580,7 @@ impl NewtonPIRLS {
             if self.verbose {
                 eprintln!("  Trust region: REJECT (ρ={:.3} ≤ η={:.3})", rho, self.eta);
             }
-            Array1::zeros(m)  // Reject step
+            Array1::zeros(m) // Reject step
         };
 
         Ok((step, new_radius))

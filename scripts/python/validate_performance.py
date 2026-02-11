@@ -69,26 +69,30 @@ def run_benchmark(config, n_warmup=1, n_runs=5):
     X, y = generate_data(n, d)
 
     # Warmup runs (JIT, cache warm)
-    for _ in range(n_warmup):
+    for i in range(n_warmup):
+        print(f"    warmup {i+1}/{n_warmup}...", end="", flush=True)
         gam = mgcv_rust.GAM()
         try:
             gam.fit_auto(X, y, k=[k] * d, method='REML', bs='cr', max_iter=100)
+            print(" done", flush=True)
         except Exception as e:
-            print(f"  WARNING: warmup failed: {e}")
+            print(f" FAILED: {e}")
             return None
 
     # Timed runs
     times = []
     results = []
     for run in range(n_runs):
+        print(f"    run {run+1}/{n_runs}...", end="", flush=True)
         gam = mgcv_rust.GAM()
         start = time.perf_counter()
         try:
             result = gam.fit_auto(X, y, k=[k] * d, method='REML', bs='cr', max_iter=100)
         except Exception as e:
-            print(f"  WARNING: run {run+1} failed: {e}")
+            print(f" FAILED: {e}")
             return None
         elapsed = time.perf_counter() - start
+        print(f" {elapsed*1000:.0f}ms", flush=True)
         times.append(elapsed)
         results.append(result)
 
@@ -176,9 +180,15 @@ def run_regression_test(threshold=0.20, ci_mode=False):
     print(f"  Baseline from: {baseline.get('created', 'unknown')}")
     print("=" * 70)
 
+    # In CI mode, only run the primary benchmark to save time
+    configs_to_run = [CONFIGS[0]] if ci_mode else CONFIGS
+    # Fewer runs in CI mode
+    n_warmup = 0 if ci_mode else 1
+    n_runs = 3 if ci_mode else 5
+
     all_passed = True
 
-    for config in CONFIGS:
+    for config in configs_to_run:
         name = config["name"]
         if name not in baseline.get("configs", {}):
             print(f"\n  {config['description']}: SKIPPED (no baseline)")
@@ -186,8 +196,9 @@ def run_regression_test(threshold=0.20, ci_mode=False):
 
         base = baseline["configs"][name]
         print(f"\n  {config['description']}...")
+        sys.stdout.flush()
 
-        result = run_benchmark(config, n_warmup=1, n_runs=5)
+        result = run_benchmark(config, n_warmup=n_warmup, n_runs=n_runs)
         if result is None:
             print(f"    FAIL: benchmark crashed")
             all_passed = False

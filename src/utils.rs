@@ -44,9 +44,7 @@ pub fn standardize(x: &Array1<f64>) -> (Array1<f64>, f64, f64) {
     let variance = x.iter().map(|xi| (xi - mean).powi(2)).sum::<f64>() / n;
     let std = variance.sqrt().max(1e-10);
 
-    let standardized = x.iter()
-        .map(|xi| (xi - mean) / std)
-        .collect();
+    let standardized = x.iter().map(|xi| (xi - mean) / std).collect();
 
     (standardized, mean, std)
 }
@@ -61,9 +59,7 @@ pub fn standardize_matrix(x: &Array2<f64>) -> (Array2<f64>, Array1<f64>, Array1<
     for j in 0..p {
         let col = x.column(j);
         let mean = col.sum() / n as f64;
-        let variance = col.iter()
-            .map(|xi| (xi - mean).powi(2))
-            .sum::<f64>() / n as f64;
+        let variance = col.iter().map(|xi| (xi - mean).powi(2)).sum::<f64>() / n as f64;
         let std = variance.sqrt().max(1e-10);
 
         means[j] = mean;
@@ -90,9 +86,8 @@ mod tests {
         assert_abs_diff_eq!(mean, 3.0, epsilon = 1e-10);
         assert_abs_diff_eq!(standardized.sum(), 0.0, epsilon = 1e-10);
 
-        let variance = standardized.iter()
-            .map(|xi| xi.powi(2))
-            .sum::<f64>() / standardized.len() as f64;
+        let variance =
+            standardized.iter().map(|xi| xi.powi(2)).sum::<f64>() / standardized.len() as f64;
         assert_abs_diff_eq!(variance, 1.0, epsilon = 1e-10);
     }
 
