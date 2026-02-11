@@ -37,6 +37,7 @@ Repository = "https://github.com/AlekJaworski/nn_exploring"
 Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 
 [tool.maturin]
-# Full features with BLAS for complete functionality
-features = ["python", "blas"]
+# For local development: uses system OpenBLAS (requires libopenblas-dev or openblas-devel)
+# For release builds: CI overrides with --features python,blas,blas-static
+features = ["python", "blas", "blas-system"]
 module-name = "mgcv_rust"

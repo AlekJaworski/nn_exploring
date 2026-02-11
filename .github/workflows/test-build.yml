@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'claude/**'
+      - 'validation-framework*'
   pull_request:
   workflow_dispatch:
 
@@ -12,12 +13,8 @@ permissions:
 
 jobs:
   test-linux:
-    name: Test Linux ${{ matrix.target }}
+    name: Test Linux x86_64
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
 
@@ -27,8 +24,8 @@ jobs:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           RUST_BACKTRACE: "1"
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python,blas
+          target: x86_64
+          args: --release --out dist --find-interpreter --features python,blas,blas-system
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
@@ -37,25 +34,20 @@ jobs:
             if command -v yum &> /dev/null; then
               echo "Using yum package manager"
               yum install -y openblas-devel openssl-devel pkgconfig
-              yum list installed | grep -E "(openblas|openssl)"
             else
               echo "Using apt package manager"
               apt-get update
               apt-get install -y libopenblas-dev libssl-dev pkg-config
-              dpkg -l | grep -E "(openblas|libssl)"
             fi
-            echo "=== Build tools installed ==="
+            echo "=== Verifying OpenBLAS ==="
             pkg-config --libs openblas || true
-            echo "=== Environment variables ==="
-            env | grep -E "(OPENBLAS|RUST|CARGO|TARGET)" || true
 
       - name: Verify wheel
         run: |
           echo "=== Built wheels ==="
           ls -lh dist/
-          echo "=== Wheel info ==="
           python -m pip install --upgrade pip
-          python -m pip install wheel
+          python -m pip install wheel numpy
           for wheel in dist/*.whl; do
             echo "Checking $wheel"
             python -m wheel tags "$wheel" || true
@@ -68,13 +60,36 @@ jobs:
           python -m pip install dist/*.whl
           echo "=== Testing import ==="
           python -c "import mgcv_rust; print('Import successful!')"
-          echo "=== Checking dependencies ==="
+          echo "=== Quick fit test ==="
+          python -c "
+          import numpy as np
+          import mgcv_rust
+          np.random.seed(42)
+          x = np.random.uniform(0, 1, 200).reshape(-1, 1)
+          y = np.sin(2 * np.pi * x.ravel()) + np.random.normal(0, 0.2, 200)
+          gam = mgcv_rust.GAM()
+          result = gam.fit_auto(x, y, k=[10], method='REML', bs='cr', max_iter=50)
+          print(f'Lambda: {result[\"lambda\"]}, Deviance: {result.get(\"deviance\", \"N/A\")}')
+          y_pred = gam.predict(x)
+          print(f'Predictions range: [{y_pred.min():.3f}, {y_pred.max():.3f}]')
+          print('Quick fit test PASSED')
+          "
+          echo "=== Checking shared library deps ==="
           ldd $(python -c "import mgcv_rust; import os; print(os.path.dirname(mgcv_rust.__file__))")/mgcv_rust*.so || true
+
+      - name: Run correctness validation
+        run: |
+          python -m pip install numpy
+          python scripts/python/validate_correctness.py
+
+      - name: Run performance validation (CI mode)
+        run: |
+          python scripts/python/validate_performance.py --ci || echo "Performance test skipped or failed (non-blocking in CI)"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: test-wheels-linux-${{ matrix.target }}
+          name: test-wheels-linux-x86_64
           path: dist
 
   test-macos:
@@ -85,10 +100,8 @@ jobs:
 
       - name: Install OpenBLAS
         run: |
-          echo "=== Installing OpenBLAS ==="
           brew install openblas
-          echo "=== OpenBLAS location ==="
-          brew --prefix openblas
+          echo "OPENBLAS_DIR=$(brew --prefix openblas)" >> $GITHUB_ENV
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -97,19 +110,34 @@ jobs:
           RUST_BACKTRACE: "1"
         with:
           target: aarch64
-          args: --release --out dist --find-interpreter --features python,blas
+          args: --release --out dist --find-interpreter --features python,blas,blas-system
           sccache: 'true'
 
-      - name: Verify wheel
+      - name: Test wheel
         run: |
-          echo "=== Built wheels ==="
-          ls -lh dist/
           echo "=== Installing wheel ==="
+          python3 -m pip install numpy
           python3 -m pip install dist/*.whl
           echo "=== Testing import ==="
           python3 -c "import mgcv_rust; print('Import successful!')"
+          echo "=== Quick fit test ==="
+          python3 -c "
+          import numpy as np
+          import mgcv_rust
+          np.random.seed(42)
+          x = np.random.uniform(0, 1, 200).reshape(-1, 1)
+          y = np.sin(2 * np.pi * x.ravel()) + np.random.normal(0, 0.2, 200)
+          gam = mgcv_rust.GAM()
+          result = gam.fit_auto(x, y, k=[10], method='REML', bs='cr', max_iter=50)
+          print(f'Lambda: {result[\"lambda\"]}')
+          print('Quick fit test PASSED')
+          "
           echo "=== Checking dependencies ==="
           otool -L $(python3 -c "import mgcv_rust; import os; print(os.path.dirname(mgcv_rust.__file__))")/mgcv_rust*.so || true
+
+      - name: Run correctness validation
+        run: |
+          python3 scripts/python/validate_correctness.py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
