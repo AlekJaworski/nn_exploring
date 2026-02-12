@@ -39,7 +39,7 @@ jobs:
       - name: Validate wheel
         run: |
           python -m pip install --upgrade pip numpy
-          python -m pip install dist/*.whl
+          python -m pip install --find-links dist/ mgcv_rust
           python -c "
           import numpy as np
           import mgcv_rust
@@ -85,7 +85,7 @@ jobs:
       - name: Validate wheel
         run: |
           python3 -m pip install numpy
-          python3 -m pip install dist/*.whl
+          python3 -m pip install --find-links dist/ mgcv_rust
           python3 -c "
           import numpy as np
           import mgcv_rust
