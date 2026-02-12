@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
@@ -25,7 +30,7 @@ jobs:
           RUST_BACKTRACE: "1"
         with:
           target: x86_64
-          args: --release --out dist --find-interpreter --features python,blas,blas-system
+          args: --release --out dist -i python3.12 --features python,blas,blas-system
           sccache: 'true'
           manylinux: auto
           before-script-linux: |
@@ -98,6 +103,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install OpenBLAS
         run: |
           brew install openblas
@@ -110,7 +120,7 @@ jobs:
           RUST_BACKTRACE: "1"
         with:
           target: aarch64
-          args: --release --out dist --find-interpreter --features python,blas,blas-system
+          args: --release --out dist -i python3.12 --features python,blas,blas-system
           sccache: 'true'
 
       - name: Test wheel
