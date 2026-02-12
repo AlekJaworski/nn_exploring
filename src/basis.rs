@@ -408,17 +408,110 @@ impl CubicRegressionSpline {
 impl BasisFunction for CubicRegressionSpline {
     fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
         let n = x.len();
-        let mut design_matrix = Array2::zeros((n, self.num_basis));
+        let k = self.num_basis;
+        let num_intervals = k - 1;
+        let mut design_matrix = Array2::zeros((n, k));
 
-        // For each basis function j (corresponding to knot j)
-        for j in 0..self.num_basis {
-            // Create values vector: 1 at knot j, 0 everywhere else
-            let mut values = vec![0.0; self.num_basis];
+        // Pre-compute knot spacings h ONCE
+        let h: Vec<f64> = (0..num_intervals)
+            .map(|i| self.knots[i + 1] - self.knots[i])
+            .collect();
+
+        let knot_first = self.knots[0];
+        let knot_last = self.knots[num_intervals];
+
+        // Pre-compute all spline coefficients for all k basis functions.
+        // Store in flat arrays indexed by [interval * k + basis_fn] for cache locality
+        // when evaluating all basis functions at the same interval.
+        let mut vals_at = vec![0.0f64; k * k]; // vals_at[interval * k + j] = values[j][interval]
+        let mut b_coeff = vec![0.0f64; num_intervals * k]; // b_coeff[interval * k + j]
+        let mut c_coeff = vec![0.0f64; k * k]; // c_coeff[interval * k + j]
+        let mut d_coeff = vec![0.0f64; num_intervals * k]; // d_coeff[interval * k + j]
+        let mut left_slopes = vec![0.0f64; k];
+        let mut right_slopes = vec![0.0f64; k];
+        let mut vals_0 = vec![0.0f64; k]; // values[j][0] for left extrapolation
+        let mut vals_last = vec![0.0f64; k]; // values[j][num_intervals] for right extrapolation
+
+        for j in 0..k {
+            // Cardinal basis: values[j] = 1, all others = 0
+            let mut values = vec![0.0; k];
             values[j] = 1.0;
 
-            // Evaluate this cardinal natural cubic spline at each x point
-            for (i, &xi) in x.iter().enumerate() {
-                design_matrix[[i, j]] = self.evaluate_natural_spline(xi, &values);
+            // Compute alpha (RHS of tridiagonal system)
+            let mut alpha = vec![0.0; k];
+            for i in 1..num_intervals {
+                alpha[i] = (3.0 / h[i]) * (values[i + 1] - values[i])
+                    - (3.0 / h[i - 1]) * (values[i] - values[i - 1]);
+            }
+
+            // Solve tridiagonal system for second derivatives c
+            let c = self.solve_tridiagonal(&h, &alpha);
+
+            // Store values and compute b, d coefficients
+            for i in 0..num_intervals {
+                let b_i = (values[i + 1] - values[i]) / h[i] - h[i] * (c[i + 1] + 2.0 * c[i]) / 3.0;
+                let d_i = (c[i + 1] - c[i]) / (3.0 * h[i]);
+
+                vals_at[i * k + j] = values[i];
+                b_coeff[i * k + j] = b_i;
+                c_coeff[i * k + j] = c[i];
+                d_coeff[i * k + j] = d_i;
+            }
+            // Store last interval endpoint values
+            vals_at[num_intervals * k + j] = values[num_intervals]; // though not used in interior
+
+            vals_0[j] = values[0];
+            vals_last[j] = values[num_intervals];
+
+            // Pre-compute extrapolation slopes
+            left_slopes[j] = b_coeff[0 * k + j]; // b[0] for basis j
+            let hn = h[num_intervals - 1];
+            let last_i = num_intervals - 1;
+            right_slopes[j] = b_coeff[last_i * k + j]
+                + 2.0 * c_coeff[last_i * k + j] * hn
+                + 3.0 * d_coeff[last_i * k + j] * hn * hn;
+        }
+
+        // Evaluate at all n data points — iterate by ROW for cache-friendly design matrix access
+        for (i, &xi) in x.iter().enumerate() {
+            let row_start = i * k; // design_matrix is row-major, row i starts at offset i*k
+            let row = &mut design_matrix.as_slice_mut().unwrap()[row_start..row_start + k];
+
+            if xi < knot_first {
+                let dx = xi - knot_first;
+                for j in 0..k {
+                    row[j] = vals_0[j] + left_slopes[j] * dx;
+                }
+            } else if xi > knot_last {
+                let dx = xi - knot_last;
+                for j in 0..k {
+                    row[j] = vals_last[j] + right_slopes[j] * dx;
+                }
+            } else {
+                // Binary search for the interval
+                let mut lo = 0usize;
+                let mut hi = num_intervals;
+                while lo < hi - 1 {
+                    let mid = (lo + hi) / 2;
+                    if xi < self.knots[mid] {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                let interval = lo;
+                let dx = xi - self.knots[interval];
+                let dx2 = dx * dx;
+                let dx3 = dx2 * dx;
+
+                // All coefficients for this interval are contiguous in memory
+                let base = interval * k;
+                for j in 0..k {
+                    row[j] = vals_at[base + j]
+                        + b_coeff[base + j] * dx
+                        + c_coeff[base + j] * dx2
+                        + d_coeff[base + j] * dx3;
+                }
             }
         }
 
