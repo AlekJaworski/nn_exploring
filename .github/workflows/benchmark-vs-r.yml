@@ -1,0 +1,86 @@
+name: Performance Test vs R bam()
+
+on:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark-vs-r:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3.3'
+
+      - name: Install R dependencies
+        run: |
+          install.packages(c("mgcv", "jsonlite"))
+        shell: Rscript {0}
+
+      - name: Build Rust wheel
+        uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+        with:
+          target: x86_64
+          args: --release --out dist -i python3.12 --features python,blas,blas-system
+          sccache: 'true'
+          manylinux: auto
+          before-script-linux: |
+            set -e
+            apt-get update
+            apt-get install -y libopenblas-dev libssl-dev pkg-config
+
+      - name: Install wheel
+        run: |
+          python -m pip install --upgrade pip numpy
+          python -m pip install --find-links dist/ mgcv_rust
+
+      - name: Run R benchmark
+        run: |
+          Rscript scripts/r/benchmarks/benchmark_comprehensive.R > r_results.txt
+          cat r_results.txt
+
+      - name: Run Rust benchmark
+        run: |
+          cd standalone_tests
+          python bench_vs_r.py --run-r 2>&1 | tee rust_results.txt
+
+      - name: Compare results
+        run: |
+          echo "=== PERFORMANCE COMPARISON SUMMARY ==="
+          echo ""
+          echo "R bam() results:"
+          tail -20 r_results.txt
+          echo ""
+          echo "Rust results:"
+          tail -20 standalone_tests/rust_results.txt
+
+      - name: Check for regressions
+        run: |
+          # Extract win/loss counts from Rust output
+          cd standalone_tests
+          python bench_vs_r.py 2>&1 | grep -E "(wins|losses|Geometric mean)"
+          
+          # Fail if any losses
+          if python bench_vs_r.py 2>&1 | grep -q "losses out of"; then
+            LOSSES=$(python bench_vs_r.py 2>&1 | grep "losses out of" | grep -oP '\d+ losses' | head -1 | cut -d' ' -f1)
+            if [ "$LOSSES" -gt "0" ]; then
+              echo "ERROR: $LOSSES performance losses detected vs R bam()"
+              exit 1
+            fi
+          fi
+          
+          echo "✓ All performance checks passed"
