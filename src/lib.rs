@@ -58,9 +58,6 @@ pub type Result<T> = std::result::Result<T, GAMError>;
 
 // Python bindings
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
-
-#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 
 #[cfg(feature = "python")]
@@ -804,6 +801,7 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(reml_gradient_multi_qr_py, m)?)?;
     m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
+    #[cfg(feature = "blas")]
     m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
     Ok(())
 }
