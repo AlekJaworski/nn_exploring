@@ -50,8 +50,6 @@ impl REMLCache {
         penalties: &[BlockPenalty],
         sqrt_penalties: &[Array2<f64>],
     ) -> Result<Self> {
-        // Convert BlockPenalty to dense for internal use (Phase 1: intermediate conversion)
-        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
         let n = y.len();
         let p = x.ncols();
         let m = lambdas.len();
@@ -142,8 +140,8 @@ impl REMLCache {
 
         // Compute beta
         let mut a = xtwx.clone();
-        for (lambda, penalty) in lambdas.iter().zip(penalties_dense.iter()) {
-            a.scaled_add(*lambda, penalty);
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            penalty.scaled_add_to(&mut a, *lambda);
         }
 
         // Add ridge for stability
@@ -190,8 +188,6 @@ impl REMLCache {
         lambdas: &[f64],
         penalties: &[BlockPenalty],
     ) -> Result<Array1<f64>> {
-        // Convert BlockPenalty to dense for internal use (Phase 1: intermediate conversion)
-        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
         let n = y.len();
         let p = x.ncols();
         let m = lambdas.len();
@@ -203,13 +199,7 @@ impl REMLCache {
         // Pre-compute P = RSS + Σλⱼ·β'·Sⱼ·β
         let mut penalty_sum = 0.0;
         for j in 0..m {
-            let s_j_beta = penalties_dense[j].dot(&self.beta);
-            let beta_s_j_beta: f64 = self
-                .beta
-                .iter()
-                .zip(s_j_beta.iter())
-                .map(|(bi, sbi)| bi * sbi)
-                .sum();
+            let beta_s_j_beta = penalties[j].quadratic_form(&self.beta);
             penalty_sum += lambdas[j] * beta_s_j_beta;
         }
         let p_value = self.rss + penalty_sum;
@@ -219,7 +209,7 @@ impl REMLCache {
 
         for i in 0..m {
             let lambda_i = lambdas[i];
-            let penalty_i = &penalties_dense[i];
+            let penalty_i = &penalties[i];
             let rank_i = self.penalty_ranks[i] as f64;
             let sqrt_penalty = &self.sqrt_penalties[i];
 
@@ -240,7 +230,7 @@ impl REMLCache {
             let rank_term = -rank_i;
 
             // Compute ∂β/∂ρᵢ using cached R
-            let s_i_beta = penalty_i.dot(&self.beta);
+            let s_i_beta = penalty_i.dot_vec(&self.beta);
             let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
 
             let y = self
@@ -271,18 +261,13 @@ impl REMLCache {
             let dphi_drho = drss_drho / n_minus_r;
 
             // Compute ∂P/∂ρᵢ
-            let beta_s_i_beta: f64 = self
-                .beta
-                .iter()
-                .zip(s_i_beta.iter())
-                .map(|(bi, sbi)| bi * sbi)
-                .sum();
+            let beta_s_i_beta = penalty_i.quadratic_form(&self.beta);
             let explicit_pen = lambda_i * beta_s_i_beta;
 
             let mut implicit_pen = 0.0;
             for j in 0..m {
-                let s_j_beta = penalties_dense[j].dot(&self.beta);
-                let s_j_dbeta = penalties_dense[j].dot(&dbeta_drho);
+                let s_j_beta = penalties[j].dot_vec(&self.beta);
+                let s_j_dbeta = penalties[j].dot_vec(&dbeta_drho);
                 let term1: f64 = s_j_beta
                     .iter()
                     .zip(dbeta_drho.iter())

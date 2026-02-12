@@ -1,12 +1,13 @@
 // Test the new Cholesky-based gradient against QR version
 #[cfg(feature = "blas")]
 fn main() {
+    use mgcv_rust::block_penalty::BlockPenalty;
+    use mgcv_rust::reml::{reml_gradient_multi_cholesky, reml_gradient_multi_qr};
     use ndarray::{Array1, Array2};
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand::Rng;
     use std::time::Instant;
-    use mgcv_rust::reml::{reml_gradient_multi_qr, reml_gradient_multi_cholesky};
 
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -16,7 +17,10 @@ fn main() {
     let p = n_dims * k;
 
     println!("=== Testing Cholesky vs QR Gradient ===\n");
-    println!("Configuration: n={}, dims={}, k={}, p={}\n", n, n_dims, k, p);
+    println!(
+        "Configuration: n={}, dims={}, k={}, p={}\n",
+        n, n_dims, k, p
+    );
 
     // Generate data
     let mut x = Array2::<f64>::zeros((n, p));
@@ -30,7 +34,7 @@ fn main() {
     let lambdas: Vec<f64> = vec![1.0; n_dims];
 
     // Create penalties
-    let mut penalties = Vec::new();
+    let mut penalties_dense = Vec::new();
     for dim in 0..n_dims {
         let mut penalty = Array2::zeros((p, p));
         let start = dim * k;
@@ -38,8 +42,13 @@ fn main() {
         for i in start..end {
             penalty[[i, i]] = 1.0;
         }
-        penalties.push(penalty);
+        penalties_dense.push(penalty);
     }
+
+    let penalties: Vec<BlockPenalty> = penalties_dense
+        .iter()
+        .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
 
     println!("[1/3] Computing gradient with QR method...");
     let start = Instant::now();
@@ -56,12 +65,14 @@ fn main() {
     println!("  Gradient: {:?}\n", grad_chol);
 
     println!("[3/3] Comparing results...");
-    let max_diff = grad_qr.iter().zip(grad_chol.iter())
+    let max_diff = grad_qr
+        .iter()
+        .zip(grad_chol.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0, f64::max);
-    
+
     println!("  Max difference: {:.2e}", max_diff);
-    
+
     if max_diff < 1e-10 {
         println!("  ✓ Results match!\n");
     } else {

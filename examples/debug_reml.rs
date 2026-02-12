@@ -27,6 +27,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let smooth = gam::SmoothTerm::cubic_spline("x".to_string(), 15, 0.0, 1.0)?;
     let basis_matrix = smooth.evaluate(&x)?;
     let penalty = &smooth.penalty;
+    let penalty_block =
+        mgcv_rust::block_penalty::BlockPenalty::new(penalty.clone(), 0, penalty.nrows());
 
     println!("Penalty matrix info:");
     println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
@@ -48,7 +50,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let lambda = 10.0_f64.powi(log_lambda);
 
         use mgcv_rust::reml::reml_criterion;
-        let reml_score = reml_criterion(&y, &basis_matrix, &weights, lambda, penalty, None)?;
+        let reml_score = reml_criterion(&y, &basis_matrix, &weights, lambda, &penalty_block, None)?;
 
         // Compute components manually to see what's happening
         use mgcv_rust::linalg::solve;
@@ -58,15 +60,19 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let b = xtw.dot(&y);
         let beta = solve(a.clone(), b)?;
         let fitted = basis_matrix.dot(&beta);
-        let residuals: Array1<f64> = y.iter().zip(fitted.iter())
+        let residuals: Array1<f64> = y
+            .iter()
+            .zip(fitted.iter())
             .map(|(yi, fi)| yi - fi)
             .collect();
         let rss: f64 = residuals.iter().map(|r| r * r).sum();
 
         let log_det_a = determinant(&a)?.ln();
 
-        println!("{:.6} | {:.6} | {:.6} | {:.6}",
-            lambda, reml_score, rss, log_det_a);
+        println!(
+            "{:.6} | {:.6} | {:.6} | {:.6}",
+            lambda, reml_score, rss, log_det_a
+        );
     }
 
     println!("{}", "=".repeat(60));

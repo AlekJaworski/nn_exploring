@@ -1,5 +1,6 @@
 //! REML (Restricted Maximum Likelihood) criterion for smoothing parameter selection
 
+use crate::block_penalty::BlockPenalty;
 use crate::linalg::{determinant, inverse, solve};
 use crate::GAMError;
 use crate::Result;
@@ -173,9 +174,10 @@ pub fn reml_criterion(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambda: f64,
-    penalty: &Array2<f64>,
+    penalty_block: &BlockPenalty,
     beta: Option<&Array1<f64>>,
 ) -> Result<f64> {
+    let penalty = penalty_block.to_dense();
     let n = y.len();
     let _p = x.ncols();
 
@@ -191,7 +193,7 @@ pub fn reml_criterion(
         let xtwy = compute_xtwy(x, w, y);
 
         // Solve: (X'WX + λS)β = X'Wy
-        let a = &xtwx + &(penalty * lambda);
+        let a = &xtwx + &(&penalty * lambda);
 
         beta_computed = solve(a, xtwy)?;
         &beta_computed
@@ -218,13 +220,13 @@ pub fn reml_criterion(
     let rss_bsb = rss + lambda * beta_s_beta;
 
     // Reuse X'WX from above (no recomputation needed!)
-    let a = &xtwx + &(penalty * lambda);
+    let a = &xtwx + &(&penalty * lambda);
 
     // Compute log determinants
     let log_det_a = determinant(&a)?.ln();
 
     // Estimate rank of penalty matrix
-    let rank_s = estimate_rank(penalty);
+    let rank_s = estimate_rank(&penalty);
 
     // Compute scale parameter: φ = RSS / (n - rank(S))
     // Note: φ is based on RSS alone, not RSS + λβ'Sβ
@@ -242,7 +244,7 @@ pub fn reml_criterion(
 
     // Compute pseudo-determinant of penalty matrix
     #[cfg(feature = "blas")]
-    let log_pseudo_det = pseudo_determinant(penalty)?;
+    let log_pseudo_det = pseudo_determinant(&penalty)?;
     #[cfg(not(feature = "blas"))]
     let log_pseudo_det = 0.0; // Fallback when BLAS not available
 
@@ -264,8 +266,9 @@ pub fn gcv_criterion(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambda: f64,
-    penalty: &Array2<f64>,
+    penalty_block: &BlockPenalty,
 ) -> Result<f64> {
+    let penalty = penalty_block.to_dense();
     let n = y.len();
     let p = x.ncols();
 
@@ -281,7 +284,7 @@ pub fn gcv_criterion(
     // Solve for coefficients
     let xtw = x_weighted.t().to_owned();
     let xtwx = xtw.dot(&x_weighted);
-    let a = xtwx + &(penalty * lambda);
+    let a = xtwx + &(&penalty * lambda);
 
     // Optimized y_weighted computation
     let mut y_weighted = Array1::zeros(n);
@@ -351,7 +354,7 @@ pub fn reml_criterion_multi(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties: &[BlockPenalty],
     beta: Option<&Array1<f64>>,
 ) -> Result<f64> {
     reml_criterion_multi_cached(y, x, w, lambdas, penalties, beta, None)
@@ -363,10 +366,14 @@ pub fn reml_criterion_multi_cached(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     beta: Option<&Array1<f64>>,
     cached_xtwx: Option<&Array2<f64>>,
 ) -> Result<f64> {
+    // Convert BlockPenalty to dense for internal use (Phase 2: migration)
+    // TODO(Phase 3): Use BlockPenalty methods directly for performance
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
+
     let n = y.len();
     let p = x.ncols();
 
@@ -566,9 +573,10 @@ pub fn pseudo_determinant(penalty: &Array2<f64>) -> Result<f64> {
 /// For a symmetric positive semi-definite matrix S, computes L such that S = L'L
 /// Uses eigenvalue decomposition: S = Q Λ Q', so L = Q Λ^{1/2} Q' (taking transpose)
 #[cfg(feature = "blas")]
-pub fn penalty_sqrt(penalty: &Array2<f64>) -> Result<Array2<f64>> {
+pub fn penalty_sqrt(penalty_block: &BlockPenalty) -> Result<Array2<f64>> {
     use ndarray_linalg::Eigh;
 
+    let penalty = penalty_block.to_dense();
     let n = penalty.nrows();
     if n != penalty.ncols() {
         return Err(GAMError::InvalidParameter(
@@ -661,9 +669,10 @@ pub fn reml_gradient_multi_qr_adaptive(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties, None, None, None)
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
+    reml_gradient_multi_qr_adaptive_cached(y, x, w, lambdas, penalties_blocks, None, None, None)
 }
 
 /// Adaptive QR gradient with optional cached sqrt_penalties
@@ -673,18 +682,19 @@ pub fn reml_gradient_multi_qr_adaptive_cached(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
     cached_xtwx: Option<&Array2<f64>>,
     cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     // Default to rank-based phi for backward compatibility
     reml_gradient_multi_qr_adaptive_cached_edf(
         y,
         x,
         w,
         lambdas,
-        penalties,
+        penalties_blocks,
         cached_sqrt_penalties,
         cached_xtwx,
         cached_xtwy,
@@ -710,13 +720,14 @@ pub fn reml_gradient_multi_qr_adaptive_cached_edf(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
     cached_xtwx: Option<&Array2<f64>>,
     cached_xtwy: Option<&Array1<f64>>,
     cached_xtwx_chol: Option<&Array2<f64>>,
     scale_method: ScaleParameterMethod,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     let n = y.len();
     let d = lambdas.len(); // Number of smoothing parameters (dimensionality)
 
@@ -734,7 +745,7 @@ pub fn reml_gradient_multi_qr_adaptive_cached_edf(
                 x,
                 w,
                 lambdas,
-                penalties,
+                penalties_blocks,
                 1000,
                 cached_sqrt_penalties,
                 cached_xtwx,
@@ -750,7 +761,7 @@ pub fn reml_gradient_multi_qr_adaptive_cached_edf(
                 x,
                 w,
                 lambdas,
-                penalties,
+                penalties_blocks,
                 cached_sqrt_penalties,
                 cached_xtwx,
                 cached_xtwy,
@@ -762,7 +773,7 @@ pub fn reml_gradient_multi_qr_adaptive_cached_edf(
             x,
             w,
             lambdas,
-            penalties,
+            penalties_blocks,
             cached_sqrt_penalties,
             cached_xtwx,
             cached_xtwy,
@@ -780,11 +791,20 @@ pub fn reml_gradient_multi_qr_blockwise(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     block_size: usize,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     reml_gradient_multi_qr_blockwise_cached(
-        y, x, w, lambdas, penalties, block_size, None, None, None,
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        block_size,
+        None,
+        None,
+        None,
     )
 }
 
@@ -795,12 +815,13 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     block_size: usize,
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
     cached_xtwx: Option<&Array2<f64>>,
     cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     use crate::blockwise_qr::compute_r_blockwise;
     use ndarray_linalg::{Diag, SolveTriangular, UPLO};
 
@@ -822,7 +843,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
         // Compute square root penalties once (these are constant)
         let mut sp = Vec::new();
         let mut pr = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_blocks.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             let rank = sqrt_pen.ncols();
             sp.push(sqrt_pen);
@@ -1063,7 +1084,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached_edf(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     block_size: usize,
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
     cached_xtwx: Option<&Array2<f64>>,
@@ -1071,6 +1092,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached_edf(
     cached_xtwx_chol: Option<&Array2<f64>>,
     scale_method: ScaleParameterMethod,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     use crate::blockwise_qr::compute_r_blockwise;
     use ndarray_linalg::{Diag, SolveTriangular, UPLO};
 
@@ -1089,7 +1111,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached_edf(
     } else {
         let mut sp = Vec::new();
         let mut pr = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_blocks.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             let rank = sqrt_pen.ncols();
             sp.push(sqrt_pen);
@@ -1295,9 +1317,10 @@ pub fn reml_gradient_multi_qr_blockwise(
     _x: &Array2<f64>,
     _w: &Array1<f64>,
     _lambdas: &[f64],
-    _penalties: &[Array2<f64>],
+    _penalties_blocks: &[BlockPenalty],
     _block_size: usize,
 ) -> Result<Array1<f64>> {
+    let _penalties: Vec<Array2<f64>> = _penalties_blocks.iter().map(|p| p.to_dense()).collect();
     Err(GAMError::InvalidParameter(
         "Block-wise QR requires 'blas' feature".to_string(),
     ))
@@ -1320,9 +1343,10 @@ pub fn reml_gradient_multi_qr(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
 ) -> Result<Array1<f64>> {
-    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties, None, None, None)
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
+    reml_gradient_multi_qr_cached(y, x, w, lambdas, penalties_blocks, None, None, None)
 }
 
 /// QR-based REML gradient with optional cached sqrt_penalties
@@ -1333,11 +1357,12 @@ pub fn reml_gradient_multi_qr_cached(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
     _cached_xtwx: Option<&Array2<f64>>,
     _cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     use ndarray_linalg::QR;
     use ndarray_linalg::{Diag, SolveTriangular, UPLO};
 
@@ -1369,7 +1394,7 @@ pub fn reml_gradient_multi_qr_cached(
         // Compute square root penalties and their ranks
         let mut sp = Vec::new();
         let mut pr = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_blocks.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             // Use the actual rank from eigenvalue decomposition (number of positive eigenvalues)
             // This is more accurate than the heuristic in estimate_rank()
@@ -1660,13 +1685,14 @@ pub fn reml_gradient_multi_qr_cached_edf(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     cached_sqrt_penalties: Option<&Vec<Array2<f64>>>,
     _cached_xtwx: Option<&Array2<f64>>,
     _cached_xtwy: Option<&Array1<f64>>,
     cached_xtwx_chol: Option<&Array2<f64>>,
     scale_method: ScaleParameterMethod,
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     use ndarray_linalg::QR;
     use ndarray_linalg::{Diag, SolveTriangular, UPLO};
 
@@ -1694,7 +1720,7 @@ pub fn reml_gradient_multi_qr_cached_edf(
     } else {
         let mut sp = Vec::new();
         let mut pr = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_blocks.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             let rank = sqrt_pen.ncols();
             sp.push(sqrt_pen);
@@ -1909,12 +1935,13 @@ pub fn reml_gradient_multi_cholesky(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     // Compute square root penalties (expensive eigendecomp)
     let mut sqrt_penalties = Vec::new();
     let mut penalty_ranks = Vec::new();
-    for penalty in penalties.iter() {
+    for penalty in penalties_blocks.iter() {
         let sqrt_pen = penalty_sqrt(penalty)?;
         let rank = sqrt_pen.ncols();
         sqrt_penalties.push(sqrt_pen);
@@ -1927,7 +1954,7 @@ pub fn reml_gradient_multi_cholesky(
         x,
         w,
         lambdas,
-        penalties,
+        penalties_blocks,
         &sqrt_penalties,
         &penalty_ranks,
     )
@@ -1947,10 +1974,11 @@ pub fn reml_gradient_multi_cholesky_cached(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     sqrt_penalties: &[Array2<f64>],
     penalty_ranks: &[usize],
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     use ndarray_linalg::{Cholesky, Diag, SolveTriangular, UPLO};
 
     let n = y.len();
@@ -2119,13 +2147,14 @@ pub fn reml_gradient_multi_cholesky_cached(
 pub fn reml_gradient_multi_cholesky_fully_cached(
     x: &Array2<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     sqrt_penalties: &[Array2<f64>],
     penalty_ranks: &[usize],
     xtwx: &Array2<f64>,                           // Pre-computed X'WX
     xtwy: &Array1<f64>,                           // Pre-computed X'Wy
     y_residual_data: &(Array1<f64>, Array1<f64>), // (y, w) for residual computation
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     use ndarray_linalg::{Cholesky, Diag, SolveTriangular, UPLO};
 
     let (y, w) = y_residual_data;
@@ -2271,13 +2300,14 @@ pub fn reml_gradient_multi_cholesky_fully_cached(
 pub fn reml_gradient_multi_cholesky_fully_cached(
     _x: &Array2<f64>,
     _lambdas: &[f64],
-    _penalties: &[Array2<f64>],
+    _penalties_blocks: &[BlockPenalty],
     _sqrt_penalties: &[Array2<f64>],
     _penalty_ranks: &[usize],
     _xtwx: &Array2<f64>,
     _xtwy: &Array1<f64>,
     _y_residual_data: &(Array1<f64>, Array1<f64>),
 ) -> Result<Array1<f64>> {
+    let _penalties: Vec<Array2<f64>> = _penalties_blocks.iter().map(|p| p.to_dense()).collect();
     Err(GAMError::InvalidParameter(
         "Fully cached gradient requires 'blas' feature".to_string(),
     ))
@@ -2289,8 +2319,9 @@ pub fn reml_gradient_multi_cholesky(
     _x: &Array2<f64>,
     _w: &Array1<f64>,
     _lambdas: &[f64],
-    _penalties: &[Array2<f64>],
+    _penalties_blocks: &[BlockPenalty],
 ) -> Result<Array1<f64>> {
+    let _penalties: Vec<Array2<f64>> = _penalties_blocks.iter().map(|p| p.to_dense()).collect();
     Err(GAMError::InvalidParameter(
         "Cholesky gradient requires 'blas' feature".to_string(),
     ))
@@ -2302,10 +2333,11 @@ pub fn reml_gradient_multi_cholesky_cached(
     _x: &Array2<f64>,
     _w: &Array1<f64>,
     _lambdas: &[f64],
-    _penalties: &[Array2<f64>],
+    _penalties_blocks: &[BlockPenalty],
     _sqrt_penalties: &[Array2<f64>],
     _penalty_ranks: &[usize],
 ) -> Result<Array1<f64>> {
+    let _penalties: Vec<Array2<f64>> = _penalties_blocks.iter().map(|p| p.to_dense()).collect();
     Err(GAMError::InvalidParameter(
         "Cholesky gradient requires 'blas' feature".to_string(),
     ))
@@ -2328,7 +2360,7 @@ pub fn reml_hessian_multi_qr(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
 ) -> Result<Array2<f64>> {
     use ndarray_linalg::Inverse;
     use ndarray_linalg::QR;
@@ -2354,7 +2386,7 @@ pub fn reml_hessian_multi_qr(
     let mut sqrt_penalties = Vec::with_capacity(m);
     let mut penalty_ranks = Vec::with_capacity(m);
 
-    for penalty in penalties.iter() {
+    for penalty in penalties_blocks.iter() {
         let sqrt_pen = penalty_sqrt(penalty)?;
         let rank = sqrt_pen.ncols();
         sqrt_penalties.push(sqrt_pen);
@@ -2394,8 +2426,8 @@ pub fn reml_hessian_multi_qr(
     let xtw = sqrt_w_x.t().to_owned();
     let xtwx = xtw.dot(&sqrt_w_x);
     let mut a = xtwx.clone();
-    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
-        a.scaled_add(*lambda, penalty);
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
     }
 
     let y_weighted: Array1<f64> = y.iter().zip(w.iter()).map(|(yi, wi)| yi * wi).collect();
@@ -2432,12 +2464,7 @@ pub fn reml_hessian_multi_qr(
     // Compute P = RSS + Σⱼ λⱼ·β'·Sⱼ·β
     let mut penalty_sum = 0.0;
     for j in 0..m {
-        let s_j_beta = penalties[j].dot(&beta);
-        let beta_s_j_beta: f64 = beta
-            .iter()
-            .zip(s_j_beta.iter())
-            .map(|(bi, sbi)| bi * sbi)
-            .sum();
+        let beta_s_j_beta = penalties_blocks[j].quadratic_form(&beta);
         penalty_sum += lambdas[j] * beta_s_j_beta;
     }
     let p_value = rss + penalty_sum;
@@ -2461,16 +2488,16 @@ pub fn reml_hessian_multi_qr(
 
     for i in 0..m {
         let lambda_i = lambdas[i];
-        let penalty_i = &penalties[i];
+        let penalty_i = &penalties_blocks[i];
 
         // ∂β/∂ρᵢ = -A⁻¹·λᵢ·Sᵢ·β
-        let s_i_beta = penalty_i.dot(&beta);
+        let s_i_beta = penalty_i.dot_vec(&beta);
         let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
-        let dbeta_i = a_inv.dot(&lambda_s_beta).mapv(|x| -x);
+        let dbeta_i: Array1<f64> = a_inv.dot(&lambda_s_beta).mapv(|x| -x);
         dbeta_drho.push(dbeta_i.clone());
 
         // ∂RSS/∂ρᵢ = -2·r'·X·∂β/∂ρᵢ
-        let x_dbeta = x.dot(&dbeta_i);
+        let x_dbeta: Array1<f64> = x.dot(&dbeta_i);
         let drss_i: f64 = -2.0
             * residuals
                 .iter()
@@ -2484,17 +2511,13 @@ pub fn reml_hessian_multi_qr(
         dphi_drho.push(dphi_i);
 
         // ∂P/∂ρᵢ = ∂RSS/∂ρᵢ + λᵢ·β'·Sᵢ·β + 2·Σⱼ λⱼ·β'·Sⱼ·∂β/∂ρᵢ
-        let beta_s_i_beta: f64 = beta
-            .iter()
-            .zip(s_i_beta.iter())
-            .map(|(bi, sbi)| bi * sbi)
-            .sum();
+        let beta_s_i_beta = penalty_i.quadratic_form(&beta);
         let explicit_pen = lambda_i * beta_s_i_beta;
 
         let mut implicit_pen = 0.0;
         for j in 0..m {
-            let s_j_beta = penalties[j].dot(&beta);
-            let s_j_dbeta = penalties[j].dot(&dbeta_i);
+            let s_j_beta = penalties_blocks[j].dot_vec(&beta);
+            let s_j_dbeta = penalties_blocks[j].dot_vec(&dbeta_i);
             let term1: f64 = s_j_beta
                 .iter()
                 .zip(dbeta_i.iter())
@@ -2520,8 +2543,8 @@ pub fn reml_hessian_multi_qr(
             // Only compute upper triangle (symmetric)
             let lambda_i = lambdas[i];
             let lambda_j = lambdas[j];
-            let s_i = &penalties[i];
-            let s_j = &penalties[j];
+            let s_i = &penalties_blocks[i];
+            let s_j = &penalties_blocks[j];
             let sqrt_si = &sqrt_penalties[i];
 
             // ================================================================
@@ -2530,14 +2553,12 @@ pub fn reml_hessian_multi_qr(
             // = [δᵢⱼ·λᵢ·tr(A⁻¹·Sᵢ) - λᵢ·λⱼ·tr(A⁻¹·Sⱼ·A⁻¹·Sᵢ)] / 2
 
             // Part A: -λᵢ·λⱼ·tr(A⁻¹·Sⱼ·A⁻¹·Sᵢ)
-            let ainv_sj = a_inv.dot(s_j);
-            let ainv_sj_ainv = ainv_sj.dot(&a_inv);
-            let si_ainv_sj_ainv = s_i.dot(&ainv_sj_ainv);
-            let mut trace1a = 0.0;
-            for k in 0..p {
-                trace1a += si_ainv_sj_ainv[[k, k]];
-            }
-            let term1a = -lambda_i * lambda_j * trace1a;
+            // Use trace_product to compute tr(A⁻¹·Sⱼ·A⁻¹·Sᵢ)
+            // tr(Sᵢ · (A⁻¹·Sⱼ·A⁻¹)) = tr((A⁻¹·Sⱼ·A⁻¹) · Sᵢ)
+            let ainv_sj: Array2<f64> = s_j.left_mul_dense(&a_inv);
+            let ainv_sj_ainv: Array2<f64> = ainv_sj.dot(&a_inv);
+            let trace1a_val = s_i.trace_product(&ainv_sj_ainv);
+            let term1a = -lambda_i * lambda_j * trace1a_val;
 
             // Part B: δᵢⱼ·λᵢ·tr(A⁻¹·Sᵢ)
             let term1b = if i == j {
@@ -2556,13 +2577,13 @@ pub fn reml_hessian_multi_qr(
             // This is the big one! Needs ∂²P, ∂²RSS, ∂²β, ∂²φ
 
             // Compute ∂²β/∂ρⱼ∂ρᵢ
-            let si_beta = s_i.dot(&beta);
-            let ainv_si_beta = a_inv.dot(&si_beta);
+            let si_beta = s_i.dot_vec(&beta);
+            let ainv_si_beta: Array1<f64> = a_inv.dot(&si_beta);
             let lambda_i_ainv_si_beta = ainv_si_beta.mapv(|x| lambda_i * x);
-            let sj_times_term = s_j.dot(&lambda_i_ainv_si_beta);
+            let sj_times_term = s_j.dot_vec(&lambda_i_ainv_si_beta);
             let part_a = a_inv.dot(&sj_times_term).mapv(|x| lambda_j * x);
 
-            let si_dbeta_j = s_i.dot(&dbeta_drho[j]);
+            let si_dbeta_j = s_i.dot_vec(&dbeta_drho[j]);
             let part_b = a_inv.dot(&si_dbeta_j).mapv(|x| -lambda_i * x);
 
             let mut d2beta = part_a + part_b;
@@ -2571,7 +2592,7 @@ pub fn reml_hessian_multi_qr(
             }
 
             // Compute ∂²RSS/∂ρⱼ∂ρᵢ
-            let x_dbeta_j = x.dot(&dbeta_drho[j]);
+            let x_dbeta_j: Array1<f64> = x.dot(&dbeta_drho[j]);
             let x_dbeta_i = x.dot(&dbeta_drho[i]);
             let d2rss_part1 = 2.0 * x_dbeta_j.dot(&x_dbeta_i);
 
@@ -2607,8 +2628,8 @@ pub fn reml_hessian_multi_qr(
 
             let mut implicit_sum = 0.0;
             for k in 0..m {
-                let sk_beta = penalties[k].dot(&beta);
-                let sk_dbeta_i = penalties[k].dot(&dbeta_drho[i]);
+                let sk_beta = penalties_blocks[k].dot_vec(&beta);
+                let sk_dbeta_i = penalties_blocks[k].dot_vec(&dbeta_drho[i]);
 
                 // δₖⱼ·λₖ·∂β'/∂ρᵢ·Sₖ·β
                 let term1 = if k == j {
@@ -2726,8 +2747,9 @@ pub fn reml_gradient_multi(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
 ) -> Result<Array1<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     eprintln!("[GRAD_DEBUG] OLD reml_gradient_multi called!");
     let n = y.len();
     let p = x.ncols();
@@ -2890,8 +2912,9 @@ pub fn reml_hessian_multi(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
 ) -> Result<Array2<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     let n = y.len();
     let p = x.ncols();
     let m = lambdas.len();
@@ -3203,9 +3226,10 @@ pub fn reml_hessian_multi_cached(
     x: &Array2<f64>,
     w: &Array1<f64>,
     lambdas: &[f64],
-    penalties: &[Array2<f64>],
+    penalties_blocks: &[BlockPenalty],
     cached_xtwx: &Array2<f64>,
 ) -> Result<Array2<f64>> {
+    let penalties: Vec<Array2<f64>> = penalties_blocks.iter().map(|p| p.to_dense()).collect();
     let n = y.len();
     let p = x.ncols();
     let m = lambdas.len();
@@ -3379,9 +3403,10 @@ mod tests {
         let x = Array2::from_shape_fn((n, p), |(i, j)| (i + j) as f64);
         let w = Array1::ones(n);
         let penalty = Array2::eye(p);
+        let penalty_block = BlockPenalty::new(penalty, 0, p);
         let lambda = 0.1;
 
-        let result = reml_criterion(&y, &x, &w, lambda, &penalty, None);
+        let result = reml_criterion(&y, &x, &w, lambda, &penalty_block, None);
         assert!(result.is_ok());
     }
 
@@ -3394,9 +3419,10 @@ mod tests {
         let x = Array2::from_shape_fn((n, p), |(i, j)| (i + j) as f64);
         let w = Array1::ones(n);
         let penalty = Array2::eye(p);
+        let penalty_block = BlockPenalty::new(penalty, 0, p);
         let lambda = 0.1;
 
-        let result = gcv_criterion(&y, &x, &w, lambda, &penalty);
+        let result = gcv_criterion(&y, &x, &w, lambda, &penalty_block);
         assert!(result.is_ok());
     }
 
@@ -3450,11 +3476,16 @@ mod tests {
             penalties.push(penalty);
         }
 
+        let penalties_blocks: Vec<_> = penalties
+            .into_iter()
+            .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+            .collect();
+
         // Test with moderate lambdas
         let lambdas = vec![1.0, 1.0, 100.0];
 
         // Compute gradient
-        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
 
         assert!(
             result.is_ok(),
@@ -3523,10 +3554,15 @@ mod tests {
             penalties.push(penalty);
         }
 
+        let penalties_blocks: Vec<_> = penalties
+            .into_iter()
+            .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+            .collect();
+
         // Test with very different lambda scales
         let lambdas = vec![0.01, 1000.0];
 
-        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
 
         assert!(
             result.is_ok(),
@@ -3598,10 +3634,15 @@ mod tests {
             penalties.push(penalty);
         }
 
+        let penalties_blocks: Vec<_> = penalties
+            .into_iter()
+            .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+            .collect();
+
         let lambdas = vec![1.0, 1.0];
 
         // Compute analytical gradient (uses rank-based phi)
-        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
         assert!(result.is_ok());
         let gradient_analytical = result.unwrap();
 
@@ -3611,8 +3652,8 @@ mod tests {
         let reml_rank_based = |lam: &[f64]| -> f64 {
             let xtwx = compute_xtwx(&x, &w);
             let mut a = xtwx.clone();
-            for (lambda, pen) in lam.iter().zip(penalties.iter()) {
-                a.scaled_add(*lambda, pen);
+            for (lambda, pen) in lam.iter().zip(penalties_blocks.iter()) {
+                pen.scaled_add_to(&mut a, *lambda);
             }
 
             let b = compute_xtwy(&x, &w, &y);
@@ -3636,8 +3677,8 @@ mod tests {
                 .sum();
 
             let mut penalty_sum = 0.0;
-            for (lambda, pen) in lam.iter().zip(penalties.iter()) {
-                let s_beta = pen.dot(&beta);
+            for (lambda, pen) in lam.iter().zip(penalties_blocks.iter()) {
+                let s_beta = pen.dot_vec(&beta);
                 let bsb: f64 = beta
                     .iter()
                     .zip(s_beta.iter())
@@ -3649,9 +3690,9 @@ mod tests {
             let mut total_rank = 0usize;
             let mut log_lambda_sum = 0.0;
             let mut log_pseudo_det_sum = 0.0;
-            for (lambda, pen) in lam.iter().zip(penalties.iter()) {
+            for (lambda, pen) in lam.iter().zip(penalties_blocks.iter()) {
                 if *lambda > 1e-10 {
-                    let rank_s = estimate_rank(pen);
+                    let rank_s = pen.estimate_rank();
                     if rank_s > 0 {
                         total_rank += rank_s;
                         log_lambda_sum += (rank_s as f64) * lambda.ln();
@@ -3659,7 +3700,7 @@ mod tests {
                 }
                 #[cfg(feature = "blas")]
                 {
-                    log_pseudo_det_sum += pseudo_determinant(pen).unwrap_or(0.0);
+                    log_pseudo_det_sum += pseudo_determinant(&pen.to_dense()).unwrap_or(0.0);
                 }
             }
 
@@ -3772,10 +3813,15 @@ mod tests {
             penalties.push(penalty);
         }
 
+        let penalties_blocks: Vec<_> = penalties
+            .into_iter()
+            .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+            .collect();
+
         // Start with moderate lambdas
         let lambdas = vec![10.0, 10.0, 100.0];
 
-        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
 
         assert!(result.is_ok());
         let gradient = result.unwrap();

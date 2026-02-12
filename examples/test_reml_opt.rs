@@ -7,7 +7,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("=== Testing REML Optimization ===\n");
 
     // Generate data
-    let n = 300;  // Increased from 30 to 300
+    let n = 300; // Increased from 30 to 300
     let x_data: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
     let y_data: Vec<f64> = x_data
         .iter()
@@ -28,6 +28,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let penalty = &smooth.penalty;
     let weights = Array1::ones(n);
 
+    // Create BlockPenalty wrapper
+    let penalty_block =
+        mgcv_rust::block_penalty::BlockPenalty::new(penalty.clone(), 0, penalty.nrows());
+    let penalty = &penalty_block;
+
     println!("Testing REML criterion at different λ values:\n");
     println!("{}", "=".repeat(50));
     println!(" log₁₀(λ) | λ value    | REML score");
@@ -37,8 +42,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let lambda = 10.0_f64.powi(log_lambda);
         let reml_score = reml::reml_criterion(&y, &basis_matrix, &weights, lambda, penalty, None)?;
 
-        println!(" {:8} | {:.6} | {:.6}",
-            log_lambda, lambda, reml_score);
+        println!(" {:8} | {:.6} | {:.6}", log_lambda, lambda, reml_score);
     }
 
     println!("{}", "=".repeat(50));
@@ -52,8 +56,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let lambda = 10.0_f64.powi(log_lambda);
         let gcv_score = reml::gcv_criterion(&y, &basis_matrix, &weights, lambda, penalty)?;
 
-        println!(" {:8} | {:.6} | {:.6}",
-            log_lambda, lambda, gcv_score);
+        println!(" {:8} | {:.6} | {:.6}", log_lambda, lambda, gcv_score);
     }
 
     println!("{}", "=".repeat(50));

@@ -676,7 +676,11 @@ fn evaluate_gradient<'py>(
 
     // Compute gradient using QR method
     let w = Array1::from_elem(y_array.len(), 1.0);
-    let gradient = reml::reml_gradient_multi_qr(&y_array, &x_full, &w, &lambdas, &penalties_vec)
+    let penalties_block: Vec<_> = penalties_vec
+        .into_iter()
+        .map(|p| block_penalty::BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
+    let gradient = reml::reml_gradient_multi_qr(&y_array, &x_full, &w, &lambdas, &penalties_block)
         .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
     Ok(PyArray1::from_owned_array(py, gradient))
@@ -699,9 +703,13 @@ fn reml_gradient_multi_qr_py<'py>(
     let w_array = w.as_array().to_owned();
 
     let penalties_vec: Vec<_> = penalties.iter().map(|p| p.as_array().to_owned()).collect();
+    let penalties_block: Vec<_> = penalties_vec
+        .iter()
+        .map(|p| block_penalty::BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
 
     let gradient =
-        reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+        reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_block)
             .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
     Ok(PyArray1::from_owned_array(py, gradient))
@@ -724,9 +732,13 @@ fn reml_hessian_multi_qr_py<'py>(
     let w_array = w.as_array().to_owned();
 
     let penalties_vec: Vec<_> = penalties.iter().map(|p| p.as_array().to_owned()).collect();
+    let penalties_block: Vec<_> = penalties_vec
+        .iter()
+        .map(|p| block_penalty::BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
 
     let hessian =
-        reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+        reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_block)
             .map_err(|e| PyValueError::new_err(format!("Hessian computation failed: {}", e)))?;
 
     Ok(PyArray2::from_owned_array(py, hessian))

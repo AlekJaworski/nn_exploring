@@ -1,9 +1,10 @@
 // Profile gradient computation to identify bottlenecks
 #[cfg(feature = "blas")]
 fn main() {
+    use mgcv_rust::block_penalty::BlockPenalty;
     use mgcv_rust::reml::reml_gradient_multi_qr;
     use ndarray::{Array1, Array2};
-    use rand::{SeedableRng, Rng};
+    use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
@@ -34,7 +35,7 @@ fn main() {
     // Create penalties
     println!("[2/4] Creating penalties...");
     let start = Instant::now();
-    let mut penalties = Vec::new();
+    let mut penalties_dense = Vec::new();
     for dim in 0..n_dims {
         let mut penalty = Array2::zeros((p, p));
         let start_col = dim * k;
@@ -49,8 +50,14 @@ fn main() {
                 }
             }
         }
-        penalties.push(penalty);
+        penalties_dense.push(penalty);
     }
+
+    let penalties: Vec<BlockPenalty> = penalties_dense
+        .iter()
+        .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
+
     println!("  Created in {:.3}s\n", start.elapsed().as_secs_f64());
 
     let lambdas: Vec<f64> = (0..n_dims).map(|i| 1.0 + (i as f64) * 10.0).collect();
@@ -83,9 +90,19 @@ fn main() {
     println!("\nBottleneck candidates:");
     println!("  1. Trace computation: {} solve() calls", n_dims * k);
     println!("     → Batch to {} calls with solve_triangular()", n_dims);
-    println!("  2. Beta derivatives: {} solve() calls (no caching)", n_dims);
-    println!("     → Cache Cholesky factorization, reuse {} times", n_dims);
-    println!("  3. QR decomposition: Large matrix {}×{}", n + n_dims * k, p);
+    println!(
+        "  2. Beta derivatives: {} solve() calls (no caching)",
+        n_dims
+    );
+    println!(
+        "     → Cache Cholesky factorization, reuse {} times",
+        n_dims
+    );
+    println!(
+        "  3. QR decomposition: Large matrix {}×{}",
+        n + n_dims * k,
+        p
+    );
     println!("     → Consider blockwise approach for n > 2000");
 }
 

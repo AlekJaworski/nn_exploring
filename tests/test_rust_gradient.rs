@@ -1,6 +1,8 @@
+#![cfg(feature = "blas")]
+use mgcv_rust::block_penalty::BlockPenalty;
+use mgcv_rust::reml::reml_gradient_multi_qr;
 ///Test the corrected Rust gradient implementation
 use ndarray::{Array1, Array2};
-use mgcv_rust::reml::reml_gradient_multi_qr;
 use std::fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,10 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse y values
     let y: Vec<f64> = df_text
         .lines()
-        .skip(1)  // Skip header
-        .filter_map(|line| {
-            line.split(',').nth(1)?.parse().ok()
-        })
+        .skip(1) // Skip header
+        .filter_map(|line| line.split(',').nth(1)?.parse().ok())
         .collect();
 
     let n = y.len();
@@ -30,7 +30,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ncol = x_lines[0].split(',').count();
     let mut x_vec = Vec::new();
     for line in x_lines {
-        let row: Vec<f64> = line.split(',')
+        let row: Vec<f64> = line
+            .split(',')
             .filter_map(|s| s.trim().parse().ok())
             .collect();
         x_vec.extend(row);
@@ -45,13 +46,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let s_ncol = s_lines[0].split(',').count();
         let mut s_vec = Vec::new();
         for line in s_lines {
-            let row: Vec<f64> = line.split(',')
+            let row: Vec<f64> = line
+                .split(',')
                 .filter_map(|s| s.trim().parse().ok())
                 .collect();
             s_vec.extend(row);
         }
         let s_array = Array2::from_shape_vec((s_ncol, s_ncol), s_vec)?;
-        penalties.push(s_array);
+        let block_penalty = BlockPenalty::new(s_array, 0, s_ncol);
+        penalties.push(block_penalty);
     }
 
     // mgcv's solution
@@ -76,10 +79,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Compare
-    let expected = Array1::from_vec(vec![-0.07470567, -0.01838225, -0.04935873, -0.04883168, -0.0004793]);
+    let expected = Array1::from_vec(vec![
+        -0.07470567,
+        -0.01838225,
+        -0.04935873,
+        -0.04883168,
+        -0.0004793,
+    ]);
     let diff = &gradient - &expected;
-    let rel_error = diff.iter().map(|x| x*x).sum::<f64>().sqrt()
-                  / expected.iter().map(|x| x*x).sum::<f64>().sqrt();
+    let rel_error = diff.iter().map(|x| x * x).sum::<f64>().sqrt()
+        / expected.iter().map(|x| x * x).sum::<f64>().sqrt();
 
     println!("Difference:");
     println!("  {:?}", diff.as_slice().unwrap());

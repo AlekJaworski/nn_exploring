@@ -1,12 +1,13 @@
 // Benchmark individual components
 #[cfg(feature = "blas")]
 fn main() {
+    use mgcv_rust::block_penalty::BlockPenalty;
+    use mgcv_rust::reml::reml_gradient_multi_cholesky_cached;
     use ndarray::{Array1, Array2};
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand::Rng;
     use std::time::Instant;
-    use mgcv_rust::reml::reml_gradient_multi_cholesky_cached;
 
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -31,7 +32,7 @@ fn main() {
     let mut penalties = Vec::new();
     let mut sqrt_penalties = Vec::new();
     let mut penalty_ranks = Vec::new();
-    
+
     for dim in 0..n_dims {
         let mut penalty = Array2::zeros((p, p));
         let start_idx = dim * k;
@@ -39,27 +40,39 @@ fn main() {
         for i in start_idx..end_idx {
             penalty[[i, i]] = 1.0;
         }
-        
+
         // Dummy sqrt (identity blocks)
         let mut sqrt_pen = Array2::zeros((p, k));
         for i in 0..k {
             sqrt_pen[[start_idx + i, i]] = 1.0;
         }
-        
+
         penalties.push(penalty);
         sqrt_penalties.push(sqrt_pen);
         penalty_ranks.push(k);
     }
 
+    let penalties_blocks: Vec<BlockPenalty> = penalties
+        .iter()
+        .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
+
     println!("Profiling gradient call (10 iterations)...");
     let start = Instant::now();
     for _ in 0..10 {
         let _ = reml_gradient_multi_cholesky_cached(
-            &y, &x, &w, &lambdas, &penalties, &sqrt_penalties, &penalty_ranks
-        ).unwrap();
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties_blocks,
+            &sqrt_penalties,
+            &penalty_ranks,
+        )
+        .unwrap();
     }
     let total = start.elapsed().as_secs_f64();
-    
+
     println!("  Total: {:.3}s", total);
     println!("  Per call: {:.3}s\n", total / 10.0);
 

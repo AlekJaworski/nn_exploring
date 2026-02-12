@@ -1,13 +1,16 @@
 // Test fully cached gradient (sqrt_penalties + X'WX + X'Wy)
 #[cfg(feature = "blas")]
 fn main() {
+    use mgcv_rust::block_penalty::BlockPenalty;
+    use mgcv_rust::reml::{
+        reml_gradient_multi_cholesky, reml_gradient_multi_cholesky_fully_cached,
+    };
     use ndarray::{Array1, Array2};
     use ndarray_linalg::Eigh;
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand::Rng;
     use std::time::Instant;
-    use mgcv_rust::reml::{reml_gradient_multi_cholesky, reml_gradient_multi_cholesky_fully_cached};
 
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -17,7 +20,10 @@ fn main() {
     let p = n_dims * k;
 
     println!("=== Testing Fully Cached Gradient ===\n");
-    println!("Configuration: n={}, dims={}, k={}, p={}\n", n, n_dims, k, p);
+    println!(
+        "Configuration: n={}, dims={}, k={}, p={}\n",
+        n, n_dims, k, p
+    );
 
     // Generate data
     let mut x = Array2::<f64>::zeros((n, p));
@@ -42,9 +48,14 @@ fn main() {
         penalties.push(penalty);
     }
 
+    let penalties_blocks: Vec<BlockPenalty> = penalties
+        .iter()
+        .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
+
     println!("[1/3] Pre-compute ALL cacheable values...");
     let start = Instant::now();
-    
+
     // Sqrt penalties
     let mut sqrt_penalties = Vec::new();
     let mut penalty_ranks = Vec::new();
@@ -52,12 +63,14 @@ fn main() {
         let (eigenvalues, eigenvectors) = penalty.eigh(ndarray_linalg::UPLO::Upper).unwrap();
         let max_eig = eigenvalues.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let threshold = 1e-10 * max_eig.max(1.0);
-        
-        let non_zero: Vec<_> = eigenvalues.iter().enumerate()
+
+        let non_zero: Vec<_> = eigenvalues
+            .iter()
+            .enumerate()
             .filter(|(_, &e)| e > threshold)
             .collect();
         let rank = non_zero.len();
-        
+
         let mut sqrt_pen = Array2::zeros((p, rank));
         for (out_j, &(in_j, &eig)) in non_zero.iter().enumerate() {
             let sqrt_eval = eig.sqrt();
@@ -68,7 +81,7 @@ fn main() {
         sqrt_penalties.push(sqrt_pen);
         penalty_ranks.push(rank);
     }
-    
+
     // X'WX
     let mut x_weighted = Array2::zeros((n, p));
     for i in 0..n {
@@ -78,7 +91,7 @@ fn main() {
         }
     }
     let xtwx = x_weighted.t().dot(&x_weighted);
-    
+
     // X'Wy
     let mut xtwy = Array1::zeros(p);
     for i in 0..p {
@@ -88,33 +101,54 @@ fn main() {
         }
         xtwy[i] = sum;
     }
-    
+
     let precomp_time = start.elapsed().as_secs_f64();
     println!("  Precomputation time: {:.3}s\n", precomp_time);
 
     println!("[2/3] Benchmark standard cached (10 calls)...");
     let start = Instant::now();
     for _ in 0..10 {
-        let _ = reml_gradient_multi_cholesky(&y, &x, &w, &lambdas, &penalties).unwrap();
+        let _ = reml_gradient_multi_cholesky(&y, &x, &w, &lambdas, &penalties_blocks).unwrap();
     }
     let time_standard = start.elapsed().as_secs_f64();
-    println!("  Time: {:.3}s ({:.3}s per call)\n", time_standard, time_standard / 10.0);
+    println!(
+        "  Time: {:.3}s ({:.3}s per call)\n",
+        time_standard,
+        time_standard / 10.0
+    );
 
     println!("[3/3] Benchmark fully cached (10 calls)...");
     let y_res_data = (y.clone(), w.clone());
     let start = Instant::now();
     for _ in 0..10 {
         let _ = reml_gradient_multi_cholesky_fully_cached(
-            &x, &lambdas, &penalties, &sqrt_penalties, &penalty_ranks,
-            &xtwx, &xtwy, &y_res_data
-        ).unwrap();
+            &x,
+            &lambdas,
+            &penalties_blocks,
+            &sqrt_penalties,
+            &penalty_ranks,
+            &xtwx,
+            &xtwy,
+            &y_res_data,
+        )
+        .unwrap();
     }
     let time_fully_cached = start.elapsed().as_secs_f64();
-    println!("  Time: {:.3}s ({:.3}s per call)\n", time_fully_cached, time_fully_cached / 10.0);
+    println!(
+        "  Time: {:.3}s ({:.3}s per call)\n",
+        time_fully_cached,
+        time_fully_cached / 10.0
+    );
 
     println!("Performance:");
-    println!("  Standard Cholesky:  {:.3}s per call", time_standard / 10.0);
-    println!("  Fully cached:       {:.3}s per call", time_fully_cached / 10.0);
+    println!(
+        "  Standard Cholesky:  {:.3}s per call",
+        time_standard / 10.0
+    );
+    println!(
+        "  Fully cached:       {:.3}s per call",
+        time_fully_cached / 10.0
+    );
     let speedup = (time_standard / 10.0) / (time_fully_cached / 10.0);
     println!("  Speedup:            {:.2}x\n", speedup);
 

@@ -16,7 +16,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .iter()
         .enumerate()
         .map(|(i, _xi)| {
-            let true_y = 2.0;  // Constant!
+            let true_y = 2.0; // Constant!
             let noise = noise_level * ((i as f64 * 0.7).sin() * 2.0 - 1.0);
             true_y + noise
         })
@@ -33,7 +33,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         let smooth = gam::SmoothTerm::cubic_spline("x".to_string(), num_basis, 0.0, 1.0)?;
         let basis_matrix = smooth.evaluate(&x)?;
-        let penalty = &smooth.penalty;
+        let penalty_block = mgcv_rust::block_penalty::BlockPenalty::new(
+            smooth.penalty.clone(),
+            0,
+            smooth.penalty.nrows(),
+        );
+        let penalty = &penalty_block;
         let weights = Array1::ones(n);
 
         // Manually compute GCV for different lambda values
@@ -45,7 +50,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut best_gcv = f64::INFINITY;
 
         for log_lambda in -40..30 {
-            let lambda = 10.0_f64.powf(log_lambda as f64 / 10.0);  // Finer grid
+            let lambda = 10.0_f64.powf(log_lambda as f64 / 10.0); // Finer grid
             let gcv = reml::gcv_criterion(&y, &basis_matrix, &weights, lambda, penalty)?;
 
             if gcv < best_gcv {

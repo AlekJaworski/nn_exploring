@@ -1,3 +1,4 @@
+#![cfg(feature = "blas")]
 use ndarray::{Array1, Array2};
 use ndarray_linalg::*;
 
