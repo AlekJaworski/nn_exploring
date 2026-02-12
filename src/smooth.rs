@@ -129,9 +129,7 @@ impl SmoothingParameter {
             ));
         }
 
-        // For Newton: reset to λ=1 as starting point (Newton iterates internally,
-        // and λ=1 is a good neutral starting point that avoids bias from poor initialization).
-        // For Fellner-Schall: keep current lambda (FS does a single update step).
+        // For Newton: reset to λ=1 as starting point
         if self.reml_algorithm != REMLAlgorithm::FellnerSchall {
             for i in 0..self.lambda.len() {
                 self.lambda[i] = 1.0;
@@ -142,6 +140,53 @@ impl SmoothingParameter {
             OptimizationMethod::REML => {
                 self.optimize_reml(y, x, w, penalties, max_iter, tolerance, beta)
             }
+            OptimizationMethod::GCV => self.optimize_gcv(y, x, w, penalties, max_iter, tolerance),
+        }
+    }
+
+    /// Optimize smoothing parameters with optional pre-computed X'WX.
+    ///
+    /// When `cached_xtwx` is provided, skips the O(n*p^2) X'WX computation.
+    /// This is used when the caller has already computed X'WX via scatter-gather
+    /// on a discretized design (much faster for large n).
+    #[cfg(feature = "blas")]
+    pub fn optimize_with_beta_and_xtwx(
+        &mut self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[BlockPenalty],
+        max_iter: usize,
+        tolerance: f64,
+        beta: Option<&Array1<f64>>,
+        cached_xtwx: Option<&Array2<f64>>,
+    ) -> Result<()> {
+        if penalties.len() != self.lambda.len() {
+            return Err(GAMError::DimensionMismatch(
+                "Number of penalties must match number of lambdas".to_string(),
+            ));
+        }
+
+        // For Newton: reset to λ=1 as starting point (Newton iterates internally,
+        // and λ=1 is a good neutral starting point that avoids bias from poor initialization).
+        // For Fellner-Schall: keep current lambda (FS does a single update step).
+        if self.reml_algorithm != REMLAlgorithm::FellnerSchall {
+            for i in 0..self.lambda.len() {
+                self.lambda[i] = 1.0;
+            }
+        }
+
+        match self.method {
+            OptimizationMethod::REML => self.optimize_reml_with_xtwx(
+                y,
+                x,
+                w,
+                penalties,
+                max_iter,
+                tolerance,
+                beta,
+                cached_xtwx,
+            ),
             OptimizationMethod::GCV => self.optimize_gcv(y, x, w, penalties, max_iter, tolerance),
         }
     }
@@ -216,6 +261,42 @@ impl SmoothingParameter {
         }
     }
 
+    #[cfg(feature = "blas")]
+    fn optimize_reml_with_xtwx(
+        &mut self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[BlockPenalty],
+        max_iter: usize,
+        tolerance: f64,
+        beta: Option<&Array1<f64>>,
+        cached_xtwx: Option<&Array2<f64>>,
+    ) -> Result<()> {
+        // Dispatch based on selected algorithm
+        match self.reml_algorithm {
+            REMLAlgorithm::Newton => self.optimize_reml_newton_multi_with_xtwx(
+                y,
+                x,
+                w,
+                penalties,
+                max_iter,
+                tolerance,
+                cached_xtwx,
+            ),
+            REMLAlgorithm::FellnerSchall => self.optimize_reml_fellner_schall_with_xtwx(
+                y,
+                x,
+                w,
+                penalties,
+                max_iter,
+                tolerance,
+                beta,
+                cached_xtwx,
+            ),
+        }
+    }
+
     /// Grid search for single smooth (kept for stability)
     fn optimize_reml_grid_single(
         &mut self,
@@ -273,6 +354,21 @@ impl SmoothingParameter {
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
+        self.optimize_reml_newton_multi_with_xtwx(y, x, w, penalties, max_iter, tolerance, None)
+    }
+
+    /// Newton optimization with optional pre-computed X'WX
+    #[cfg(feature = "blas")]
+    fn optimize_reml_newton_multi_with_xtwx(
+        &mut self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[BlockPenalty],
+        max_iter: usize,
+        tolerance: f64,
+        cached_xtwx: Option<&Array2<f64>>,
+    ) -> Result<()> {
         let m = penalties.len();
 
         // OPTIMIZATION: Pre-compute sqrt_penalties once (expensive eigendecomposition)
@@ -295,10 +391,16 @@ impl SmoothingParameter {
         }
 
         // OPTIMIZATION: Pre-compute X'WX and X'Wy (don't change during optimization)
-        // This avoids O(np²) recomputation every iteration
+        // This avoids O(np²) recomputation every iteration.
+        // When a pre-computed X'WX is available (from scatter-gather on discretized design),
+        // use it directly to skip the O(n*p²) computation.
         use crate::reml::compute_xtwx;
         let xtwx_start = Instant::now();
-        let xtwx = compute_xtwx(x, w);
+        let xtwx = if let Some(cached) = cached_xtwx {
+            cached.clone()
+        } else {
+            compute_xtwx(x, w)
+        };
 
         // Compute X'Wy (also constant)
         let x_weighted = {
@@ -826,6 +928,24 @@ impl SmoothingParameter {
         _tolerance: f64,
         beta: Option<&Array1<f64>>,
     ) -> Result<()> {
+        self.optimize_reml_fellner_schall_with_xtwx(
+            y, x, w, penalties, _max_iter, _tolerance, beta, None,
+        )
+    }
+
+    /// Fellner-Schall with optional pre-computed X'WX
+    #[cfg(feature = "blas")]
+    fn optimize_reml_fellner_schall_with_xtwx(
+        &mut self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[BlockPenalty],
+        _max_iter: usize,
+        _tolerance: f64,
+        beta: Option<&Array1<f64>>,
+        cached_xtwx: Option<&Array2<f64>>,
+    ) -> Result<()> {
         use crate::reml::compute_xtwx;
         use ndarray_linalg::{Cholesky, InverseInto, UPLO};
 
@@ -847,8 +967,12 @@ impl SmoothingParameter {
             penalty_ranks.push(sqrt_pen.ncols());
         }
 
-        // Pre-compute X'WX
-        let xtwx = compute_xtwx(x, w);
+        // Pre-compute X'WX (use cached if available from scatter-gather)
+        let xtwx = if let Some(cached) = cached_xtwx {
+            cached.clone()
+        } else {
+            compute_xtwx(x, w)
+        };
 
         let lambdas = self.lambda.clone();
 

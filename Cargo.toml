@@ -1,6 +1,6 @@
 [package]
 name = "mgcv_rust"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 
 [lib]
@@ -159,6 +159,11 @@ required-features = ["blas"]
 [[bin]]
 name = "test_d8_n5000_rust"
 path = "tests/test_d8_n5000_rust.rs"
+required-features = ["blas"]
+
+[[bin]]
+name = "benchmark_gam_e2e"
+path = "benches/benchmark_gam_e2e.rs"
 required-features = ["blas"]
 
 [[bin]]

@@ -1,12 +1,13 @@
-// Profile the ACTUAL reml_gradient_multi_qr function
+// Profile the ACTUAL reml_gradient_multi_qr_adaptive function
 #[cfg(feature = "blas")]
 fn main() {
+    use mgcv_rust::block_penalty::BlockPenalty;
+    use mgcv_rust::reml::reml_gradient_multi_qr_adaptive;
     use ndarray::{Array1, Array2};
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand::Rng;
     use std::time::Instant;
-    use mgcv_rust::reml::reml_gradient_multi_qr;
 
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -16,7 +17,10 @@ fn main() {
     let p = n_dims * k;
 
     println!("=== Full Gradient Function Profiling ===\n");
-    println!("Configuration: n={}, dims={}, k={}, p={}\n", n, n_dims, k, p);
+    println!(
+        "Configuration: n={}, dims={}, k={}, p={}\n",
+        n, n_dims, k, p
+    );
 
     // Generate data
     let mut x = Array2::<f64>::zeros((n, p));
@@ -29,25 +33,21 @@ fn main() {
     let w: Array1<f64> = Array1::ones(n);
     let lambdas: Vec<f64> = vec![1.0; n_dims];
 
-    // Create penalties
+    // Create penalties as BlockPenalty
     let mut penalties = Vec::new();
     for dim in 0..n_dims {
-        let mut penalty = Array2::zeros((p, p));
-        let start = dim * k;
-        let end = start + k;
-        for i in start..end {
-            penalty[[i, i]] = 1.0;
-        }
-        penalties.push(penalty);
+        let block = Array2::eye(k);
+        let offset = dim * k;
+        penalties.push(BlockPenalty::new(block, offset, p));
     }
 
     println!("Warm-up call...");
-    let _ = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties).unwrap();
+    let _ = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties).unwrap();
 
     println!("Profiling {} iterations...\n", 10);
     let start = Instant::now();
     for _ in 0..10 {
-        let _ = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties).unwrap();
+        let _ = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties).unwrap();
     }
     let total_time = start.elapsed().as_secs_f64();
 

@@ -1,6 +1,6 @@
 #![cfg(feature = "blas")]
 use mgcv_rust::block_penalty::BlockPenalty;
-use mgcv_rust::reml::reml_gradient_multi_qr;
+use mgcv_rust::reml::reml_gradient_multi_qr_adaptive;
 ///Test the corrected Rust gradient implementation
 use ndarray::{Array1, Array2};
 use std::fs;
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Compute gradient
-    let gradient = reml_gradient_multi_qr(&y_array, &x_array, &w, &mgcv_lambda, &penalties)?;
+    let gradient = reml_gradient_multi_qr_adaptive(&y_array, &x_array, &w, &mgcv_lambda, &penalties)?;
 
     println!("Rust gradient:");
     println!("  {:?}", gradient.as_slice().unwrap());

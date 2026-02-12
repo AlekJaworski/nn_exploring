@@ -4,8 +4,9 @@
 use crate::reml::ScaleParameterMethod;
 use crate::{
     block_penalty::BlockPenalty,
+    discrete::{DiscretizeConfig, DiscretizedDesign},
     gam::{SmoothTerm, GAM},
-    pirls::fit_pirls_cached,
+    pirls::{fit_pirls_cached, fit_pirls_discretized},
     smooth::{OptimizationMethod, SmoothingParameter},
     GAMError, Result,
 };
@@ -14,8 +15,10 @@ use std::time::Instant;
 
 /// Helper struct to cache computations during GAM fitting
 struct FitCache {
-    /// Full design matrix (n x p)
+    /// Full design matrix (n x p) — kept for REML gradient/Hessian which need per-row access
     design_matrix: Array2<f64>,
+    /// Discretized design for fast X'WX, X'Wy, eta computation
+    discretized: Option<DiscretizedDesign>,
     /// Penalty matrices (one per smooth, block-diagonal representation)
     penalties: Vec<BlockPenalty>,
     /// Penalty scale factors (one per smooth)
@@ -33,6 +36,7 @@ impl FitCache {
         // Evaluate all basis functions (this is expensive, so cache it)
         let basis_start = Instant::now();
         let mut design_matrices: Vec<Array2<f64>> = Vec::new();
+        let mut covariates: Vec<Array1<f64>> = Vec::new();
         let mut total_basis = 0;
 
         for (i, smooth) in smooth_terms.iter().enumerate() {
@@ -40,6 +44,7 @@ impl FitCache {
             let basis_matrix = smooth.evaluate(&x_col)?;
             total_basis += smooth.num_basis();
             design_matrices.push(basis_matrix);
+            covariates.push(x_col);
         }
         let basis_time = basis_start.elapsed();
         if std::env::var("MGCV_PROFILE").is_ok() {
@@ -49,7 +54,57 @@ impl FitCache {
             );
         }
 
+        // Build discretized design for efficient scatter-gather operations.
+        // This stores only unique/binned basis rows per term (m << n) plus
+        // an index array, enabling O(n*k + m*k^2) X'WX instead of O(n*k^2).
+        //
+        // Skip discretization for small n where overhead isn't worth it.
+        // At n=1000, compression is poor (ratio ~1.0x) and BLAS is faster.
+        let disc_start = Instant::now();
+        let config = DiscretizeConfig {
+            max_unique_1d: 1000,
+            min_n_for_discretize: 2000, // Only discretize for n >= 2000
+        };
+        let discretized = if n >= config.min_n_for_discretize {
+            Some(DiscretizedDesign::new(
+                &design_matrices,
+                &covariates,
+                &config,
+            ))
+        } else {
+            None
+        };
+        let disc_time = disc_start.elapsed();
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            if let Some(ref disc) = discretized {
+                let total_compressed: usize = disc.terms.iter().map(|t| t.num_compressed()).sum();
+                let total_full: usize = disc
+                    .terms
+                    .iter()
+                    .map(|t| t.num_observations() * t.num_basis)
+                    .sum();
+                eprintln!(
+                    "[PROFILE] Discretization: {:.2}ms (compressed {} -> {} entries, {:.1}x)",
+                    disc_time.as_secs_f64() * 1000.0,
+                    total_full,
+                    total_compressed * disc.terms.iter().map(|t| t.num_basis).max().unwrap_or(1),
+                    disc.terms
+                        .iter()
+                        .map(|t| t.compression_ratio())
+                        .sum::<f64>()
+                        / disc.terms.len() as f64,
+                );
+            } else {
+                eprintln!(
+                    "[PROFILE] Discretization: skipped (n={} < {})",
+                    n, config.min_n_for_discretize
+                );
+            }
+        }
+
         // Build full design matrix using efficient slicing (not loops!)
+        // We still keep this for REML gradient/Hessian which need per-row X access
         let mut full_design = Array2::zeros((n, total_basis));
         let mut col_offset = 0;
 
@@ -121,19 +176,70 @@ impl FitCache {
 
         Ok(FitCache {
             design_matrix: full_design,
+            discretized,
             penalties,
             penalty_scales,
             xtx: None,
         })
     }
 
-    /// Get or compute X'X (cached for efficiency)
+    /// Get or compute X'X (cached for efficiency).
+    /// Uses scatter-gather via discretized design when available (much faster for large n).
     fn get_xtx(&mut self) -> &Array2<f64> {
         if self.xtx.is_none() {
-            let xt = self.design_matrix.t().to_owned();
-            self.xtx = Some(xt.dot(&self.design_matrix));
+            let xtx_start = Instant::now();
+            let xtx = if let Some(ref disc) = self.discretized {
+                disc.compute_xtx()
+            } else {
+                let xt = self.design_matrix.t().to_owned();
+                xt.dot(&self.design_matrix)
+            };
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!(
+                    "[PROFILE] X'X computation: {:.2}ms (discretized={})",
+                    xtx_start.elapsed().as_secs_f64() * 1000.0,
+                    self.discretized.is_some(),
+                );
+            }
+            self.xtx = Some(xtx);
         }
         self.xtx.as_ref().unwrap()
+    }
+
+    /// Run PiRLS using the discretized path when available, falling back to cached.
+    fn run_pirls(
+        &self,
+        y: &Array1<f64>,
+        lambda: &[f64],
+        family: crate::pirls::Family,
+        max_iter: usize,
+        tolerance: f64,
+        cached_xtx: Option<&Array2<f64>>,
+    ) -> Result<crate::pirls::PiRLSResult> {
+        if let Some(ref disc) = self.discretized {
+            fit_pirls_discretized(
+                y,
+                &self.design_matrix,
+                lambda,
+                &self.penalties,
+                family,
+                max_iter,
+                tolerance,
+                disc,
+                cached_xtx,
+            )
+        } else {
+            fit_pirls_cached(
+                y,
+                &self.design_matrix,
+                lambda,
+                &self.penalties,
+                family,
+                max_iter,
+                tolerance,
+                cached_xtx,
+            )
+        }
     }
 }
 
@@ -246,11 +352,28 @@ impl GAM {
         let mut cache = FitCache::new(x, &self.smooth_terms)?;
 
         // Initialize smoothing parameters with chosen algorithm
-        let mut smoothing_params = if let Some(algo) = algorithm {
-            SmoothingParameter::new_with_algorithm(self.smooth_terms.len(), opt_method, algo)
-        } else {
-            SmoothingParameter::new(self.smooth_terms.len(), opt_method)
-        };
+        // Auto-select Fellner-Schall for small n (< 2000) where Newton's expensive
+        // gradient/Hessian computations don't pay off. FS is much faster per iteration.
+        let selected_algorithm = algorithm.unwrap_or_else(|| {
+            if n < 2000 {
+                crate::smooth::REMLAlgorithm::FellnerSchall
+            } else {
+                crate::smooth::REMLAlgorithm::Newton
+            }
+        });
+
+        if std::env::var("MGCV_PROFILE").is_ok() {
+            eprintln!(
+                "[PROFILE] Selected algorithm: {:?} (n={})",
+                selected_algorithm, n
+            );
+        }
+
+        let mut smoothing_params = SmoothingParameter::new_with_algorithm(
+            self.smooth_terms.len(),
+            opt_method,
+            selected_algorithm,
+        );
         smoothing_params.scale_method = scale_method;
 
         // Smart initialization for lambda
@@ -296,13 +419,11 @@ impl GAM {
             //
             // Flow: PiRLS(init_lambda) → Newton(converge) → PiRLS(optimal_lambda) → done
 
-            // Step 1: PiRLS with initial lambda
+            // Step 1: PiRLS with initial lambda (uses discretized scatter-gather)
             let pirls_start = Instant::now();
-            let pirls_result = fit_pirls_cached(
+            let pirls_result = cache.run_pirls(
                 y,
-                &cache.design_matrix,
                 &smoothing_params.lambda,
-                &cache.penalties,
                 self.family,
                 max_inner_iter,
                 tolerance,
@@ -312,8 +433,17 @@ impl GAM {
             weights = pirls_result.weights.clone();
 
             // Step 2: Newton optimization to convergence
+            // Pass cached X'WX from discretized design to skip O(n*p^2) in REML
             let reml_start = Instant::now();
-            smoothing_params.optimize_with_beta(
+            let reml_xtwx = if is_gaussian {
+                // For Gaussian, X'WX = X'X (w=1), already cached
+                cached_xtx.clone()
+            } else if let Some(ref disc) = cache.discretized {
+                Some(disc.compute_xtwx(&weights))
+            } else {
+                None
+            };
+            smoothing_params.optimize_with_beta_and_xtwx(
                 y,
                 &cache.design_matrix,
                 &weights,
@@ -321,16 +451,15 @@ impl GAM {
                 newton_max_iter,
                 tolerance,
                 Some(&pirls_result.coefficients),
+                reml_xtwx.as_ref(),
             )?;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Step 3: Final PiRLS with optimal lambda
+            // Step 3: Final PiRLS with optimal lambda (uses discretized scatter-gather)
             let pirls_start = Instant::now();
-            let final_result = fit_pirls_cached(
+            let final_result = cache.run_pirls(
                 y,
-                &cache.design_matrix,
                 &smoothing_params.lambda,
-                &cache.penalties,
                 self.family,
                 max_inner_iter,
                 tolerance,
@@ -348,13 +477,11 @@ impl GAM {
             // Fellner-Schall: outer loop required — FS does one update step per call,
             // so we iterate PiRLS + FS until lambda converges.
             for outer_iter in 0..max_outer_iter {
-                // PiRLS with current smoothing parameters
+                // PiRLS with current smoothing parameters (uses discretized scatter-gather)
                 let pirls_start = Instant::now();
-                let pirls_result = fit_pirls_cached(
+                let pirls_result = cache.run_pirls(
                     y,
-                    &cache.design_matrix,
                     &smoothing_params.lambda,
-                    &cache.penalties,
                     self.family,
                     max_inner_iter,
                     tolerance,
@@ -365,10 +492,18 @@ impl GAM {
                 weights = pirls_result.weights.clone();
 
                 // Update smoothing parameters (one FS step)
+                // Pass cached X'WX from discretized design
                 let reml_start = Instant::now();
                 let old_lambda = smoothing_params.lambda.clone();
 
-                smoothing_params.optimize_with_beta(
+                let fs_xtwx = if is_gaussian {
+                    cached_xtx.clone()
+                } else if let Some(ref disc) = cache.discretized {
+                    Some(disc.compute_xtwx(&weights))
+                } else {
+                    None
+                };
+                smoothing_params.optimize_with_beta_and_xtwx(
                     y,
                     &cache.design_matrix,
                     &weights,
@@ -376,6 +511,7 @@ impl GAM {
                     newton_max_iter,
                     tolerance,
                     Some(&pirls_result.coefficients),
+                    fs_xtwx.as_ref(),
                 )?;
                 total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -395,11 +531,9 @@ impl GAM {
                 if max_lambda_change < adaptive_tol {
                     // Do final fit
                     let pirls_start = Instant::now();
-                    let final_result = fit_pirls_cached(
+                    let final_result = cache.run_pirls(
                         y,
-                        &cache.design_matrix,
                         &smoothing_params.lambda,
-                        &cache.penalties,
                         self.family,
                         max_inner_iter,
                         tolerance,
@@ -419,11 +553,9 @@ impl GAM {
 
             // Reached max iterations - use current fit
             let pirls_start = Instant::now();
-            let final_result = fit_pirls_cached(
+            let final_result = cache.run_pirls(
                 y,
-                &cache.design_matrix,
                 &smoothing_params.lambda,
-                &cache.penalties,
                 self.family,
                 max_inner_iter,
                 tolerance,

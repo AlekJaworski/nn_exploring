@@ -2,7 +2,7 @@
 #[cfg(feature = "blas")]
 fn main() {
     use mgcv_rust::block_penalty::BlockPenalty;
-    use mgcv_rust::reml::{reml_gradient_multi_cholesky, reml_gradient_multi_qr};
+    use mgcv_rust::reml::{reml_gradient_multi_cholesky, reml_gradient_multi_qr_adaptive};
     use ndarray::{Array1, Array2};
     use rand::Rng;
     use rand::SeedableRng;
@@ -52,7 +52,7 @@ fn main() {
 
     println!("[1/3] Computing gradient with QR method...");
     let start = Instant::now();
-    let grad_qr = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties).unwrap();
+    let grad_qr = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties).unwrap();
     let time_qr = start.elapsed().as_secs_f64();
     println!("  Time: {:.3}s", time_qr);
     println!("  Gradient: {:?}\n", grad_qr);

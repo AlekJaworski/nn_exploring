@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mgcv-rust"
-version = "0.5.1"
+version = "0.6.0"
 description = "Rust implementation of Generalized Additive Models with Python bindings"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -2035,6 +2035,212 @@ pub fn reml_gradient_multi_qr_cached_edf(
     Ok(gradient)
 }
 
+/// Optimized gradient computation using direct Cholesky factorization
+///
+/// For small p, this is much faster than the augmented QR approach:
+/// 1. Form A = X'WX + Σλᵢ·Sᵢ directly (using optimized compute_xtwx)
+/// 2. Cholesky factorize: A = R'R
+/// 3. Cache R for all trace and beta derivative solves
+///
+/// This avoids QR on the tall augmented matrix, which is slow for large n.
+/// Recommended for p < 500.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_cholesky(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+) -> Result<Array1<f64>> {
+    // Compute square root penalties (expensive eigendecomp)
+    let mut sqrt_penalties = Vec::new();
+    let mut penalty_ranks = Vec::new();
+    for penalty in penalties_blocks.iter() {
+        let sqrt_pen = penalty_sqrt(penalty)?;
+        let rank = sqrt_pen.ncols();
+        sqrt_penalties.push(sqrt_pen);
+        penalty_ranks.push(rank);
+    }
+
+    // Delegate to cached version
+    reml_gradient_multi_cholesky_cached(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        &sqrt_penalties,
+        &penalty_ranks,
+    )
+}
+
+/// Cholesky gradient with pre-computed sqrt_penalties (avoids eigendecomp)
+///
+/// This version accepts pre-computed sqrt_penalties to avoid expensive
+/// eigendecomposition on every call. Since penalties don't change during
+/// optimization (only lambdas do), you can compute sqrt_penalties once
+/// and reuse them across all gradient evaluations.
+///
+/// Use this when calling gradient multiple times with same penalties.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_multi_cholesky_cached(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    sqrt_penalties: &[Array2<f64>],
+    penalty_ranks: &[usize],
+) -> Result<Array1<f64>> {
+    use ndarray_linalg::{Cholesky, Diag, SolveTriangular, UPLO};
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = lambdas.len();
+
+    // Form A = X'WX + Σλᵢ·Sᵢ directly
+    let mut a = compute_xtwx(x, w);
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+
+    // Add adaptive ridge regularization for numerical stability
+    // mgcv adds small ridge to diagonal to ensure positive definiteness
+    // Ridge size: max(diagonal) * sqrt(machine_epsilon) ≈ 1e-8 * max_diag
+    let max_diag = (0..p).map(|i| a[[i, i]].abs()).fold(0.0f64, f64::max);
+    let ridge = max_diag * 1e-8;
+
+    for i in 0..p {
+        a[[i, i]] += ridge;
+    }
+
+    // Cholesky factorization: A = R'R (R is upper triangular)
+    // Returns upper triangular R
+    let r_upper = a.cholesky(UPLO::Upper).map_err(|e| {
+        GAMError::InvalidParameter(format!("Cholesky factorization failed: {:?}", e))
+    })?;
+
+    // Compute beta = A^{-1}·X'Wy using cached factorization
+    let xtwy = compute_xtwy(x, w, y);
+    let r_t = r_upper.t().to_owned();
+
+    // Solve R'·y = X'Wy, then R·beta = y
+    let y_temp = r_t
+        .solve_triangular(UPLO::Lower, Diag::NonUnit, &xtwy)
+        .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+    let beta = r_upper
+        .solve_triangular(UPLO::Upper, Diag::NonUnit, &y_temp)
+        .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+
+    // Compute residuals
+    let y_hat = x.dot(&beta);
+    let residuals: Array1<f64> = y
+        .iter()
+        .zip(y_hat.iter())
+        .map(|(yi, yhati)| yi - yhati)
+        .collect();
+
+    // Effective degrees of freedom and RSS
+    let mut effective_dof = 0.0;
+    for &rank in penalty_ranks.iter() {
+        effective_dof += rank as f64;
+    }
+    let n_minus_r = n as f64 - effective_dof;
+
+    let rss: f64 = residuals
+        .iter()
+        .zip(w.iter())
+        .map(|(ri, wi)| ri * ri * wi)
+        .sum();
+
+    let phi = rss / n_minus_r;
+    let inv_phi = 1.0 / phi;
+    let phi_sq = phi * phi;
+
+    // Compute penalty term in P
+    let mut penalty_sum = 0.0;
+    for j in 0..m {
+        // Optimized: quadratic form directly on block
+        let beta_s_j_beta = penalties_blocks[j].quadratic_form(&beta);
+        penalty_sum += lambdas[j] * beta_s_j_beta;
+    }
+    let p_value = rss + penalty_sum;
+
+    let mut gradient = Array1::<f64>::zeros(m);
+
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties_blocks[i];
+        let rank_i = penalty_ranks[i] as f64;
+        let sqrt_penalty = &sqrt_penalties[i];
+
+        // Term 1: Trace computation using batch triangular solve
+        let x_batch = r_t
+            .solve_triangular(UPLO::Lower, Diag::NonUnit, sqrt_penalty)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let trace_term: f64 = x_batch.iter().map(|xi| xi * xi).sum();
+        let trace = lambda_i * trace_term;
+
+        // Term 2: -rank(Sᵢ)
+        let rank_term = -rank_i;
+
+        // Beta derivatives using cached factorization
+        // Optimized: S·β using block-sparse multiply
+        let s_i_beta = penalty_i.dot_vec(&beta);
+        let lambda_s_beta = s_i_beta.mapv(|x| lambda_i * x);
+
+        let y_temp = r_t
+            .solve_triangular(UPLO::Lower, Diag::NonUnit, &lambda_s_beta)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?;
+        let dbeta_drho = r_upper
+            .solve_triangular(UPLO::Upper, Diag::NonUnit, &y_temp)
+            .map_err(|e| GAMError::InvalidParameter(format!("Triangular solve failed: {:?}", e)))?
+            .mapv(|x| -x);
+
+        // RSS derivative
+        let x_dbeta = x.dot(&dbeta_drho);
+        let drss_drho: f64 = -2.0
+            * residuals
+                .iter()
+                .zip(x_dbeta.iter())
+                .map(|(ri, xdbi)| ri * xdbi)
+                .sum::<f64>();
+
+        let dphi_drho = drss_drho / n_minus_r;
+
+        // Penalty term derivatives
+        let beta_s_i_beta: f64 = penalty_i.quadratic_form(&beta);
+        let explicit_pen = lambda_i * beta_s_i_beta;
+
+        let mut implicit_pen = 0.0;
+        for j in 0..m {
+            // Optimized: S·β and S·dβ using block-sparse multiply
+            let s_j_beta = penalties_blocks[j].dot_vec(&beta);
+            let s_j_dbeta = penalties_blocks[j].dot_vec(&dbeta_drho);
+
+            let term1: f64 = s_j_beta
+                .iter()
+                .zip(dbeta_drho.iter())
+                .map(|(sj, dbi)| sj * dbi)
+                .sum();
+            let term2: f64 = beta
+                .iter()
+                .zip(s_j_dbeta.iter())
+                .map(|(bi, sjd)| bi * sjd)
+                .sum();
+            implicit_pen += lambdas[j] * (term1 + term2);
+        }
+
+        let dp_drho = drss_drho + explicit_pen + implicit_pen;
+        let penalty_quotient_deriv = dp_drho * inv_phi - (p_value / phi_sq) * dphi_drho;
+        let log_phi_deriv = n_minus_r * dphi_drho * inv_phi;
+
+        gradient[i] = (trace + rank_term + penalty_quotient_deriv + log_phi_deriv) / 2.0;
+    }
+
+    Ok(gradient)
+}
+
 /// Ultra-optimized Cholesky gradient with ALL pre-computed values
 ///
 /// This version caches everything that doesn't change:
@@ -2892,11 +3098,11 @@ pub fn reml_hessian_multi(
     for i in 0..m {
         let lambda_i = lambdas[i];
         let penalty_i = &penalties_blocks[i];
-
+        
         // M_i·β = λ_i·S_i·β
         let si_beta = penalty_i.dot_vec(&beta);
         let mi_beta = si_beta.mapv(|x| lambda_i * x);
-
+        
         // -A^{-1}·M_i·β
         let dbeta_i = a_inv.dot(&mi_beta).mapv(|x| -x);
         dbeta_drho.push(dbeta_i);
@@ -2920,7 +3126,7 @@ pub fn reml_hessian_multi(
             let lambda_j_sj_beta = sj_beta.mapv(|x| lambdas[j] * x);
             s_beta_total = s_beta_total + lambda_j_sj_beta;
         }
-
+        
         let dbeta_i_s_beta: f64 = dbeta_drho[i].dot(&s_beta_total);
         let term2 = 2.0 * dbeta_i_s_beta;
 
@@ -2943,12 +3149,12 @@ pub fn reml_hessian_multi(
             // M_i = λ_i·S_i, M_j = λ_j·S_j
             // tr(M_i·A·M_j·A) = λ_i·λ_j·tr(S_i·A·S_j·A)
             // tr(S_i·(A·S_j·A)) using trace_product
-
+            
             // Compute A·S_j·A
             // S_j·A using left_mul_dense (BlockPenalty method)
             let sj_a = s_j.left_mul_dense(&a_inv); // Note: a_inv IS A here
             let a_sj_a = a_inv.dot(&sj_a);
-
+            
             // tr(S_i · (A·S_j·A))
             let trace_term = lambda_i * lambda_j * s_i.trace_product(&a_sj_a);
 
@@ -2981,39 +3187,39 @@ pub fn reml_hessian_multi(
 
             // bSb2: Penalty Hessian full calculation
             // bSb2[k,m] = 2·(d²β'/dρ_k dρ_m · S · β) + ...
-
+            
             // Term 1: d²β'/dρ_k dρ_m · S · β
             // From implicit differentiation:
             // d²β/dρ_i dρ_j = A^{-1}·[M_i·A^{-1}·M_j·β + M_j·A^{-1}·M_i·β] + δ_{ij}·dβ/dρ_i
-
+            
             // M_i·A^{-1}·M_j·β
             let mj_beta_vec = s_j.dot_vec(&beta).mapv(|x| lambda_j * x);
             let a_inv_mj_beta = a_inv.dot(&mj_beta_vec);
             let mi_a_inv_mj_beta = s_i.dot_vec(&a_inv_mj_beta).mapv(|x| lambda_i * x);
-
+            
             // M_j·A^{-1}·M_i·β
             let mi_beta_vec = s_i.dot_vec(&beta).mapv(|x| lambda_i * x);
             let a_inv_mi_beta = a_inv.dot(&mi_beta_vec);
             let mj_a_inv_mi_beta = s_j.dot_vec(&a_inv_mi_beta).mapv(|x| lambda_j * x);
-
+            
             let mut d2beta_term = Array1::zeros(p);
             d2beta_term += &mi_a_inv_mj_beta;
             d2beta_term += &mj_a_inv_mi_beta;
             let mut d2beta = a_inv.dot(&d2beta_term);
-
+            
             if i == j {
                 d2beta += &dbeta_drho[i];
             }
-
+            
             // S·β
             let mut s_beta_total = Array1::zeros(p);
             for (lambda_k, penalty_k) in lambdas.iter().zip(penalties_blocks.iter()) {
                 let s_k_beta = penalty_k.dot_vec(&beta);
                 s_beta_total.scaled_add(*lambda_k, &s_k_beta);
             }
-
+            
             let term1_val: f64 = d2beta.dot(&s_beta_total);
-
+            
             // Term 2: dβ'/dρ_k · S · dβ/dρ_m
             let s_dbeta_j = {
                 let mut result = Array1::zeros(p);
@@ -3024,18 +3230,18 @@ pub fn reml_hessian_multi(
                 result
             };
             let term2_val: f64 = dbeta_drho[i].dot(&s_dbeta_j);
-
+            
             // Term 3: dβ'/dρ_m · S_k · β · λ_k (when k=i)
             let si_beta = s_i.dot_vec(&beta);
             let term3_val: f64 = dbeta_drho[j].dot(&si_beta) * lambda_i;
-
+            
             // Term 4: dβ'/dρ_k · S_m · β · λ_m (when m=j)
             let sj_beta = s_j.dot_vec(&beta);
             let term4_val: f64 = dbeta_drho[i].dot(&sj_beta) * lambda_j;
-
+            
             let diag_corr = if i == j { bsb1[i] } else { 0.0 };
             let bsb2 = 2.0 * (term1_val + term2_val + term3_val + term4_val) + diag_corr;
-
+            
             // Re-calculate det2 part correctly as in mgcv
             // det2 = tr(A⁻¹·M_i)·δ_{ij} - tr(A⁻¹·M_i·A⁻¹·M_j)
             let det2 = if i == j {
@@ -3043,9 +3249,9 @@ pub fn reml_hessian_multi(
             } else {
                 -trace_term
             };
-
+            
             hessian[[i, j]] = (det2 + bsb2) / 2.0;
-
+            
             if i != j {
                 hessian[[j, i]] = hessian[[i, j]];
             }
@@ -3054,6 +3260,300 @@ pub fn reml_hessian_multi(
 
     Ok(hessian)
 }
+
+    // Compute X'WX
+    let xtw = x_weighted.t().to_owned();
+    let xtwx = xtw.dot(&x_weighted);
+
+    // Compute A = X'WX + Σλᵢ·Sᵢ
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        // Add in-place instead of creating temporary
+        a.scaled_add(*lambda, penalty);
+    }
+
+    // Compute A^(-1)
+    // Add adaptive ridge term to ensure numerical stability
+    let mut max_diag: f64 = 1.0;
+    for i in 0..p {
+        max_diag = max_diag.max(a[[i, i]].abs());
+    }
+    let ridge_scale = 1e-5 * (1.0 + (lambdas.len() as f64).sqrt());
+    let ridge = ridge_scale * max_diag;
+    let mut a_reg = a.clone();
+    for i in 0..p {
+        a_reg[[i, i]] += ridge;
+    }
+    let a_inv = inverse(&a_reg)?;
+
+    // Compute coefficients β
+    let y_weighted: Array1<f64> = y.iter().zip(w.iter()).map(|(yi, wi)| yi * wi).collect();
+    let b = xtw.dot(&y_weighted);
+    // Use regularized matrix for numerical stability
+    let beta = solve(a_reg.clone(), b)?;
+
+    // Compute RSS and φ
+    let fitted = x.dot(&beta);
+    let residuals: Array1<f64> = y
+        .iter()
+        .zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
+    let rss: f64 = residuals
+        .iter()
+        .zip(w.iter())
+        .map(|(r, wi)| r * r * wi)
+        .sum();
+
+    // Compute effective degrees of freedom for φ
+    // edf = tr(A^{-1}·X'WX)
+    // For Gaussian case with W=I: edf = tr(A^{-1}·X'X)
+    let xtx = x.t().to_owned().dot(&x.to_owned());
+    let ainv_xtx = a_inv.dot(&xtx);
+    let edf: f64 = (0..ainv_xtx.nrows()).map(|i| ainv_xtx[[i, i]]).sum();
+
+    // Correct φ computation using effective df
+    let phi = rss / (n as f64 - edf);
+
+    // Debug: compare against old approach
+    if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+        let old_total_rank: usize = penalties_blocks.iter().map(|p| estimate_rank(p)).sum();
+        let old_phi = rss / (n as f64 - old_total_rank as f64);
+        eprintln!("[PHI_DEBUG] edf (correct) = {:.3}, old total_rank = {}, φ_correct = {:.6e}, φ_old = {:.6e}, ratio = {:.3}",
+                  edf, old_total_rank, phi, old_phi, old_phi / phi);
+    }
+
+    // Compute first derivatives of β with respect to log(λ_i)
+    // dβ/dρ_i = -A^{-1}·M_i·β where M_i = λ_i·S_i
+    let mut dbeta_drho = Vec::with_capacity(m);
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+        let m_i = penalty_i * lambda_i; // M_i = λ_i·S_i
+        let m_i_beta = m_i.dot(&beta); // M_i·β
+        let dbeta_i = a_inv.dot(&m_i_beta).mapv(|x| -x); // -A^{-1}·M_i·β
+        dbeta_drho.push(dbeta_i);
+    }
+
+    // Compute bSb1 (first derivatives of β'·S·β/φ with respect to log(λ_i))
+    // This is needed for diagonal correction in bSb2
+    let mut bsb1 = Vec::with_capacity(m);
+    for i in 0..m {
+        let lambda_i = lambdas[i];
+        let penalty_i = &penalties[i];
+
+        // β'·S_i·β
+        let s_i_beta = penalty_i.dot(&beta);
+        let beta_s_i_beta: f64 = beta.iter().zip(s_i_beta.iter()).map(|(b, sb)| b * sb).sum();
+
+        // 2·dβ/dρ_i'·S·β where S = Σλ_j·S_j
+        let mut s_beta_total = Array1::zeros(p);
+        for (lambda_j, penalty_j) in lambdas.iter().zip(penalties.iter()) {
+            let s_j_beta = penalty_j.dot(&beta);
+            s_beta_total.scaled_add(*lambda_j, &s_j_beta);
+        }
+        let dbeta_s_beta: f64 = dbeta_drho[i]
+            .iter()
+            .zip(s_beta_total.iter())
+            .map(|(db, sb)| db * sb)
+            .sum();
+
+        bsb1.push((lambda_i * beta_s_i_beta + 2.0 * dbeta_s_beta) / phi);
+    }
+
+    // Compute Hessian
+    let mut hessian = Array2::zeros((m, m));
+
+    for i in 0..m {
+        for j in i..m {
+            // Only compute upper triangle (symmetric)
+            let lambda_i = lambdas[i];
+            let lambda_j = lambdas[j];
+            let penalty_i = &penalties[i];
+            let penalty_j = &penalties[j];
+
+            // Complete Hessian following Wood (2011)
+            // H[i,j] = [-tr(M_i·A·M_j·A) + (2β'·M_i·A·M_j·β)/φ - (2β'·M_i·β·β'·M_j·β)/φ²] / 2
+
+            // Compute M_i = λ_i·S_i and M_j = λ_j·S_j
+            let m_i = penalty_i * lambda_i;
+            let m_j = penalty_j * lambda_j;
+
+            // Term 1: -tr(M_i·A·M_j·A)
+            let a_m_j = a_inv.dot(&m_j);
+            let a_m_j_a = a_m_j.dot(&a_inv);
+            let product = m_i.dot(&a_m_j_a);
+
+            let mut trace_term = 0.0;
+            for k in 0..p {
+                trace_term += product[[k, k]];
+            }
+
+            // Term 2: (2β'·M_i·A·M_j·β)/φ
+            let m_i_beta = m_i.dot(&beta); // M_i·β
+            let a_m_j_beta = a_inv.dot(&m_j.dot(&beta)); // A·M_j·β
+            let term2: f64 = m_i_beta
+                .iter()
+                .zip(a_m_j_beta.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            let term2 = 2.0 * term2 / phi;
+
+            // Term 3: -(2β'·M_i·β·β'·M_j·β)/φ²
+            let beta_m_i_beta: f64 = beta.iter().zip(m_i_beta.iter()).map(|(a, b)| a * b).sum();
+            let m_j_beta = m_j.dot(&beta);
+            let beta_m_j_beta: f64 = beta.iter().zip(m_j_beta.iter()).map(|(a, b)| a * b).sum();
+            let term3 = -2.0 * beta_m_i_beta * beta_m_j_beta / (phi * phi);
+
+            // det2 part: log-determinant Hessian from mgcv
+            // det2[k,m] = δ_{k,m}·tr(A^{-1}·M_m) - tr[(A^{-1}·M_k)·(A^{-1}·M_m)]
+            // where trace_term = tr[(A^{-1}·M_k)·(A^{-1}·M_m)] = tr(M_k·A^{-1}·M_m·A^{-1})
+
+            // For diagonal, need tr(A^{-1}·M_k)
+            let trace_a_inv_m_i = if i == j {
+                let a_m_i = a_inv.dot(&m_i);
+                let mut tr = 0.0;
+                for k in 0..p {
+                    tr += a_m_i[[k, k]];
+                }
+                tr
+            } else {
+                0.0
+            };
+
+            // det2[k,m] from C code (in ρ-space, before /2)
+            let det2 = if i == j {
+                trace_a_inv_m_i - trace_term
+            } else {
+                -trace_term
+            };
+
+            // bSb2: Penalty Hessian from mgcv's get_bSb function
+            // Following mgcv C code in gdi.c
+            //
+            // bSb2[k,m] = 2·(d²β'/dρ_k dρ_m · S · β)       [Term 1: second derivatives]
+            //            + 2·(dβ'/dρ_k · S · dβ/dρ_m)       [Term 2: mixed derivatives]
+            //            + 2·(dβ'/dρ_m · S_k · β · λ_k)     [Term 3: parameter-dependent]
+            //            + 2·(dβ'/dρ_k · S_m · β · λ_m)     [Term 4: parameter-dependent]
+            //            + δ_{k,m}·bSb1[k]                   [Diagonal correction]
+
+            // Term 1: d²β'/dρ_k dρ_m · S · β
+            // From implicit differentiation:
+            // d²β/dρ_i dρ_j = A^{-1}·[M_i·A^{-1}·M_j·β + M_j·A^{-1}·M_i·β] + δ_{ij}·dβ/dρ_i
+            // The diagonal term δ_{ij}·dβ/dρ_i is CRITICAL!
+            let m_i_beta = m_i.dot(&beta);
+            let m_j_beta = m_j.dot(&beta);
+            let a_inv_m_i_beta = a_inv.dot(&m_i_beta);
+            let a_inv_m_j_beta = a_inv.dot(&m_j_beta);
+            let m_i_a_inv_m_j_beta = m_i.dot(&a_inv_m_j_beta);
+            let m_j_a_inv_m_i_beta = m_j.dot(&a_inv_m_i_beta);
+
+            let mut d2beta_term = Array1::zeros(p);
+            d2beta_term += &m_i_a_inv_m_j_beta;
+            d2beta_term += &m_j_a_inv_m_i_beta;
+            let mut d2beta = a_inv.dot(&d2beta_term);
+
+            // Add diagonal correction: + δ_{ij}·dβ/dρ_i
+            // This term comes from ∂M_i/∂ρ_j = δ_{ij}·M_i in the derivation
+            if i == j {
+                d2beta += &dbeta_drho[i];
+            }
+
+            // S·β where S = Σλ_k·S_k
+            let mut s_beta_total = Array1::zeros(p);
+            for (lambda_k, penalty_k) in lambdas.iter().zip(penalties.iter()) {
+                let s_k_beta = penalty_k.dot(&beta);
+                s_beta_total.scaled_add(*lambda_k, &s_k_beta);
+            }
+
+            let term1: f64 = d2beta
+                .iter()
+                .zip(s_beta_total.iter())
+                .map(|(d2b, sb)| d2b * sb)
+                .sum();
+
+            // Term 2: dβ'/dρ_k · S · dβ/dρ_m
+            let s_dbeta_j = {
+                let mut result = Array1::zeros(p);
+                for (lambda_k, penalty_k) in lambdas.iter().zip(penalties.iter()) {
+                    let s_k_dbeta_j = penalty_k.dot(&dbeta_drho[j]);
+                    result.scaled_add(*lambda_k, &s_k_dbeta_j);
+                }
+                result
+            };
+
+            let term2: f64 = dbeta_drho[i]
+                .iter()
+                .zip(s_dbeta_j.iter())
+                .map(|(db_i, s_db_j)| db_i * s_db_j)
+                .sum();
+
+            // Term 3: dβ'/dρ_m · S_k · β · λ_k (when k=i)
+            let s_i_beta = penalty_i.dot(&beta);
+            let term3: f64 = dbeta_drho[j]
+                .iter()
+                .zip(s_i_beta.iter())
+                .map(|(db_j, s_i_b)| db_j * s_i_b)
+                .sum::<f64>()
+                * lambda_i;
+
+            // Term 4: dβ'/dρ_k · S_m · β · λ_m (when m=j)
+            let s_j_beta = penalty_j.dot(&beta);
+            let term4: f64 = dbeta_drho[i]
+                .iter()
+                .zip(s_j_beta.iter())
+                .map(|(db_i, s_j_b)| db_i * s_j_b)
+                .sum::<f64>()
+                * lambda_j;
+
+            // Diagonal correction
+            let diag_corr = if i == j { bsb1[i] } else { 0.0 };
+
+            // Combine all bSb2 terms
+            let bsb2 = 2.0 * (term1 + term2 + term3 + term4) + diag_corr;
+
+            // Total Hessian = (det2 + bSb2) / 2
+            let h_val = (det2 + bsb2) / 2.0;
+
+            // Newton's method: x_new = x - H^{-1}·grad
+            // For minimization, H = ∂²V/∂ρ² should be positive at minimum
+            // No negation needed - we computed the Hessian correctly
+            hessian[[i, j]] = h_val;
+
+            if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
+                eprintln!("[HESS_DEBUG] Hessian[{},{}]:", i, j);
+                eprintln!("[HESS_DEBUG]   det2 = {:.6e} (log-determinant)", det2);
+                eprintln!("[HESS_DEBUG]   bSb2 term1 (d2beta) = {:.6e}", term1);
+                eprintln!("[HESS_DEBUG]   bSb2 term2 (dbeta·S·dbeta) = {:.6e}", term2);
+                eprintln!(
+                    "[HESS_DEBUG]   bSb2 term3 (dbeta_j·S_i·beta) = {:.6e}",
+                    term3
+                );
+                eprintln!(
+                    "[HESS_DEBUG]   bSb2 term4 (dbeta_i·S_j·beta) = {:.6e}",
+                    term4
+                );
+                eprintln!("[HESS_DEBUG]   bSb2 diag_corr = {:.6e}", diag_corr);
+                eprintln!("[HESS_DEBUG]   bSb2 total = {:.6e} (penalty)", bsb2);
+                eprintln!("[HESS_DEBUG]   (det2 + bSb2)/2 = {:.6e}", h_val);
+                eprintln!(
+                    "[HESS_DEBUG]   phi = {:.6e}, lambda_{} = {:.6e}, lambda_{} = {:.6e}",
+                    phi, i, lambda_i, j, lambda_j
+                );
+            }
+
+            // Fill symmetric entry
+            if i != j {
+                hessian[[j, i]] = hessian[[i, j]];
+            }
+        }
+    }
+
+    Ok(hessian)
+}
+
+/// Hessian with cached X'WX to avoid recomputation
+/// OPTIMIZATION: Reuses X'WX computed during gradient (saves ~2-3ms for n=5000)
 pub fn reml_hessian_multi_cached(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -3119,8 +3619,8 @@ pub fn reml_hessian_multi_cached(
     let mut dbeta_drho = Vec::with_capacity(m);
     for i in 0..m {
         let lambda_i = lambdas[i];
-        let m_i_dense = penalties_blocks[i].scale(lambda_i).to_dense();
-        let m_i_beta = m_i_dense.dot(&beta);
+        let m_i = &penalties_blocks[i] * lambda_i;
+        let m_i_beta = m_i.dot(&beta);
         dbeta_drho.push(a_inv.dot(&m_i_beta).mapv(|x| -x));
     }
 
@@ -3139,11 +3639,11 @@ pub fn reml_hessian_multi_cached(
     let mut a_inv_m_beta = Vec::with_capacity(m); // A^(-1)·M_i·β
 
     for i in 0..m {
-        let m_i: Array2<f64> = penalties_blocks[i].scale(lambdas[i]).to_dense();
+        let m_i = &penalties_blocks[i] * lambdas[i];
         let m_i_a_inv = m_i.dot(&a_inv);
         let m_i_beta = m_i.dot(&beta);
         let s_i_beta = penalties_blocks[i].dot_vec(&beta);
-        let a_inv_m_i_beta: Array1<f64> = a_inv.dot(&m_i_beta);
+        let a_inv_m_i_beta = a_inv.dot(&m_i_beta);
 
         m_vec.push(m_i);
         m_a_inv.push(m_i_a_inv);
@@ -3157,8 +3657,8 @@ pub fn reml_hessian_multi_cached(
         let trace_a_inv_m_i: f64 = (0..p).map(|k| m_a_inv[i][[k, k]]).sum();
 
         for j in 0..=i {
-            let trace_term: f64 = if i != j {
-                let prod: Array2<f64> = a_inv
+            let trace_term = if i != j {
+                let prod = a_inv
                     .dot(&m_a_inv[i].t())
                     .dot(&m_vec[j].t())
                     .dot(&a_inv.t());
@@ -3173,9 +3673,9 @@ pub fn reml_hessian_multi_cached(
                 -trace_term
             };
 
-            let m_i_a_inv_m_j_beta: Array1<f64> = m_vec[i].dot(&a_inv_m_beta[j]);
-            let m_j_a_inv_m_i_beta: Array1<f64> = m_vec[j].dot(&a_inv_m_beta[i]);
-            let d2beta_prod: Array1<f64> = a_inv.dot(&(&m_i_a_inv_m_j_beta + &m_j_a_inv_m_i_beta));
+            let m_i_a_inv_m_j_beta = m_vec[i].dot(&a_inv_m_beta[j]);
+            let m_j_a_inv_m_i_beta = m_vec[j].dot(&a_inv_m_beta[i]);
+            let d2beta_prod = a_inv.dot(&(m_i_a_inv_m_j_beta + m_j_a_inv_m_i_beta));
             let d2beta = if i == j {
                 d2beta_prod + &dbeta_drho[i]
             } else {
@@ -3312,7 +3812,7 @@ mod tests {
         let lambdas = vec![1.0, 1.0, 100.0];
 
         // Compute gradient
-        let result = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties_blocks);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
 
         assert!(
             result.is_ok(),
@@ -3389,7 +3889,7 @@ mod tests {
         // Test with very different lambda scales
         let lambdas = vec![0.01, 1000.0];
 
-        let result = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties_blocks);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
 
         assert!(
             result.is_ok(),
@@ -3416,13 +3916,13 @@ mod tests {
 
     /// Test that gradients match finite difference approximation
     ///
-    /// KNOWN ISSUE: The analytical gradient in reml_gradient_multi_qr_adaptive has a bug
+    /// KNOWN ISSUE: The analytical gradient in reml_gradient_multi_qr has a bug
     /// (analytical=-0.31 vs FD=0.88, wrong sign). This function is only used by
     /// the Python-exposed NewtonPIRLS path, NOT the production Rust fitting path
     /// (which uses reml_gradient_multi_qr_adaptive_cached_edf via smooth.rs).
     /// Fixing requires rederiving the IFT-based gradient formula.
     #[test]
-    #[ignore = "known bug: analytical gradient disagrees with FD in reml_gradient_multi_qr_adaptive (non-production path)"]
+    #[ignore = "known bug: analytical gradient disagrees with FD in reml_gradient_multi_qr (non-production path)"]
     fn test_multidim_gradient_accuracy() {
         use rand::Rng;
         use rand::SeedableRng;
@@ -3469,7 +3969,7 @@ mod tests {
         let lambdas = vec![1.0, 1.0];
 
         // Compute analytical gradient (uses rank-based phi)
-        let result = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties_blocks);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
         assert!(result.is_ok());
         let gradient_analytical = result.unwrap();
 
@@ -3648,7 +4148,7 @@ mod tests {
         // Start with moderate lambdas
         let lambdas = vec![10.0, 10.0, 100.0];
 
-        let result = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties_blocks);
+        let result = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties_blocks);
 
         assert!(result.is_ok());
         let gradient = result.unwrap();

@@ -2,7 +2,7 @@
 #[cfg(feature = "blas")]
 fn main() {
     use mgcv_rust::block_penalty::BlockPenalty;
-    use mgcv_rust::reml::reml_gradient_multi_qr;
+    use mgcv_rust::reml::reml_gradient_multi_qr_adaptive;
     use ndarray::{Array1, Array2};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -64,13 +64,13 @@ fn main() {
 
     // Warm-up call
     println!("[3/4] Warm-up call...");
-    let _ = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties);
+    let _ = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties);
 
     // Profile multiple iterations
     println!("[4/4] Profiling {} gradient calls...\n", 10);
     let start = Instant::now();
     for _ in 0..10 {
-        let _ = reml_gradient_multi_qr(&y, &x, &w, &lambdas, &penalties);
+        let _ = reml_gradient_multi_qr_adaptive(&y, &x, &w, &lambdas, &penalties);
     }
     let total_time = start.elapsed().as_secs_f64();
 

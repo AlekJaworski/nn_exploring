@@ -8,6 +8,7 @@ pub mod basis;
 pub mod block_penalty;
 pub mod blockwise_qr;
 pub mod chunked_qr;
+pub mod discrete;
 pub mod gam;
 pub mod gam_optimized;
 pub mod linalg;
@@ -334,6 +335,7 @@ impl PyGAM {
     ///
     /// Args:
     ///     algorithm: "newton" (default) or "fellner-schall" (faster, matches bam)
+    #[cfg(feature = "blas")]
     #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None))]
     fn fit_auto_optimized<'py>(
         &mut self,
@@ -615,6 +617,7 @@ fn compute_penalty_matrix<'py>(
 /// Returns gradient vector
 #[cfg(feature = "python")]
 #[pyfunction]
+#[cfg(feature = "blas")]
 fn evaluate_gradient<'py>(
     py: Python<'py>,
     x: PyReadonlyArray2<f64>,
@@ -680,13 +683,15 @@ fn evaluate_gradient<'py>(
         .into_iter()
         .map(|p| block_penalty::BlockPenalty::new(p.clone(), 0, p.nrows()))
         .collect();
-    let gradient = reml::reml_gradient_multi_qr(&y_array, &x_full, &w, &lambdas, &penalties_block)
-        .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
+    let gradient =
+        reml::reml_gradient_multi_qr_adaptive(&y_array, &x_full, &w, &lambdas, &penalties_block)
+            .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
     Ok(PyArray1::from_owned_array(py, gradient))
 }
 
 #[cfg(feature = "python")]
+#[cfg(feature = "blas")]
 #[pyfunction]
 fn reml_gradient_multi_qr_py<'py>(
     py: Python<'py>,
@@ -708,14 +713,20 @@ fn reml_gradient_multi_qr_py<'py>(
         .map(|p| block_penalty::BlockPenalty::new(p.clone(), 0, p.nrows()))
         .collect();
 
-    let gradient =
-        reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_block)
-            .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
+    let gradient = reml::reml_gradient_multi_qr_adaptive(
+        &y_array,
+        &x_array,
+        &w_array,
+        &lambdas,
+        &penalties_block,
+    )
+    .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
     Ok(PyArray1::from_owned_array(py, gradient))
 }
 
 #[cfg(feature = "python")]
+#[cfg(feature = "blas")]
 #[pyfunction]
 fn reml_hessian_multi_qr_py<'py>(
     py: Python<'py>,

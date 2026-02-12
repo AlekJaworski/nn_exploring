@@ -3,7 +3,9 @@
 //! Implements Newton's method with line search, matching mgcv's approach.
 
 use crate::block_penalty::BlockPenalty;
-use crate::reml::{reml_gradient_multi_qr, reml_hessian_multi_qr};
+use crate::reml::{
+    reml_gradient_multi_qr_adaptive as reml_gradient_multi_qr, reml_hessian_multi_qr,
+};
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
 
@@ -148,7 +150,10 @@ impl NewtonPIRLS {
                 eprintln!(
                     "\nIteration {}: max|grad| = {:.6e}",
                     iteration,
-                    gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max)
+                    gradient
+                        .iter()
+                        .map(|g: &f64| g.abs())
+                        .fold(0.0f64, f64::max)
                 );
             }
 
