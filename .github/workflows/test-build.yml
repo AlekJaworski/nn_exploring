@@ -62,7 +62,7 @@ jobs:
       - name: Test wheel
         run: |
           echo "=== Installing wheel ==="
-          python -m pip install dist/*.whl
+          python -m pip install --find-links dist/ mgcv_rust
           echo "=== Testing import ==="
           python -c "import mgcv_rust; print('Import successful!')"
           echo "=== Quick fit test ==="
@@ -127,7 +127,7 @@ jobs:
         run: |
           echo "=== Installing wheel ==="
           python3 -m pip install numpy
-          python3 -m pip install dist/*.whl
+          python3 -m pip install --find-links dist/ mgcv_rust
           echo "=== Testing import ==="
           python3 -c "import mgcv_rust; print('Import successful!')"
           echo "=== Quick fit test ==="
