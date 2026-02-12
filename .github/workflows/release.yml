@@ -22,7 +22,6 @@ jobs:
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           OPENBLAS_STATIC: "1"
-          OPENBLAS_NO_DYNAMIC_ARCH: "1"
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features python,blas,blas-static
@@ -76,7 +75,6 @@ jobs:
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
           OPENBLAS_STATIC: "1"
-          OPENBLAS_NO_DYNAMIC_ARCH: "1"
         with:
           target: aarch64
           args: --release --out dist --find-interpreter --features python,blas,blas-static
