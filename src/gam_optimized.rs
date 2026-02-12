@@ -271,9 +271,27 @@ impl GAM {
         let mut total_pirls_time = 0.0;
         let mut total_reml_time = 0.0;
 
-        // Outer loop: optimize smoothing parameters
-        for outer_iter in 0..max_outer_iter {
-            // Inner loop: PiRLS with current smoothing parameters
+        // Adaptive iteration count for Newton: use more iterations for larger/more complex problems
+        let num_basis: usize = cache.design_matrix.ncols();
+        let newton_max_iter = if num_basis >= n {
+            50 // More iterations for overparameterized case
+        } else if num_basis >= n / 2 {
+            30 // Moderate iterations for k close to n
+        } else {
+            10 // Standard for well-posed problems
+        };
+
+        let is_newton = smoothing_params.reml_algorithm == crate::smooth::REMLAlgorithm::Newton;
+
+        if is_newton {
+            // Newton converges fully in a single call — no outer loop needed.
+            // For Gaussian family the weights are constant, so PiRLS converges in 1 step
+            // and Newton finds optimal lambda internally. Running a second outer iteration
+            // would just re-derive the same lambda (wasting ~50% of REML time).
+            //
+            // Flow: PiRLS(init_lambda) → Newton(converge) → PiRLS(optimal_lambda) → done
+
+            // Step 1: PiRLS with initial lambda
             let pirls_start = Instant::now();
             let pirls_result = fit_pirls(
                 y,
@@ -285,24 +303,10 @@ impl GAM {
                 tolerance,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
-
             weights = pirls_result.weights.clone();
 
-            // Update smoothing parameters using REML/GCV
+            // Step 2: Newton optimization to convergence
             let reml_start = Instant::now();
-            let old_lambda = smoothing_params.lambda.clone();
-
-            // Adaptive iteration count: use more iterations for larger/more complex problems
-            // For k >= n, we need more Newton iterations to converge
-            let num_basis: usize = cache.design_matrix.ncols();
-            let newton_max_iter = if num_basis >= n {
-                50 // More iterations for overparameterized case
-            } else if num_basis >= n / 2 {
-                30 // Moderate iterations for k close to n
-            } else {
-                10 // Standard for well-posed problems
-            };
-
             smoothing_params.optimize_with_beta(
                 y,
                 &cache.design_matrix,
@@ -314,25 +318,32 @@ impl GAM {
             )?;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Check convergence with adaptive tolerance
-            let max_lambda_change = old_lambda
-                .iter()
-                .zip(smoothing_params.lambda.iter())
-                .map(|(old, new)| (old.ln() - new.ln()).abs())
-                .fold(0.0f64, f64::max);
+            // Step 3: Final PiRLS with optimal lambda
+            let pirls_start = Instant::now();
+            let final_result = fit_pirls(
+                y,
+                &cache.design_matrix,
+                &smoothing_params.lambda,
+                &cache.penalties,
+                self.family,
+                max_inner_iter,
+                tolerance,
+            )?;
+            total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Adaptive convergence: also check if objective is changing
-            let adaptive_tol = if outer_iter > 3 {
-                tolerance * 2.0 // Relax tolerance after a few iterations
-            } else {
-                tolerance
-            };
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
+                eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+            }
 
-            // Early stopping if converged
-            if max_lambda_change < adaptive_tol {
-                // Do final fit
+            self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
+        } else {
+            // Fellner-Schall: outer loop required — FS does one update step per call,
+            // so we iterate PiRLS + FS until lambda converges.
+            for outer_iter in 0..max_outer_iter {
+                // PiRLS with current smoothing parameters
                 let pirls_start = Instant::now();
-                let final_result = fit_pirls(
+                let pirls_result = fit_pirls(
                     y,
                     &cache.design_matrix,
                     &smoothing_params.lambda,
@@ -343,36 +354,81 @@ impl GAM {
                 )?;
                 total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
-                if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
-                    eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+                weights = pirls_result.weights.clone();
+
+                // Update smoothing parameters (one FS step)
+                let reml_start = Instant::now();
+                let old_lambda = smoothing_params.lambda.clone();
+
+                smoothing_params.optimize_with_beta(
+                    y,
+                    &cache.design_matrix,
+                    &weights,
+                    &cache.penalties,
+                    newton_max_iter,
+                    tolerance,
+                    Some(&pirls_result.coefficients),
+                )?;
+                total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Check convergence
+                let max_lambda_change = old_lambda
+                    .iter()
+                    .zip(smoothing_params.lambda.iter())
+                    .map(|(old, new)| (old.ln() - new.ln()).abs())
+                    .fold(0.0f64, f64::max);
+
+                let adaptive_tol = if outer_iter > 3 {
+                    tolerance * 2.0
+                } else {
+                    tolerance
+                };
+
+                if max_lambda_change < adaptive_tol {
+                    // Do final fit
+                    let pirls_start = Instant::now();
+                    let final_result = fit_pirls(
+                        y,
+                        &cache.design_matrix,
+                        &smoothing_params.lambda,
+                        &cache.penalties,
+                        self.family,
+                        max_inner_iter,
+                        tolerance,
+                    )?;
+                    total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
+
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
+                        eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+                    }
+
+                    self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
+                    return Ok(());
                 }
-
-                self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
-                return Ok(());
             }
-            // Note: Could also check if REML/GCV score is plateauing for additional early stopping
+
+            // Reached max iterations - use current fit
+            let pirls_start = Instant::now();
+            let final_result = fit_pirls(
+                y,
+                &cache.design_matrix,
+                &smoothing_params.lambda,
+                &cache.penalties,
+                self.family,
+                max_inner_iter,
+                tolerance,
+            )?;
+            total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
+                eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+            }
+
+            self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
         }
 
-        // Reached max iterations - use current fit
-        let pirls_start = Instant::now();
-        let final_result = fit_pirls(
-            y,
-            &cache.design_matrix,
-            &smoothing_params.lambda,
-            &cache.penalties,
-            self.family,
-            max_inner_iter,
-            tolerance,
-        )?;
-        total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
-
-        if std::env::var("MGCV_PROFILE").is_ok() {
-            eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
-            eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
-        }
-
-        self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
         Ok(())
     }
 }

@@ -7,8 +7,8 @@ pub use crate::reml::ScaleParameterMethod;
 #[cfg(feature = "blas")]
 use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
-    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
-    reml_hessian_multi_cached,
+    reml_criterion_multi_cached, reml_gradient_multi_qr_adaptive,
+    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_multi_cached,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -128,11 +128,12 @@ impl SmoothingParameter {
             ));
         }
 
-        // For Newton: reset to λ=1 as starting point (Newton iterates internally)
-        // For Fellner-Schall: keep current lambda (FS does a single update step)
+        // For Newton: reset to λ=1 as starting point (Newton iterates internally,
+        // and λ=1 is a good neutral starting point that avoids bias from poor initialization).
+        // For Fellner-Schall: keep current lambda (FS does a single update step).
         if self.reml_algorithm != REMLAlgorithm::FellnerSchall {
             for i in 0..self.lambda.len() {
-                self.lambda[i] = 1.0; // Start from λ=1
+                self.lambda[i] = 1.0;
             }
         }
 
@@ -361,7 +362,8 @@ impl SmoothingParameter {
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
             // Compute current REML value for convergence check
-            let current_reml = reml_criterion_multi(y, x, w, &lambdas, penalties, None)?;
+            let current_reml =
+                reml_criterion_multi_cached(y, x, w, &lambdas, penalties, None, Some(&xtwx))?;
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
@@ -494,11 +496,13 @@ impl SmoothingParameter {
             // REML change convergence: Stop if making negligible progress
             // After a few iterations, if REML barely changes, we're done
             // Use relative change to be scale-invariant
-            if iter >= 2 && reml_change < 1e-5 {
+            // Threshold 5e-4 catches convergence 1-2 iterations before the gradient criterion,
+            // avoiding expensive line search failures when Newton is essentially converged
+            if iter >= 3 && reml_change < 5e-4 {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!(
-                        "[PROFILE] Converged after {} iterations (REML change: {:.2e} < 1e-5)",
+                        "[PROFILE] Converged after {} iterations (REML change: {:.2e} < 5e-4)",
                         iter + 1,
                         reml_change
                     );
@@ -584,7 +588,15 @@ impl SmoothingParameter {
                 let new_lambdas: Vec<f64> = new_log_lambda.iter().map(|l| l.exp()).collect();
 
                 // Evaluate REML
-                match reml_criterion_multi(y, x, w, &new_lambdas, penalties, None) {
+                match reml_criterion_multi_cached(
+                    y,
+                    x,
+                    w,
+                    &new_lambdas,
+                    penalties,
+                    None,
+                    Some(&xtwx),
+                ) {
                     Ok(new_reml) => {
                         // OPTIMIZATION: Armijo condition for early stopping
                         // Accept if: new_reml ≤ current_reml + c₁ * step_scale * grad·step
@@ -698,9 +710,15 @@ impl SmoothingParameter {
                     let new_lambdas_sd: Vec<f64> =
                         new_log_lambda_sd.iter().map(|l| l.exp()).collect();
 
-                    if let Ok(new_reml_sd) =
-                        reml_criterion_multi(y, x, w, &new_lambdas_sd, penalties, None)
-                    {
+                    if let Ok(new_reml_sd) = reml_criterion_multi_cached(
+                        y,
+                        x,
+                        w,
+                        &new_lambdas_sd,
+                        penalties,
+                        None,
+                        Some(&xtwx),
+                    ) {
                         if std::env::var("MGCV_PROFILE").is_ok() {
                             eprintln!("[PROFILE]     SD scale={}: REML={:.6} (current={:.6}, improvement={})",
                                      scale, new_reml_sd, current_reml, new_reml_sd < current_reml);

@@ -354,11 +354,30 @@ pub fn reml_criterion_multi(
     penalties: &[Array2<f64>],
     beta: Option<&Array1<f64>>,
 ) -> Result<f64> {
+    reml_criterion_multi_cached(y, x, w, lambdas, penalties, beta, None)
+}
+
+/// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation
+pub fn reml_criterion_multi_cached(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[Array2<f64>],
+    beta: Option<&Array1<f64>>,
+    cached_xtwx: Option<&Array2<f64>>,
+) -> Result<f64> {
     let n = y.len();
     let p = x.ncols();
 
-    // OPTIMIZED: Compute X'WX directly without forming weighted matrix
-    let xtwx = compute_xtwx(x, w);
+    // Use cached X'WX if provided, otherwise compute
+    let xtwx_owned;
+    let xtwx = if let Some(cached) = cached_xtwx {
+        cached
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
 
     // Compute A = X'WX + Σλᵢ·Sᵢ
     let mut a = xtwx.clone();
@@ -3235,9 +3254,10 @@ pub fn reml_hessian_multi_cached(
         .map(|(r, wi)| r * r * wi)
         .sum();
 
-    let xtx = x.t().to_owned().dot(&x.to_owned());
-    let ainv_xtx = a_inv.dot(&xtx);
-    let edf: f64 = (0..ainv_xtx.nrows()).map(|i| ainv_xtx[[i, i]]).sum();
+    // OPTIMIZATION: Use cached X'WX for EDF instead of recomputing X'X (O(n*p^2) savings)
+    // EDF = tr(A^{-1} X'WX) — note we need X'WX, not X'X
+    let ainv_xtwx = a_inv.dot(xtwx);
+    let edf: f64 = (0..ainv_xtwx.nrows()).map(|i| ainv_xtwx[[i, i]]).sum();
     let phi = rss / (n as f64 - edf);
 
     let mut dbeta_drho = Vec::with_capacity(m);
