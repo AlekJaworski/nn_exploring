@@ -4,7 +4,7 @@
 use crate::reml::ScaleParameterMethod;
 use crate::{
     gam::{SmoothTerm, GAM},
-    pirls::fit_pirls,
+    pirls::fit_pirls_cached,
     smooth::{OptimizationMethod, SmoothingParameter},
     GAMError, Result,
 };
@@ -283,6 +283,16 @@ impl GAM {
 
         let is_newton = smoothing_params.reml_algorithm == crate::smooth::REMLAlgorithm::Newton;
 
+        // For Gaussian family, pre-compute X'X once and reuse for all PiRLS calls.
+        // Gaussian has constant weights (w=1), so X'WX = X'X never changes.
+        let is_gaussian = matches!(self.family, crate::pirls::Family::Gaussian);
+        let cached_xtx = if is_gaussian {
+            Some(cache.get_xtx().clone())
+        } else {
+            None
+        };
+        let xtx_ref = cached_xtx.as_ref();
+
         if is_newton {
             // Newton converges fully in a single call — no outer loop needed.
             // For Gaussian family the weights are constant, so PiRLS converges in 1 step
@@ -293,7 +303,7 @@ impl GAM {
 
             // Step 1: PiRLS with initial lambda
             let pirls_start = Instant::now();
-            let pirls_result = fit_pirls(
+            let pirls_result = fit_pirls_cached(
                 y,
                 &cache.design_matrix,
                 &smoothing_params.lambda,
@@ -301,6 +311,7 @@ impl GAM {
                 self.family,
                 max_inner_iter,
                 tolerance,
+                xtx_ref,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
@@ -320,7 +331,7 @@ impl GAM {
 
             // Step 3: Final PiRLS with optimal lambda
             let pirls_start = Instant::now();
-            let final_result = fit_pirls(
+            let final_result = fit_pirls_cached(
                 y,
                 &cache.design_matrix,
                 &smoothing_params.lambda,
@@ -328,6 +339,7 @@ impl GAM {
                 self.family,
                 max_inner_iter,
                 tolerance,
+                xtx_ref,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -343,7 +355,7 @@ impl GAM {
             for outer_iter in 0..max_outer_iter {
                 // PiRLS with current smoothing parameters
                 let pirls_start = Instant::now();
-                let pirls_result = fit_pirls(
+                let pirls_result = fit_pirls_cached(
                     y,
                     &cache.design_matrix,
                     &smoothing_params.lambda,
@@ -351,6 +363,7 @@ impl GAM {
                     self.family,
                     max_inner_iter,
                     tolerance,
+                    xtx_ref,
                 )?;
                 total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -387,7 +400,7 @@ impl GAM {
                 if max_lambda_change < adaptive_tol {
                     // Do final fit
                     let pirls_start = Instant::now();
-                    let final_result = fit_pirls(
+                    let final_result = fit_pirls_cached(
                         y,
                         &cache.design_matrix,
                         &smoothing_params.lambda,
@@ -395,6 +408,7 @@ impl GAM {
                         self.family,
                         max_inner_iter,
                         tolerance,
+                        xtx_ref,
                     )?;
                     total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -410,7 +424,7 @@ impl GAM {
 
             // Reached max iterations - use current fit
             let pirls_start = Instant::now();
-            let final_result = fit_pirls(
+            let final_result = fit_pirls_cached(
                 y,
                 &cache.design_matrix,
                 &smoothing_params.lambda,
@@ -418,6 +432,7 @@ impl GAM {
                 self.family,
                 max_inner_iter,
                 tolerance,
+                xtx_ref,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
