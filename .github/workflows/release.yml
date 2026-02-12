@@ -27,14 +27,32 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
-          manylinux: ${{ matrix.target == 'aarch64' && false || 'auto' }}
-          container: ${{ matrix.target == 'aarch64' && false || '' }}
+          manylinux: auto
           before-script-linux: |
+            set -e
             if command -v yum &> /dev/null; then
               yum install -y gcc-gfortran openssl-devel pkgconfig make cmake perl
             else
               apt-get update && apt-get install -y gfortran libssl-dev pkg-config make cmake perl
             fi
+
+      - name: Validate wheel
+        run: |
+          python -m pip install --upgrade pip numpy
+          python -m pip install dist/*.whl
+          python -c "
+          import numpy as np
+          import mgcv_rust
+          np.random.seed(42)
+          x = np.random.uniform(0, 1, 200).reshape(-1, 1)
+          y = np.sin(2 * np.pi * x.ravel()) + np.random.normal(0, 0.2, 200)
+          gam = mgcv_rust.GAM()
+          result = gam.fit_auto(x, y, k=[10], method='REML', bs='cr', max_iter=50)
+          y_pred = gam.predict(x)
+          assert len(y_pred) == 200, 'prediction length mismatch'
+          assert np.all(np.isfinite(y_pred)), 'predictions contain NaN/Inf'
+          print('Release wheel validation PASSED')
+          "
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -47,8 +65,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OpenBLAS
-        run: brew install openblas
+      # For blas-static: openblas-src compiles from source, no brew needed.
+      # Install only the build tools (Fortran compiler).
+      - name: Install build tools
+        run: |
+          brew install gcc  # provides gfortran
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -60,6 +81,24 @@ jobs:
           target: aarch64
           args: --release --out dist --find-interpreter --features python,blas,blas-static
           sccache: 'true'
+
+      - name: Validate wheel
+        run: |
+          python3 -m pip install numpy
+          python3 -m pip install dist/*.whl
+          python3 -c "
+          import numpy as np
+          import mgcv_rust
+          np.random.seed(42)
+          x = np.random.uniform(0, 1, 200).reshape(-1, 1)
+          y = np.sin(2 * np.pi * x.ravel()) + np.random.normal(0, 0.2, 200)
+          gam = mgcv_rust.GAM()
+          result = gam.fit_auto(x, y, k=[10], method='REML', bs='cr', max_iter=50)
+          y_pred = gam.predict(x)
+          assert len(y_pred) == 200, 'prediction length mismatch'
+          assert np.all(np.isfinite(y_pred)), 'predictions contain NaN/Inf'
+          print('Release wheel validation PASSED')
+          "
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

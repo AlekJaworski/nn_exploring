@@ -5,27 +5,27 @@
 //! Iteratively Reweighted Least Squares) algorithm, similar to R's mgcv package.
 
 pub mod basis;
-pub mod penalty;
-pub mod reml;
-pub mod pirls;
-pub mod smooth;
+pub mod blockwise_qr;
+pub mod chunked_qr;
 pub mod gam;
 pub mod gam_optimized;
-pub mod utils;
 pub mod linalg;
 #[cfg(feature = "blas")]
 pub mod newton_optimizer;
+pub mod penalty;
+pub mod pirls;
+pub mod reml;
 #[cfg(feature = "blas")]
 pub mod reml_optimized;
-pub mod blockwise_qr;
-pub mod chunked_qr;
+pub mod smooth;
+pub mod utils;
 
-pub use gam::{GAM, SmoothTerm};
-pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
-pub use smooth::{SmoothingParameter, OptimizationMethod};
 #[cfg(feature = "blas")]
-use crate::reml::ScaleParameterMethod;
+pub use crate::reml::ScaleParameterMethod;
+pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
+pub use gam::{SmoothTerm, GAM};
 pub use pirls::Family;
+pub use smooth::{OptimizationMethod, SmoothingParameter};
 
 use thiserror::Error;
 
@@ -58,16 +58,13 @@ pub type Result<T> = std::result::Result<T, GAMError>;
 
 // Python bindings
 #[cfg(feature = "python")]
-use pyo3::prelude::*;
-
-#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 
 #[cfg(feature = "python")]
 use pyo3::types::PyAny;
 
 #[cfg(feature = "python")]
-use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyArrayMethods};
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 
 /// Parse formula string like "s(0, k=10) + s(1, k=15)"
 /// Returns Vec of (column_index, num_basis)
@@ -88,7 +85,7 @@ fn parse_formula(formula: &str) -> PyResult<Vec<(usize, usize)>> {
         }
 
         // Extract content between s( and )
-        let content = &term[2..term.len()-1];
+        let content = &term[2..term.len() - 1];
         let parts: Vec<&str> = content.split(',').map(|s| s.trim()).collect();
 
         if parts.len() != 2 {
@@ -99,9 +96,9 @@ fn parse_formula(formula: &str) -> PyResult<Vec<(usize, usize)>> {
         }
 
         // Parse column index
-        let col_idx = parts[0].parse::<usize>().map_err(|_| {
-            PyValueError::new_err(format!("Invalid column index: '{}'", parts[0]))
-        })?;
+        let col_idx = parts[0]
+            .parse::<usize>()
+            .map_err(|_| PyValueError::new_err(format!("Invalid column index: '{}'", parts[0])))?;
 
         // Parse k=value
         if !parts[1].starts_with("k=") && !parts[1].starts_with("k =") {
@@ -111,13 +108,15 @@ fn parse_formula(formula: &str) -> PyResult<Vec<(usize, usize)>> {
             )));
         }
 
-        let k_value = parts[1].split('=').nth(1).ok_or_else(|| {
-            PyValueError::new_err("Missing value after 'k='")
-        })?.trim();
+        let k_value = parts[1]
+            .split('=')
+            .nth(1)
+            .ok_or_else(|| PyValueError::new_err("Missing value after 'k='"))?
+            .trim();
 
-        let num_basis = k_value.parse::<usize>().map_err(|_| {
-            PyValueError::new_err(format!("Invalid k value: '{}'", k_value))
-        })?;
+        let num_basis = k_value
+            .parse::<usize>()
+            .map_err(|_| PyValueError::new_err(format!("Invalid k value: '{}'", k_value)))?;
 
         smooths.push((col_idx, num_basis));
     }
@@ -147,9 +146,12 @@ impl PyGAM {
             Some("binomial") => Family::Binomial,
             Some("poisson") => Family::Poisson,
             Some("gamma") => Family::Gamma,
-            Some(f) => return Err(PyValueError::new_err(
-                format!("Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', or 'gamma'", f)
-            )),
+            Some(f) => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', or 'gamma'",
+                    f
+                )))
+            }
         };
         Ok(PyGAM {
             inner: GAM::new(fam),
@@ -201,7 +203,7 @@ impl PyGAM {
         use_edf: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         // Route to the optimized implementation
-        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf)
+        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None)
     }
 
     /// Low-level fit method for users who manually configure smooths
@@ -227,7 +229,8 @@ impl PyGAM {
 
         let max_outer = max_iter.unwrap_or(10);
 
-        self.inner.fit(&x_array, &y_array, opt_method, max_outer, 100, 1e-6)
+        self.inner
+            .fit(&x_array, &y_array, opt_method, max_outer, 100, 1e-6)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
         let result = pyo3::types::PyDict::new(py);
@@ -284,11 +287,12 @@ impl PyGAM {
         if k.len() != d {
             return Err(PyValueError::new_err(format!(
                 "k length ({}) must match number of columns ({})",
-                k.len(), d
+                k.len(),
+                d
             )));
         }
 
-        let basis_type = bs.unwrap_or("bs");  // Default to B-splines for backward compatibility
+        let basis_type = bs.unwrap_or("bs"); // Default to B-splines for backward compatibility
 
         // Clear any existing smooths
         self.inner.smooth_terms.clear();
@@ -303,23 +307,15 @@ impl PyGAM {
                     // Use evenly-spaced knots (mgcv default) instead of quantile-based
                     let x_min = col_owned.iter().copied().fold(f64::INFINITY, f64::min);
                     let x_max = col_owned.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                    SmoothTerm::cr_spline(
-                        format!("x{}", i),
-                        num_basis,
-                        x_min,
-                        x_max,
-                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
-                },
-                "bs" => {
-                    SmoothTerm::cubic_spline_quantile(
-                        format!("x{}", i),
-                        num_basis,
-                        &col_owned,
-                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
-                },
+                    SmoothTerm::cr_spline(format!("x{}", i), num_basis, x_min, x_max)
+                        .map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                }
+                "bs" => SmoothTerm::cubic_spline_quantile(format!("x{}", i), num_basis, &col_owned)
+                    .map_err(|e| PyValueError::new_err(format!("{}", e)))?,
                 _ => {
                     return Err(PyValueError::new_err(format!(
-                        "Unknown basis type '{}'. Use 'bs' or 'cr'.", basis_type
+                        "Unknown basis type '{}'. Use 'bs' or 'cr'.",
+                        basis_type
                     )));
                 }
             };
@@ -334,7 +330,10 @@ impl PyGAM {
     /// Fit GAM with automatic smooth setup (optimized version with caching)
     ///
     /// Uses caching and improved algorithms for better performance
-    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None))]
+    ///
+    /// Args:
+    ///     algorithm: "newton" (default) or "fellner-schall" (faster, matches bam)
+    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None))]
     fn fit_auto_optimized<'py>(
         &mut self,
         py: Python<'py>,
@@ -345,6 +344,7 @@ impl PyGAM {
         bs: Option<&str>,
         max_iter: Option<usize>,
         use_edf: Option<bool>,
+        algorithm: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         use crate::gam_optimized::*;
 
@@ -356,7 +356,8 @@ impl PyGAM {
         if k.len() != d {
             return Err(PyValueError::new_err(format!(
                 "k length ({}) must match number of columns ({})",
-                k.len(), d
+                k.len(),
+                d
             )));
         }
 
@@ -375,23 +376,15 @@ impl PyGAM {
                     // Use evenly-spaced knots (mgcv default) instead of quantile-based
                     let x_min = col_owned.iter().copied().fold(f64::INFINITY, f64::min);
                     let x_max = col_owned.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                    SmoothTerm::cr_spline(
-                        format!("x{}", i),
-                        num_basis,
-                        x_min,
-                        x_max,
-                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
-                },
-                "bs" => {
-                    SmoothTerm::cubic_spline_quantile(
-                        format!("x{}", i),
-                        num_basis,
-                        &col_owned,
-                    ).map_err(|e| PyValueError::new_err(format!("{}", e)))?
-                },
+                    SmoothTerm::cr_spline(format!("x{}", i), num_basis, x_min, x_max)
+                        .map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                }
+                "bs" => SmoothTerm::cubic_spline_quantile(format!("x{}", i), num_basis, &col_owned)
+                    .map_err(|e| PyValueError::new_err(format!("{}", e)))?,
                 _ => {
                     return Err(PyValueError::new_err(format!(
-                        "Unknown basis type '{}'. Use 'bs' or 'cr'.", basis_type
+                        "Unknown basis type '{}'. Use 'bs' or 'cr'.",
+                        basis_type
                     )));
                 }
             };
@@ -415,7 +408,33 @@ impl PyGAM {
             ScaleParameterMethod::Rank
         };
 
-        self.inner.fit_optimized_with_scale_method(&x_array, &y_array, opt_method, max_outer, 100, 1e-6, scale_method)
+        // Choose REML algorithm
+        use crate::smooth::REMLAlgorithm;
+        let reml_algo = match algorithm {
+            Some("fellner-schall") | Some("fs") | Some("fREML") => {
+                Some(REMLAlgorithm::FellnerSchall)
+            }
+            Some("newton") => Some(REMLAlgorithm::Newton),
+            None => None, // Use default (Newton)
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown algorithm '{}'. Use 'newton' or 'fellner-schall'.",
+                    other
+                )))
+            }
+        };
+
+        self.inner
+            .fit_optimized_full(
+                &x_array,
+                &y_array,
+                opt_method,
+                max_outer,
+                100,
+                1e-6,
+                scale_method,
+                reml_algo,
+            )
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
         // Return results
@@ -476,11 +495,9 @@ impl PyGAM {
             let col = x_array.column(col_idx);
             let col_owned = col.to_owned();
 
-            let smooth = SmoothTerm::cubic_spline_quantile(
-                format!("x{}", col_idx),
-                num_basis,
-                &col_owned,
-            ).map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+            let smooth =
+                SmoothTerm::cubic_spline_quantile(format!("x{}", col_idx), num_basis, &col_owned)
+                    .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
             self.inner.add_smooth(smooth);
         }
@@ -496,14 +513,17 @@ impl PyGAM {
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let x_array = x.as_array().to_owned();
 
-        let predictions = self.inner.predict(&x_array)
+        let predictions = self
+            .inner
+            .predict(&x_array)
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
         Ok(PyArray1::from_vec(py, predictions.to_vec()))
     }
 
     fn get_lambda(&self) -> PyResult<f64> {
-        self.inner.smoothing_params
+        self.inner
+            .smoothing_params
             .as_ref()
             .map(|p| p.lambda[0])
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))
@@ -511,7 +531,9 @@ impl PyGAM {
 
     /// Get all smoothing parameters (for multi-variable GAMs)
     fn get_all_lambdas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
-        let lambdas = self.inner.smoothing_params
+        let lambdas = self
+            .inner
+            .smoothing_params
             .as_ref()
             .map(|p| p.lambda.clone())
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
@@ -520,7 +542,9 @@ impl PyGAM {
     }
 
     fn get_fitted_values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
-        let fitted = self.inner.fitted_values
+        let fitted = self
+            .inner
+            .fitted_values
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
@@ -539,7 +563,9 @@ impl PyGAM {
 
     /// Get the fitted coefficients
     fn get_coefficients<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
-        let coefficients = self.inner.coefficients
+        let coefficients = self
+            .inner
+            .coefficients
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
@@ -547,10 +573,15 @@ impl PyGAM {
     }
 
     /// Get the design matrix (predictor matrix)
-    fn get_design_matrix<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+    fn get_design_matrix<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
         use numpy::PyArray2;
 
-        let design_matrix = self.inner.design_matrix
+        let design_matrix = self
+            .inner
+            .design_matrix
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
 
@@ -568,8 +599,8 @@ fn compute_penalty_matrix<'py>(
     num_basis: usize,
     knots: PyReadonlyArray1<f64>,
 ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
-    use numpy::PyArray2;
     use ndarray::Array1;
+    use numpy::PyArray2;
 
     let knots_array = Array1::from_vec(knots.to_vec()?);
 
@@ -590,8 +621,8 @@ fn evaluate_gradient<'py>(
     lambdas: Vec<f64>,
     k_values: Vec<usize>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    use numpy::PyArray1;
     use ndarray::{Array1, Array2};
+    use numpy::PyArray1;
 
     let x_array = x.as_array().to_owned();
     let y_array = y.as_array().to_owned();
@@ -611,7 +642,9 @@ fn evaluate_gradient<'py>(
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
         // Evaluate basis
-        let basis_vals = smooth.basis.evaluate(&col.to_owned())
+        let basis_vals = smooth
+            .basis
+            .evaluate(&col.to_owned())
             .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
         // Append to design matrix
@@ -664,12 +697,11 @@ fn reml_gradient_multi_qr_py<'py>(
     let x_array = x.as_array().to_owned();
     let w_array = w.as_array().to_owned();
 
-    let penalties_vec: Vec<_> = penalties.iter()
-        .map(|p| p.as_array().to_owned())
-        .collect();
+    let penalties_vec: Vec<_> = penalties.iter().map(|p| p.as_array().to_owned()).collect();
 
-    let gradient = reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
-        .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
+    let gradient =
+        reml::reml_gradient_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+            .map_err(|e| PyValueError::new_err(format!("Gradient computation failed: {}", e)))?;
 
     Ok(PyArray1::from_owned_array(py, gradient))
 }
@@ -690,12 +722,11 @@ fn reml_hessian_multi_qr_py<'py>(
     let x_array = x.as_array().to_owned();
     let w_array = w.as_array().to_owned();
 
-    let penalties_vec: Vec<_> = penalties.iter()
-        .map(|p| p.as_array().to_owned())
-        .collect();
+    let penalties_vec: Vec<_> = penalties.iter().map(|p| p.as_array().to_owned()).collect();
 
-    let hessian = reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
-        .map_err(|e| PyValueError::new_err(format!("Hessian computation failed: {}", e)))?;
+    let hessian =
+        reml::reml_hessian_multi_qr(&y_array, &x_array, &w_array, &lambdas, &penalties_vec)
+            .map_err(|e| PyValueError::new_err(format!("Hessian computation failed: {}", e)))?;
 
     Ok(PyArray2::from_owned_array(py, hessian))
 }
@@ -713,18 +744,23 @@ fn newton_pirls_py<'py>(
     max_iter: Option<usize>,
     grad_tol: Option<f64>,
     verbose: Option<bool>,
-) -> PyResult<(Bound<'py, numpy::PyArray1<f64>>, Bound<'py, numpy::PyArray1<f64>>, f64, usize, bool, String)> {
-    use numpy::PyArray1;
+) -> PyResult<(
+    Bound<'py, numpy::PyArray1<f64>>,
+    Bound<'py, numpy::PyArray1<f64>>,
+    f64,
+    usize,
+    bool,
+    String,
+)> {
     use newton_optimizer::NewtonPIRLS;
+    use numpy::PyArray1;
 
     let y_array = y.as_array().to_owned();
     let x_array = x.as_array().to_owned();
     let w_array = w.as_array().to_owned();
     let initial_log_lambda_array = initial_log_lambda.as_array().to_owned();
 
-    let penalties_vec: Vec<_> = penalties.iter()
-        .map(|p| p.as_array().to_owned())
-        .collect();
+    let penalties_vec: Vec<_> = penalties.iter().map(|p| p.as_array().to_owned()).collect();
 
     let mut optimizer = NewtonPIRLS::new();
     if let Some(max_iter) = max_iter {
@@ -737,7 +773,14 @@ fn newton_pirls_py<'py>(
         optimizer.verbose = verbose;
     }
 
-    let result = optimizer.optimize(&y_array, &x_array, &w_array, &initial_log_lambda_array, &penalties_vec)
+    let result = optimizer
+        .optimize(
+            &y_array,
+            &x_array,
+            &w_array,
+            &initial_log_lambda_array,
+            &penalties_vec,
+        )
         .map_err(|e| PyValueError::new_err(format!("Newton-PIRLS optimization failed: {}", e)))?;
 
     Ok((
@@ -758,6 +801,7 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(evaluate_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(reml_gradient_multi_qr_py, m)?)?;
     m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
+    #[cfg(feature = "blas")]
     m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
     Ok(())
 }

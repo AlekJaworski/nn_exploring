@@ -1,3 +1,4 @@
+use crate::{GAMError, Result};
 /// Block-wise QR decomposition for large datasets
 ///
 /// Instead of forming the full augmented matrix Z = [sqrt(W)X; sqrt(λ)L; ...]
@@ -12,7 +13,6 @@
 ///    - R_new'R_new = R_old'R_old + B'B
 /// 3. Final R satisfies R'R = X'WX + λS
 use ndarray::{Array1, Array2};
-use crate::{Result, GAMError};
 
 #[cfg(feature = "blas")]
 use ndarray_linalg::QR;
@@ -66,7 +66,8 @@ pub fn compute_r_blockwise(
         }
 
         // Get R₀ from QR of penalty part
-        let (_, r) = z_penalty.qr()
+        let (_, r) = z_penalty
+            .qr()
             .map_err(|_| GAMError::LinAlgError("QR decomposition failed".to_string()))?;
 
         // Extract upper triangular part (first p rows)
@@ -116,7 +117,8 @@ pub fn compute_r_blockwise(
             }
 
             // QR decomposition to get updated R
-            let (_, r_new) = stacked.qr()
+            let (_, r_new) = stacked
+                .qr()
                 .map_err(|_| GAMError::LinAlgError("Block QR update failed".to_string()))?;
 
             // Extract new R (upper triangular, first p rows)
@@ -169,7 +171,8 @@ pub fn compute_r_blockwise(
                     }
                 }
 
-                let (_, r_new) = stacked.qr()
+                let (_, r_new) = stacked
+                    .qr()
                     .map_err(|_| GAMError::LinAlgError("Block QR update failed".to_string()))?;
 
                 let mut r_extracted = Array2::<f64>::zeros((p, p));
@@ -184,7 +187,8 @@ pub fn compute_r_blockwise(
                 r_current = Some(r_extracted);
             } else {
                 // First block: just QR it
-                let (_, r_first) = block.qr()
+                let (_, r_first) = block
+                    .qr()
                     .map_err(|_| GAMError::LinAlgError("First block QR failed".to_string()))?;
 
                 let mut r_extracted = Array2::<f64>::zeros((p, p));
@@ -200,7 +204,9 @@ pub fn compute_r_blockwise(
             }
         }
 
-        r_current.ok_or(GAMError::InvalidParameter("No blocks processed".to_string()))
+        r_current.ok_or(GAMError::InvalidParameter(
+            "No blocks processed".to_string(),
+        ))
     }
 }
 
@@ -213,6 +219,6 @@ pub fn compute_r_blockwise(
     _block_size: usize,
 ) -> Result<Array2<f64>> {
     Err(GAMError::InvalidParameter(
-        "Block-wise QR requires 'blas' feature".to_string()
+        "Block-wise QR requires 'blas' feature".to_string(),
     ))
 }

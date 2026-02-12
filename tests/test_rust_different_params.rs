@@ -2,8 +2,8 @@
 
 #[test]
 fn test_mgcv_penalty_different_params() {
+    use mgcv_rust::penalty::cubic_spline_penalty_mgcv;
     use ndarray::Array1;
-    use crate::penalty::cubic_spline_penalty_mgcv;
 
     // Test 1: Different num_basis (10 instead of 20)
     let num_basis = 10;
@@ -12,7 +12,10 @@ fn test_mgcv_penalty_different_params() {
 
     println!("\nTest 1: num_basis=10");
     println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
-    println!("  Frobenius: {:.1}", penalty.iter().map(|&x| x*x).sum::<f64>().sqrt());
+    println!(
+        "  Frobenius: {:.1}",
+        penalty.iter().map(|&x| x * x).sum::<f64>().sqrt()
+    );
 
     // Test 2: Different data range [0, 2]
     let num_basis = 20;
@@ -21,7 +24,10 @@ fn test_mgcv_penalty_different_params() {
 
     println!("\nTest 2: range=[0,2]");
     println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
-    println!("  Frobenius: {:.1}", penalty.iter().map(|&x| x*x).sum::<f64>().sqrt());
+    println!(
+        "  Frobenius: {:.1}",
+        penalty.iter().map(|&x| x * x).sum::<f64>().sqrt()
+    );
 
     // Test 3: Different data range [-5, 5]
     let num_basis = 15;
@@ -30,7 +36,10 @@ fn test_mgcv_penalty_different_params() {
 
     println!("\nTest 3: range=[-5,5], num_basis=15");
     println!("  Shape: {}x{}", penalty.nrows(), penalty.ncols());
-    println!("  Frobenius: {:.1}", penalty.iter().map(|&x| x*x).sum::<f64>().sqrt());
+    println!(
+        "  Frobenius: {:.1}",
+        penalty.iter().map(|&x| x * x).sum::<f64>().sqrt()
+    );
 
     // All should be positive definite with correct dimensions
     assert_eq!(penalty.nrows(), num_basis);

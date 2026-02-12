@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mgcv-rust"
-version = "0.4.0"
+version = "0.5.0"
 description = "Rust implementation of Generalized Additive Models with Python bindings"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -37,6 +37,8 @@ Repository = "https://github.com/AlekJaworski/nn_exploring"
 Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 
 [tool.maturin]
-# Full features with BLAS for complete functionality
-features = ["python", "blas"]
+# Default features for local development (maturin develop).
+# CI overrides with --features python,blas,blas-system (test) or python,blas,blas-static (release).
+# Only "python" here to avoid conflicts when CI appends BLAS features.
+features = ["python"]
 module-name = "mgcv_rust"

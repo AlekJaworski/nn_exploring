@@ -1,13 +1,13 @@
 //! Main GAM model structure and fitting
 
-use ndarray::{Array1, Array2};
 use crate::{
-    Result, GAMError,
-    basis::{BasisFunction, CubicSpline, CubicRegressionSpline, BoundaryCondition},
+    basis::{BasisFunction, BoundaryCondition, CubicRegressionSpline, CubicSpline},
     penalty::compute_penalty,
     pirls::{fit_pirls, Family},
-    smooth::{SmoothingParameter, OptimizationMethod},
+    smooth::{OptimizationMethod, SmoothingParameter},
+    GAMError, Result,
 };
+use ndarray::{Array1, Array2};
 
 /// A smooth term in a GAM
 pub struct SmoothTerm {
@@ -26,18 +26,9 @@ pub struct SmoothTerm {
 
 impl SmoothTerm {
     /// Create a new smooth term with cubic spline basis (evenly-spaced knots)
-    pub fn cubic_spline(
-        name: String,
-        num_basis: usize,
-        x_min: f64,
-        x_max: f64,
-    ) -> Result<Self> {
-        let basis = CubicSpline::with_num_knots(
-            x_min,
-            x_max,
-            num_basis - 2,
-            BoundaryCondition::Natural
-        );
+    pub fn cubic_spline(name: String, num_basis: usize, x_min: f64, x_max: f64) -> Result<Self> {
+        let basis =
+            CubicSpline::with_num_knots(x_min, x_max, num_basis - 2, BoundaryCondition::Natural);
 
         let knots = basis.knots().unwrap();
         let penalty = compute_penalty("cubic", num_basis, Some(knots), 1)?;
@@ -47,7 +38,7 @@ impl SmoothTerm {
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
-            constraint_matrix: None,  // No constraint for regular cubic splines
+            constraint_matrix: None, // No constraint for regular cubic splines
         })
     }
 
@@ -58,11 +49,8 @@ impl SmoothTerm {
         num_basis: usize,
         x_data: &Array1<f64>,
     ) -> Result<Self> {
-        let basis = CubicSpline::with_quantile_knots(
-            x_data,
-            num_basis - 2,
-            BoundaryCondition::Natural
-        );
+        let basis =
+            CubicSpline::with_quantile_knots(x_data, num_basis - 2, BoundaryCondition::Natural);
 
         let knots = basis.knots().unwrap();
         let penalty = compute_penalty("cubic", num_basis, Some(knots), 1)?;
@@ -72,7 +60,7 @@ impl SmoothTerm {
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
-            constraint_matrix: None,  // No constraint for regular cubic splines
+            constraint_matrix: None, // No constraint for regular cubic splines
         })
     }
 
@@ -95,18 +83,13 @@ impl SmoothTerm {
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
-            constraint_matrix: None,  // No pre-transformation (mgcv handles constraints during solving)
+            constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
         })
     }
 
     /// Create a new smooth term with cubic regression splines (evenly-spaced knots)
     /// NOTE: Uses k basis functions (not k-1) to match mgcv's approach
-    pub fn cr_spline(
-        name: String,
-        num_basis: usize,
-        x_min: f64,
-        x_max: f64,
-    ) -> Result<Self> {
+    pub fn cr_spline(name: String, num_basis: usize, x_min: f64, x_max: f64) -> Result<Self> {
         let basis = CubicRegressionSpline::with_num_knots(x_min, x_max, num_basis);
         let knots = basis.knots().unwrap();
 
@@ -118,7 +101,7 @@ impl SmoothTerm {
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
-            constraint_matrix: None,  // No pre-transformation (mgcv handles constraints during solving)
+            constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
         })
     }
 
@@ -139,9 +122,9 @@ impl SmoothTerm {
     pub fn num_basis(&self) -> usize {
         // If constraint is applied, return the constrained dimension
         if let Some(ref q_matrix) = self.constraint_matrix {
-            q_matrix.ncols()  // k-1 for sum-to-zero constraint
+            q_matrix.ncols() // k-1 for sum-to-zero constraint
         } else {
-            self.basis.num_basis()  // k for unconstrained
+            self.basis.num_basis() // k for unconstrained
         }
     }
 }
@@ -213,16 +196,19 @@ impl GAM {
         let n = y.len();
 
         if x.nrows() != n {
-            return Err(GAMError::DimensionMismatch(
-                format!("X has {} rows but y has {} elements", x.nrows(), n)
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                n
+            )));
         }
 
         if x.ncols() != self.smooth_terms.len() {
-            return Err(GAMError::DimensionMismatch(
-                format!("X has {} columns but model has {} smooth terms",
-                    x.ncols(), self.smooth_terms.len())
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "X has {} columns but model has {} smooth terms",
+                x.ncols(),
+                self.smooth_terms.len()
+            )));
         }
 
         // Construct design matrix by evaluating all basis functions
@@ -242,7 +228,8 @@ impl GAM {
 
         for design in &design_matrices {
             let num_cols = design.ncols();
-            full_design.slice_mut(ndarray::s![.., col_offset..col_offset + num_cols])
+            full_design
+                .slice_mut(ndarray::s![.., col_offset..col_offset + num_cols])
                 .assign(design);
             col_offset += num_cols;
         }
@@ -263,7 +250,8 @@ impl GAM {
             // S_rescaled = S / maS = S * maXX / ||S||_inf
 
             // Compute infinity norm of design matrix (max absolute row sum)
-            let inf_norm_X = design.rows()
+            let inf_norm_X = design
+                .rows()
                 .into_iter()
                 .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
@@ -271,7 +259,11 @@ impl GAM {
 
             // Compute infinity norm of penalty matrix (max absolute row sum)
             let inf_norm_S = (0..num_basis)
-                .map(|i| (0..num_basis).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
+                .map(|i| {
+                    (0..num_basis)
+                        .map(|j| smooth.penalty[[i, j]].abs())
+                        .sum::<f64>()
+                })
                 .fold(0.0f64, f64::max);
 
             // Apply normalization: maS = ||S||_inf / maXX, S_new = S / maS
@@ -281,11 +273,14 @@ impl GAM {
                 1.0 // Avoid division by zero for degenerate penalties
             };
 
-
             let mut penalty_full = Array2::zeros((total_basis, total_basis));
 
             // Place this smooth's normalized penalty in the appropriate block using slicing
-            penalty_full.slice_mut(ndarray::s![col_offset..col_offset + num_basis, col_offset..col_offset + num_basis])
+            penalty_full
+                .slice_mut(ndarray::s![
+                    col_offset..col_offset + num_basis,
+                    col_offset..col_offset + num_basis
+                ])
                 .assign(&(&smooth.penalty * scale_factor));
 
             penalties.push(penalty_full);
@@ -293,10 +288,7 @@ impl GAM {
         }
 
         // Initialize smoothing parameters
-        let mut smoothing_params = SmoothingParameter::new(
-            self.smooth_terms.len(),
-            opt_method
-        );
+        let mut smoothing_params = SmoothingParameter::new(self.smooth_terms.len(), opt_method);
 
         // Outer loop: optimize smoothing parameters
         let mut weights = Array1::ones(n);
@@ -328,7 +320,8 @@ impl GAM {
             )?;
 
             // Check convergence of smoothing parameters
-            let max_lambda_change = old_lambda.iter()
+            let max_lambda_change = old_lambda
+                .iter()
                 .zip(smoothing_params.lambda.iter())
                 .map(|(old, new)| (old.ln() - new.ln()).abs())
                 .fold(0.0f64, f64::max);
@@ -402,7 +395,7 @@ impl GAM {
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.fitted {
             return Err(GAMError::InvalidParameter(
-                "Model has not been fitted yet".to_string()
+                "Model has not been fitted yet".to_string(),
             ));
         }
 
@@ -410,10 +403,11 @@ impl GAM {
         let n = x.nrows();
 
         if x.ncols() != self.smooth_terms.len() {
-            return Err(GAMError::DimensionMismatch(
-                format!("X has {} columns but model has {} smooth terms",
-                    x.ncols(), self.smooth_terms.len())
-            ));
+            return Err(GAMError::DimensionMismatch(format!(
+                "X has {} columns but model has {} smooth terms",
+                x.ncols(),
+                self.smooth_terms.len()
+            )));
         }
 
         // Construct design matrix
@@ -432,7 +426,8 @@ impl GAM {
 
         for design in &design_matrices {
             let num_cols = design.ncols();
-            full_design.slice_mut(ndarray::s![.., col_offset..col_offset + num_cols])
+            full_design
+                .slice_mut(ndarray::s![.., col_offset..col_offset + num_cols])
                 .assign(design);
             col_offset += num_cols;
         }
@@ -441,9 +436,7 @@ impl GAM {
         let eta = full_design.dot(coefficients);
 
         // Apply inverse link
-        let predictions: Array1<f64> = eta.iter()
-            .map(|&e| self.family.inverse_link(e))
-            .collect();
+        let predictions: Array1<f64> = eta.iter().map(|&e| self.family.inverse_link(e)).collect();
 
         Ok(predictions)
     }
@@ -456,9 +449,9 @@ impl GAM {
 
         // Simplified: count non-zero coefficients
         // A proper implementation would compute tr(influence matrix)
-        self.coefficients.as_ref().map(|coef| {
-            coef.iter().filter(|&&c| c.abs() > 1e-10).count() as f64
-        })
+        self.coefficients
+            .as_ref()
+            .map(|coef| coef.iter().filter(|&&c| c.abs() > 1e-10).count() as f64)
     }
 
     /// Store fit results (used by fit_optimized and fit_parallel)
@@ -502,12 +495,7 @@ mod tests {
     #[test]
     fn test_gam_add_smooth() {
         let mut gam = GAM::new(Family::Gaussian);
-        let smooth = SmoothTerm::cubic_spline(
-            "x1".to_string(),
-            10,
-            0.0,
-            1.0
-        ).unwrap();
+        let smooth = SmoothTerm::cubic_spline("x1".to_string(), 10, 0.0, 1.0).unwrap();
 
         gam.add_smooth(smooth);
         assert_eq!(gam.smooth_terms.len(), 1);
@@ -519,22 +507,16 @@ mod tests {
 
         // Generate test data: y = sin(2*pi*x) + noise
         let x_data: Array1<f64> = Array1::linspace(0.0, 1.0, n);
-        let y_data: Array1<f64> = x_data.iter()
+        let y_data: Array1<f64> = x_data
+            .iter()
             .enumerate()
-            .map(|(i, &xi)| {
-                (2.0 * std::f64::consts::PI * xi).sin() + 0.1 * (i as f64 % 3.0 - 1.0)
-            })
+            .map(|(i, &xi)| (2.0 * std::f64::consts::PI * xi).sin() + 0.1 * (i as f64 % 3.0 - 1.0))
             .collect();
 
         let x_matrix = x_data.clone().to_shape((n, 1)).unwrap().to_owned();
 
         let mut gam = GAM::new(Family::Gaussian);
-        let smooth = SmoothTerm::cubic_spline(
-            "x".to_string(),
-            15,
-            0.0,
-            1.0
-        ).unwrap();
+        let smooth = SmoothTerm::cubic_spline("x".to_string(), 15, 0.0, 1.0).unwrap();
 
         gam.add_smooth(smooth);
 
@@ -544,7 +526,7 @@ mod tests {
             OptimizationMethod::GCV,
             5,  // outer iterations
             50, // inner iterations
-            1e-4
+            1e-4,
         );
 
         assert!(result.is_ok());
