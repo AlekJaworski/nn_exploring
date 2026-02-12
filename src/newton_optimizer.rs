@@ -2,6 +2,7 @@
 //!
 //! Implements Newton's method with line search, matching mgcv's approach.
 
+use crate::block_penalty::BlockPenalty;
 use crate::reml::{reml_gradient_multi_qr, reml_hessian_multi_qr};
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
@@ -104,14 +105,16 @@ impl NewtonPIRLS {
         x: &Array2<f64>,
         w: &Array1<f64>,
         initial_log_lambda: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
     ) -> Result<NewtonResult> {
+        // Convert BlockPenalty to dense for reml.rs functions (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
         let m = initial_log_lambda.len();
 
-        if penalties.len() != m {
+        if penalties_dense.len() != m {
             return Err(GAMError::DimensionMismatch(format!(
                 "Number of penalties ({}) must match log_lambda ({})",
-                penalties.len(),
+                penalties_dense.len(),
                 m
             )));
         }
@@ -140,7 +143,7 @@ impl NewtonPIRLS {
             let lambda: Vec<f64> = log_lambda.iter().map(|x| x.exp()).collect();
 
             // Compute gradient
-            let gradient = reml_gradient_multi_qr(y, x, w, &lambda, penalties)?;
+            let gradient = reml_gradient_multi_qr(y, x, w, &lambda, &penalties_dense)?;
             let grad_norm = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
 
             if self.verbose {
@@ -167,7 +170,7 @@ impl NewtonPIRLS {
             }
 
             // Compute Hessian
-            let hessian = reml_hessian_multi_qr(y, x, w, &lambda, penalties)?;
+            let hessian = reml_hessian_multi_qr(y, x, w, &lambda, &penalties_dense)?;
 
             // Solve Newton system: H·Δρ = -g
             let delta_rho = self.solve_newton_system(&hessian, &gradient)?;
@@ -196,7 +199,7 @@ impl NewtonPIRLS {
                     &log_lambda,
                     &gradient,
                     &hessian,
-                    penalties,
+                    &penalties_dense,
                     trust_radius,
                 )?;
                 trust_radius = new_radius;
@@ -231,7 +234,8 @@ impl NewtonPIRLS {
                 };
 
                 // Line search to find step size
-                let step_size = self.line_search(y, x, w, &log_lambda, &delta_rho, penalties)?;
+                let step_size =
+                    self.line_search(y, x, w, &log_lambda, &delta_rho, &penalties_dense)?;
 
                 if self.verbose {
                     eprintln!("  Line search result: step = {:.6e}", step_size);
@@ -260,11 +264,11 @@ impl NewtonPIRLS {
 
         // Final evaluation
         let lambda: Vec<f64> = log_lambda.iter().map(|x| x.exp()).collect();
-        let final_gradient = reml_gradient_multi_qr(y, x, w, &lambda, penalties)?;
+        let final_gradient = reml_gradient_multi_qr(y, x, w, &lambda, &penalties_dense)?;
         let gradient_norm = final_gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
 
         // Compute final REML value
-        let reml_value = self.compute_reml(y, x, w, &lambda, penalties)?;
+        let reml_value = self.compute_reml(y, x, w, &lambda, &penalties_dense)?;
 
         if self.verbose {
             eprintln!("\n{}", message);

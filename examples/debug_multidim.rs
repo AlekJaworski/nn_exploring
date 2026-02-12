@@ -1,13 +1,14 @@
 //! Debug multi-dimensional convergence issue
 //! Testing d=2 to understand why Newton fails to converge
 
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm};
 use mgcv_rust::basis::{BasisFunction, CubicRegressionSpline};
+use mgcv_rust::block_penalty::BlockPenalty;
 use mgcv_rust::penalty::compute_penalty;
+use mgcv_rust::smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter};
 use ndarray::{Array1, Array2};
+use rand::distributions::{Distribution, Uniform};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::distributions::{Distribution, Uniform};
 use std::f64::consts::PI;
 
 fn main() {
@@ -57,7 +58,8 @@ fn main() {
 
     // Apply penalty normalization
     for (design, penalty) in [(&design1, &mut penalty1), (&design2, &mut penalty2)] {
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -75,34 +77,35 @@ fn main() {
     // Combine into full design matrix
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
-    full_design.slice_mut(ndarray::s![.., 0..k]).assign(&design1);
-    full_design.slice_mut(ndarray::s![.., k..2*k]).assign(&design2);
+    full_design
+        .slice_mut(ndarray::s![.., 0..k])
+        .assign(&design1);
+    full_design
+        .slice_mut(ndarray::s![.., k..2 * k])
+        .assign(&design2);
 
     // Create block-diagonal penalties (one for each smooth)
     let mut penalties = Vec::new();
-
-    let mut penalty_block1 = Array2::zeros((total_basis, total_basis));
-    penalty_block1.slice_mut(ndarray::s![0..k, 0..k]).assign(&penalty1);
-    penalties.push(penalty_block1);
-
-    let mut penalty_block2 = Array2::zeros((total_basis, total_basis));
-    penalty_block2.slice_mut(ndarray::s![k..2*k, k..2*k]).assign(&penalty2);
-    penalties.push(penalty_block2);
+    penalties.push(BlockPenalty::new(penalty1, 0, total_basis));
+    penalties.push(BlockPenalty::new(penalty2, k, total_basis));
 
     println!("Penalty structure:");
-    println!("  penalty1: {}×{} block in {}×{} matrix", k, k, total_basis, total_basis);
-    println!("  penalty2: {}×{} block in {}×{} matrix\n", k, k, total_basis, total_basis);
+    println!(
+        "  penalty1: {}×{} block in {}×{} matrix",
+        k, k, total_basis, total_basis
+    );
+    println!(
+        "  penalty2: {}×{} block in {}×{} matrix\n",
+        k, k, total_basis, total_basis
+    );
 
     // Test with Newton
     println!("Testing Newton optimization with MGCV_PROFILE=1...\n");
     std::env::set_var("MGCV_PROFILE", "1");
     std::env::set_var("MGCV_GRAD_DEBUG", "1");
 
-    let mut sp = SmoothingParameter::new_with_algorithm(
-        d,
-        OptimizationMethod::REML,
-        REMLAlgorithm::Newton
-    );
+    let mut sp =
+        SmoothingParameter::new_with_algorithm(d, OptimizationMethod::REML, REMLAlgorithm::Newton);
 
     let weights = Array1::ones(n);
 

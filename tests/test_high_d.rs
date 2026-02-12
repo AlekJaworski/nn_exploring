@@ -1,17 +1,18 @@
 //! Test d=4 and d=8 convergence
 
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm};
 use mgcv_rust::basis::{BasisFunction, CubicRegressionSpline};
+use mgcv_rust::block_penalty::BlockPenalty;
 use mgcv_rust::penalty::compute_penalty;
+use mgcv_rust::smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter};
 use ndarray::{Array1, Array2};
+use rand::distributions::{Distribution, Uniform};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::distributions::{Distribution, Uniform};
 use std::f64::consts::PI;
 
 fn test_config(n: usize, d: usize, k: usize) {
     println!("\n=== Testing n={}, d={}, k={} ===", n, d, k);
-    
+
     let mut rng = ChaCha8Rng::seed_from_u64(123);
     let uniform = Uniform::new(0.0, 1.0);
 
@@ -46,7 +47,8 @@ fn test_config(n: usize, d: usize, k: usize) {
         let mut penalty = compute_penalty("cr", k, Some(knots), 1).unwrap();
 
         // Apply penalty normalization
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -68,25 +70,22 @@ fn test_config(n: usize, d: usize, k: usize) {
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
     for (i, mat) in design_matrices.iter().enumerate() {
-        full_design.slice_mut(ndarray::s![.., (i*k)..((i+1)*k)]).assign(mat);
+        full_design
+            .slice_mut(ndarray::s![.., (i * k)..((i + 1) * k)])
+            .assign(mat);
     }
 
     // Create block-diagonal penalties
     let mut penalties = Vec::new();
-    for (i, pen) in penalties_vec.iter().enumerate() {
-        let mut block = Array2::zeros((total_basis, total_basis));
-        block.slice_mut(ndarray::s![i*k..(i+1)*k, i*k..(i+1)*k]).assign(pen);
-        penalties.push(block);
+    for (i, pen) in penalties_vec.into_iter().enumerate() {
+        penalties.push(BlockPenalty::new(pen, i * k, total_basis));
     }
 
     // Test Newton
     std::env::set_var("MGCV_PROFILE", "1");
 
-    let mut sp = SmoothingParameter::new_with_algorithm(
-        d,
-        OptimizationMethod::REML,
-        REMLAlgorithm::Newton
-    );
+    let mut sp =
+        SmoothingParameter::new_with_algorithm(d, OptimizationMethod::REML, REMLAlgorithm::Newton);
 
     let weights = Array1::ones(n);
     let start = std::time::Instant::now();
@@ -108,7 +107,7 @@ fn test_config(n: usize, d: usize, k: usize) {
 
 fn main() {
     println!("=== Rust Newton Performance: High-D ===");
-    
+
     test_config(500, 4, 10);
     test_config(500, 8, 8);
     test_config(1000, 4, 10);

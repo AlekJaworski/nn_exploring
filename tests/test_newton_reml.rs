@@ -5,7 +5,8 @@
 //! - Should handle penalty normalization correctly
 //! - Should match mgcv's lambda estimates
 
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm};
+use mgcv_rust::block_penalty::BlockPenalty;
+use mgcv_rust::smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter};
 use ndarray::{Array1, Array2};
 use std::f64::consts::PI;
 
@@ -14,9 +15,9 @@ fn main() {
 
     // Generate test data matching verify_reml.R
     let seed = 123u64;
+    use rand::distributions::Distribution;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand::distributions::Distribution;
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let uniform = rand::distributions::Uniform::new(0.0, 1.0);
@@ -25,14 +26,18 @@ fn main() {
     let k = 20;
 
     let x_vec: Vec<f64> = (0..n).map(|_| uniform.sample(&mut rng)).collect();
-    let y_vec: Vec<f64> = x_vec.iter().enumerate().map(|(i, &xi)| {
-        let signal = (2.0 * PI * xi).sin();
-        // Generate N(0, 0.3) noise using Box-Muller transform
-        let u1: f64 = uniform.sample(&mut rng);
-        let u2: f64 = uniform.sample(&mut rng);
-        let noise = 0.3 * (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
-        signal + noise
-    }).collect();
+    let y_vec: Vec<f64> = x_vec
+        .iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let signal = (2.0 * PI * xi).sin();
+            // Generate N(0, 0.3) noise using Box-Muller transform
+            let u1: f64 = uniform.sample(&mut rng);
+            let u2: f64 = uniform.sample(&mut rng);
+            let noise = 0.3 * (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
+            signal + noise
+        })
+        .collect();
 
     println!("Data: n={}, k={}", n, k);
     println!("Signal: sin(2*pi*x)");
@@ -57,7 +62,7 @@ fn main() {
         for j in 2..k {
             // D^2 basis: φ_j''(x) ≈ j*(j-1)*x^(j-2)
             // Penalty: ∫ φ_i''(x) φ_j''(x) dx
-            let coef = (i * (i-1) * j * (j-1)) as f64;
+            let coef = (i * (i - 1) * j * (j - 1)) as f64;
             penalty[[i, j]] = coef / ((i + j - 3) as f64 + 1.0);
         }
     }
@@ -76,19 +81,20 @@ fn main() {
 
     std::env::set_var("MGCV_PROFILE", "1");
 
-    let mut sp_newton = SmoothingParameter::new_with_algorithm(
-        1,
-        OptimizationMethod::REML,
-        REMLAlgorithm::Newton
-    );
+    let mut sp_newton =
+        SmoothingParameter::new_with_algorithm(1, OptimizationMethod::REML, REMLAlgorithm::Newton);
 
     println!("Starting optimization...\n");
     let start = std::time::Instant::now();
 
-    match sp_newton.optimize(&y, &x_mat, &w, &[penalty.clone()], 50, 1e-6) {
+    let bp_newton = BlockPenalty::new(penalty.clone(), 0, k);
+    match sp_newton.optimize(&y, &x_mat, &w, &[bp_newton], 50, 1e-6) {
         Ok(_) => {
             let elapsed = start.elapsed();
-            println!("\n✓ Newton optimization completed in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+            println!(
+                "\n✓ Newton optimization completed in {:.2}ms",
+                elapsed.as_secs_f64() * 1000.0
+            );
             println!("  Optimal λ: {:.6}", sp_newton.lambda[0]);
             println!("\nExpected from R mgcv (method='REML'):");
             println!("  λ ≈ 107.87 (for proper cubic regression spline basis)");
@@ -104,16 +110,20 @@ fn main() {
     let mut sp_fs = SmoothingParameter::new_with_algorithm(
         1,
         OptimizationMethod::REML,
-        REMLAlgorithm::FellnerSchall
+        REMLAlgorithm::FellnerSchall,
     );
 
     println!("Starting optimization...\n");
     let start = std::time::Instant::now();
 
-    match sp_fs.optimize(&y, &x_mat, &w, &[penalty], 50, 1e-6) {
+    let bp_fs = BlockPenalty::new(penalty, 0, k);
+    match sp_fs.optimize(&y, &x_mat, &w, &[bp_fs], 50, 1e-6) {
         Ok(_) => {
             let elapsed = start.elapsed();
-            println!("\n✓ Fellner-Schall optimization completed in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+            println!(
+                "\n✓ Fellner-Schall optimization completed in {:.2}ms",
+                elapsed.as_secs_f64() * 1000.0
+            );
             println!("  Optimal λ: {:.6}", sp_fs.lambda[0]);
             println!("\nExpected from R mgcv (optimizer='efs'):");
             println!("  λ ≈ 107.92");
@@ -127,7 +137,10 @@ fn main() {
     println!("\n=== Comparison ===\n");
     println!("Newton λ:         {:.6}", sp_newton.lambda[0]);
     println!("Fellner-Schall λ: {:.6}", sp_fs.lambda[0]);
-    println!("Difference:        {:.6}", (sp_newton.lambda[0] - sp_fs.lambda[0]).abs());
+    println!(
+        "Difference:        {:.6}",
+        (sp_newton.lambda[0] - sp_fs.lambda[0]).abs()
+    );
     println!("\nNote: Exact values depend on proper spline basis implementation");
     println!("This test uses simplified polynomial basis for verification");
 }

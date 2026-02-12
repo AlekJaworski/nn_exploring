@@ -1,13 +1,14 @@
 //! Comprehensive Rust Newton performance benchmark
 //! Matches configurations from benchmark_performance.R
 
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm};
 use mgcv_rust::basis::{BasisFunction, CubicRegressionSpline};
+use mgcv_rust::block_penalty::BlockPenalty;
 use mgcv_rust::penalty::compute_penalty;
+use mgcv_rust::smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter};
 use ndarray::{Array1, Array2};
+use rand::distributions::{Distribution, Uniform};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::distributions::{Distribution, Uniform};
 use std::f64::consts::PI;
 use std::time::Instant;
 
@@ -43,8 +44,8 @@ fn generate_data(n: usize, d: usize) -> (Vec<Array1<f64>>, Array1<f64>) {
         let mut y_vec = Vec::new();
         for i in 0..n {
             let signal = (2.0 * PI * x_vecs[0][i]).sin()
-                       + (2.0 * PI * x_vecs[1][i]).cos()
-                       + (4.0 * PI * x_vecs[2][i]).sin();
+                + (2.0 * PI * x_vecs[1][i]).cos()
+                + (4.0 * PI * x_vecs[2][i]).sin();
             let u1 = uniform.sample(&mut rng);
             let u2 = uniform.sample(&mut rng);
             let noise = 0.3 * (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
@@ -56,7 +57,11 @@ fn generate_data(n: usize, d: usize) -> (Vec<Array1<f64>>, Array1<f64>) {
     (x_vecs, y)
 }
 
-fn benchmark_config(n: usize, d: usize, k: usize) -> Result<(usize, f64, f64), Box<dyn std::error::Error>> {
+fn benchmark_config(
+    n: usize,
+    d: usize,
+    k: usize,
+) -> Result<(usize, f64, f64), Box<dyn std::error::Error>> {
     // Generate data
     let (x_vecs, y) = generate_data(n, d);
 
@@ -71,7 +76,8 @@ fn benchmark_config(n: usize, d: usize, k: usize) -> Result<(usize, f64, f64), B
         let mut penalty = compute_penalty("cr", k, Some(knots), 1)?;
 
         // Apply penalty normalization (like mgcv)
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -93,26 +99,23 @@ fn benchmark_config(n: usize, d: usize, k: usize) -> Result<(usize, f64, f64), B
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
     for (i, mat) in design_matrices.iter().enumerate() {
-        full_design.slice_mut(ndarray::s![.., (i*k)..((i+1)*k)]).assign(mat);
+        full_design
+            .slice_mut(ndarray::s![.., (i * k)..((i + 1) * k)])
+            .assign(mat);
     }
 
     // Create block diagonal penalties
     let mut block_penalties = Vec::new();
-    for (i, pen) in penalties.iter().enumerate() {
-        let mut block = Array2::zeros((total_basis, total_basis));
-        block.slice_mut(ndarray::s![i*k..(i+1)*k, i*k..(i+1)*k]).assign(pen);
-        block_penalties.push(block);
+    for (i, pen) in penalties.into_iter().enumerate() {
+        block_penalties.push(BlockPenalty::new(pen, i * k, total_basis));
     }
 
     // Count iterations by enabling profiling temporarily
     std::env::set_var("MGCV_PROFILE", "1");
 
     // Benchmark Newton optimization
-    let mut sp = SmoothingParameter::new_with_algorithm(
-        d,
-        OptimizationMethod::REML,
-        REMLAlgorithm::Newton
-    );
+    let mut sp =
+        SmoothingParameter::new_with_algorithm(d, OptimizationMethod::REML, REMLAlgorithm::Newton);
 
     let weights = Array1::ones(n);
     let start = Instant::now();
@@ -130,8 +133,10 @@ fn benchmark_config(n: usize, d: usize, k: usize) -> Result<(usize, f64, f64), B
 
 fn main() {
     println!("=== Rust Newton Performance Benchmark ===\n");
-    println!("{:<8} {:<6} {:<6} {:<20} {:<10} {:<15} {:<10}",
-             "n", "d", "k", "Method", "Iterations", "Lambda", "Time(ms)");
+    println!(
+        "{:<8} {:<6} {:<6} {:<20} {:<10} {:<15} {:<10}",
+        "n", "d", "k", "Method", "Iterations", "Lambda", "Time(ms)"
+    );
     println!("{}", "-".repeat(85));
 
     let configs = vec![
@@ -149,12 +154,16 @@ fn main() {
     for (n, d, k) in configs {
         match benchmark_config(n, d, k) {
             Ok((iters, lambda, time_ms)) => {
-                println!("{:<8} {:<6} {:<6} {:<20} {:<10} {:<15.4} {:<10.1}",
-                         n, d, k, "Rust Newton", "?", lambda, time_ms);
+                println!(
+                    "{:<8} {:<6} {:<6} {:<20} {:<10} {:<15.4} {:<10.1}",
+                    n, d, k, "Rust Newton", "?", lambda, time_ms
+                );
             }
             Err(e) => {
-                println!("{:<8} {:<6} {:<6} {:<20} {:<10} {:<15} {:<10}",
-                         n, d, k, "Rust Newton", "FAILED", "-", "-");
+                println!(
+                    "{:<8} {:<6} {:<6} {:<20} {:<10} {:<15} {:<10}",
+                    n, d, k, "Rust Newton", "FAILED", "-", "-"
+                );
                 eprintln!("Error: {}", e);
             }
         }

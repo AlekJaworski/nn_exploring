@@ -6,9 +6,10 @@ use std::time::Instant;
 
 use mgcv_rust::{
     basis::{BasisFunction, CubicRegressionSpline},
+    block_penalty::BlockPenalty,
     penalty::compute_penalty,
-    smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm},
     pirls::{fit_pirls, Family},
+    smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +21,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let filename = &args[1];
-    let algorithm_str = if args.len() > 2 { &args[2] } else { "fellner-schall" };
+    let algorithm_str = if args.len() > 2 {
+        &args[2]
+    } else {
+        "fellner-schall"
+    };
 
     // Read data
     let file = File::open(filename)?;
@@ -59,11 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         REMLAlgorithm::FellnerSchall
     };
 
-    let mut sp = SmoothingParameter::new_with_algorithm(
-        d,
-        OptimizationMethod::REML,
-        algorithm
-    );
+    let mut sp = SmoothingParameter::new_with_algorithm(d, OptimizationMethod::REML, algorithm);
 
     // Build design matrix and penalties
     let mut design_matrices = Vec::new();
@@ -79,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Apply mgcv's penalty normalization: S_rescaled = S * ||X||_inf^2 / ||S||_inf
         // This makes penalties scale-invariant
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -105,23 +107,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
     for (i, mat) in design_matrices.iter().enumerate() {
-        full_design.slice_mut(ndarray::s![.., (i*k)..((i+1)*k)]).assign(mat);
+        full_design
+            .slice_mut(ndarray::s![.., (i * k)..((i + 1) * k)])
+            .assign(mat);
     }
 
     // Create block diagonal penalty matrices (one for each smooth)
     let mut penalties = Vec::new();
-    for (i, individual_penalty) in individual_penalties.iter().enumerate() {
+    for (i, individual_penalty) in individual_penalties.into_iter().enumerate() {
         // Debug: print penalty stats
         if std::env::var("MGCV_PROFILE").is_ok() {
-            let trace: f64 = (0..individual_penalty.nrows()).map(|j| individual_penalty[[j,j]]).sum();
-            let max_elem = individual_penalty.iter().map(|x| x.abs()).fold(0.0, f64::max);
-            eprintln!("[PROFILE] Individual penalty {}: dim={}×{}, trace={:.6}, max={:.6}",
-                     i, individual_penalty.nrows(), individual_penalty.ncols(), trace, max_elem);
+            let trace: f64 = (0..individual_penalty.nrows())
+                .map(|j| individual_penalty[[j, j]])
+                .sum();
+            let max_elem = individual_penalty
+                .iter()
+                .map(|x| x.abs())
+                .fold(0.0, f64::max);
+            eprintln!(
+                "[PROFILE] Individual penalty {}: dim={}×{}, trace={:.6}, max={:.6}",
+                i,
+                individual_penalty.nrows(),
+                individual_penalty.ncols(),
+                trace,
+                max_elem
+            );
         }
 
-        let mut block_penalty = Array2::zeros((total_basis, total_basis));
-        block_penalty.slice_mut(ndarray::s![i*k..(i+1)*k, i*k..(i+1)*k]).assign(individual_penalty);
-        penalties.push(block_penalty);
+        penalties.push(BlockPenalty::new(individual_penalty, i * k, total_basis));
     }
 
     let w = Array1::ones(n);
@@ -131,7 +144,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     sp.optimize(&y, &full_design, &w, &penalties, 30, 1e-6)?;
     let elapsed = start.elapsed();
 
-    eprintln!("\nOptimization time: {:.1} ms", elapsed.as_secs_f64() * 1000.0);
+    eprintln!(
+        "\nOptimization time: {:.1} ms",
+        elapsed.as_secs_f64() * 1000.0
+    );
 
     // Fit final model
     let result = fit_pirls(

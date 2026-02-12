@@ -1,12 +1,13 @@
 //! Test if relaxing tolerance helps multi-D convergence
 
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm};
 use mgcv_rust::basis::{BasisFunction, CubicRegressionSpline};
+use mgcv_rust::block_penalty::BlockPenalty;
 use mgcv_rust::penalty::compute_penalty;
+use mgcv_rust::smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter};
 use ndarray::{Array1, Array2};
+use rand::distributions::{Distribution, Uniform};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::distributions::{Distribution, Uniform};
 use std::f64::consts::PI;
 
 fn main() {
@@ -49,7 +50,8 @@ fn main() {
 
     // Apply penalty normalization
     for (design, penalty) in [(&design1, &mut penalty1), (&design2, &mut penalty2)] {
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -66,17 +68,16 @@ fn main() {
 
     let total_basis = k * 2;
     let mut full_design = Array2::zeros((n, total_basis));
-    full_design.slice_mut(ndarray::s![.., 0..k]).assign(&design1);
-    full_design.slice_mut(ndarray::s![.., k..2*k]).assign(&design2);
+    full_design
+        .slice_mut(ndarray::s![.., 0..k])
+        .assign(&design1);
+    full_design
+        .slice_mut(ndarray::s![.., k..2 * k])
+        .assign(&design2);
 
     let mut penalties = Vec::new();
-    let mut penalty_block1 = Array2::zeros((total_basis, total_basis));
-    penalty_block1.slice_mut(ndarray::s![0..k, 0..k]).assign(&penalty1);
-    penalties.push(penalty_block1);
-
-    let mut penalty_block2 = Array2::zeros((total_basis, total_basis));
-    penalty_block2.slice_mut(ndarray::s![k..2*k, k..2*k]).assign(&penalty2);
-    penalties.push(penalty_block2);
+    penalties.push(BlockPenalty::new(penalty1, 0, total_basis));
+    penalties.push(BlockPenalty::new(penalty2, k, total_basis));
 
     let weights = Array1::ones(n);
 
@@ -88,7 +89,7 @@ fn main() {
         let mut sp = SmoothingParameter::new_with_algorithm(
             2,
             OptimizationMethod::REML,
-            REMLAlgorithm::Newton
+            REMLAlgorithm::Newton,
         );
 
         match sp.optimize(&y, &full_design, &weights, &penalties, 30, tolerance) {

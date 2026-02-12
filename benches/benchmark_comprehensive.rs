@@ -1,12 +1,16 @@
+use mgcv_rust::block_penalty::BlockPenalty;
 /// Comprehensive benchmark across various n, d, k combinations
 /// Tests the optimized Newton REML implementation
-
-use mgcv_rust::{SmoothingParameter, OptimizationMethod};
+use mgcv_rust::{OptimizationMethod, SmoothingParameter};
 use ndarray::{Array1, Array2};
 use rand::Rng;
 use std::time::Instant;
 
-fn generate_test_data(n: usize, d: usize, k: usize) -> (Array1<f64>, Array2<f64>, Array1<f64>, Vec<Array2<f64>>) {
+fn generate_test_data(
+    n: usize,
+    d: usize,
+    k: usize,
+) -> (Array1<f64>, Array2<f64>, Array1<f64>, Vec<BlockPenalty>) {
     let mut rng = rand::thread_rng();
 
     // Response
@@ -30,12 +34,12 @@ fn generate_test_data(n: usize, d: usize, k: usize) -> (Array1<f64>, Array2<f64>
         for j in start_col..end_col {
             if j > start_col {
                 penalty[[j, j]] += 1.0;
-                penalty[[j, j-1]] -= 1.0;
-                penalty[[j-1, j]] -= 1.0;
-                penalty[[j-1, j-1]] += 1.0;
+                penalty[[j, j - 1]] -= 1.0;
+                penalty[[j - 1, j]] -= 1.0;
+                penalty[[j - 1, j - 1]] += 1.0;
             }
         }
-        penalties.push(penalty);
+        penalties.push(BlockPenalty::new(penalty, 0, p));
     }
 
     (y, x, w, penalties)
@@ -57,10 +61,16 @@ fn benchmark_config(n: usize, d: usize, k: usize) -> (usize, f64, Vec<f64>) {
 
             // Estimate iterations (would need profiling for exact count)
             // For now use a heuristic based on problem size
-            let iterations = if n >= 5000 { 4 } else if n >= 2000 { 5 } else { 6 };
+            let iterations = if n >= 5000 {
+                4
+            } else if n >= 2000 {
+                5
+            } else {
+                6
+            };
 
             (iterations, elapsed.as_secs_f64() * 1000.0, lambdas)
-        },
+        }
         Err(e) => {
             eprintln!("Error for n={}, d={}, k={}: {:?}", n, d, k, e);
             (0, 0.0, vec![])
@@ -78,19 +88,16 @@ fn main() {
         (1000, 1, 10),
         (1000, 2, 10),
         (1000, 4, 10),
-
         // Medium problems
         (2000, 1, 10),
         (2000, 2, 10),
         (2000, 4, 10),
         (2000, 8, 8),
-
         // Large problems (our target)
         (5000, 1, 10),
         (5000, 2, 10),
         (5000, 4, 8),
         (5000, 8, 8),
-
         // Very large problems
         (10000, 1, 10),
         (10000, 2, 10),

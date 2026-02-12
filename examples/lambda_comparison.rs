@@ -1,14 +1,15 @@
 //! Demonstrate the effect of different smoothing parameter values
 //! by manually setting λ and comparing the results
 
-use mgcv_rust::{GAM, Family, SmoothTerm, OptimizationMethod};
+use mgcv_rust::block_penalty::BlockPenalty;
+use mgcv_rust::{Family, OptimizationMethod, SmoothTerm, GAM};
 use ndarray::Array1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Effect of Smoothing Parameter λ ===\n");
 
     // Generate noisy data
-    let n = 300;  // Increased from 30 to 300 for better n/p ratio
+    let n = 300; // Increased from 30 to 300 for better n/p ratio
     let noise_level = 0.6;
 
     let x_data: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
@@ -46,7 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("Automatic selection (GCV):");
-    println!(" {:.6} | {:.6}      | {:.6}   | ← Optimal by GCV",
+    println!(
+        " {:.6} | {:.6}      | {:.6}   | ← Optimal by GCV",
         optimal_lambda,
         compute_training_rmse(&gam_auto, n),
         compute_test_rmse(&gam_auto)?
@@ -94,7 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Get penalty matrix
         let penalty = gam.smooth_terms[0].penalty.clone();
-        let penalties = vec![penalty];
+        let p = penalty.nrows();
+        let penalties = vec![BlockPenalty::new(penalty, 0, p)];
 
         // Fit with fixed lambda
         let pirls_result = fit_pirls(
@@ -104,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &penalties,
             Family::Gaussian,
             100,
-            1e-6
+            1e-6,
         )?;
 
         // Store results in gam
@@ -128,8 +131,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Heavy smoothing"
         };
 
-        println!(" {:.6} | {:.6}      | {:.6}   | {}",
-            lambda_val, train_rmse, test_rmse, interpretation);
+        println!(
+            " {:.6} | {:.6}      | {:.6}   | {}",
+            lambda_val, train_rmse, test_rmse, interpretation
+        );
     }
 
     println!("{}", "=".repeat(70));
@@ -154,7 +159,9 @@ fn compute_training_rmse(gam: &GAM, n: usize) -> f64 {
 
 fn compute_test_rmse(gam: &GAM) -> Result<f64, Box<dyn std::error::Error>> {
     let n_pred = 200;
-    let x_pred_vec: Vec<f64> = (0..n_pred).map(|i| i as f64 / (n_pred - 1) as f64).collect();
+    let x_pred_vec: Vec<f64> = (0..n_pred)
+        .map(|i| i as f64 / (n_pred - 1) as f64)
+        .collect();
     let x_pred = Array1::from_vec(x_pred_vec.clone());
     let x_pred_matrix = x_pred.to_shape((n_pred, 1))?.to_owned();
 
@@ -167,7 +174,8 @@ fn compute_test_rmse(gam: &GAM) -> Result<f64, Box<dyn std::error::Error>> {
             let y_true = (2.0 * std::f64::consts::PI * x_val).sin();
             (y_pred - y_true).powi(2)
         })
-        .sum::<f64>() / n_pred as f64;
+        .sum::<f64>()
+        / n_pred as f64;
 
     Ok(mse.sqrt())
 }

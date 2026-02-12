@@ -1,5 +1,6 @@
 //! PiRLS (Penalized Iteratively Reweighted Least Squares) algorithm for GAM fitting
 
+use crate::block_penalty::BlockPenalty;
 use crate::linalg::solve;
 use crate::reml::compute_xtwx;
 use crate::{GAMError, Result};
@@ -96,7 +97,7 @@ pub fn fit_pirls(
     y: &Array1<f64>,
     x: &Array2<f64>,
     lambda: &[f64],
-    penalties: &[Array2<f64>],
+    penalties: &[BlockPenalty],
     family: Family,
     max_iter: usize,
     tolerance: f64,
@@ -115,7 +116,7 @@ pub fn fit_pirls_cached(
     y: &Array1<f64>,
     x: &Array2<f64>,
     lambda: &[f64],
-    penalties: &[Array2<f64>],
+    penalties: &[BlockPenalty],
     family: Family,
     max_iter: usize,
     tolerance: f64,
@@ -165,7 +166,7 @@ pub fn fit_pirls_cached(
     // Pre-compute penalty total (doesn't change between iterations)
     let mut penalty_total = Array2::<f64>::zeros((p, p));
     for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
-        penalty_total = penalty_total + &(penalty_j * *lambda_j);
+        penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
     }
     let num_penalties = lambda.len();
     let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
@@ -271,7 +272,7 @@ fn fit_pirls_gaussian_fast(
     y: &Array1<f64>,
     x: &Array2<f64>,
     lambda: &[f64],
-    penalties: &[Array2<f64>],
+    penalties: &[BlockPenalty],
     p: usize,
     cached_xtx: Option<&Array2<f64>>,
 ) -> Result<PiRLSResult> {
@@ -294,8 +295,8 @@ fn fit_pirls_gaussian_fast(
     // Build (X'X + Σλ_jS_j + ridge*I)
     let mut a = xtx;
     for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
-        // a += lambda_j * penalty_j
-        a.scaled_add(*lambda_j, penalty_j);
+        // a += lambda_j * penalty_j (only touches k×k block)
+        penalty_j.scaled_add_to(&mut a, *lambda_j);
     }
 
     let num_penalties = lambda.len();
@@ -389,6 +390,8 @@ mod tests {
 
     #[test]
     fn test_pirls_gaussian() {
+        use crate::block_penalty::BlockPenalty;
+
         let n = 20;
         let p = 5;
 
@@ -403,7 +406,7 @@ mod tests {
 
         let penalty = Array2::eye(p);
         let lambda = vec![0.01];
-        let penalties = vec![penalty];
+        let penalties = vec![BlockPenalty::new(penalty, 0, p)];
 
         let result = fit_pirls(&y, &x, &lambda, &penalties, Family::Gaussian, 100, 1e-6);
 

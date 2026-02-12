@@ -1,18 +1,19 @@
 //! Profile where time is spent at n=5000, d=8
 
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm};
 use mgcv_rust::basis::{BasisFunction, CubicRegressionSpline};
+use mgcv_rust::block_penalty::BlockPenalty;
 use mgcv_rust::penalty::compute_penalty;
+use mgcv_rust::smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter};
 use ndarray::{Array1, Array2};
+use rand::distributions::{Distribution, Uniform};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::distributions::{Distribution, Uniform};
 use std::f64::consts::PI;
 use std::time::Instant;
 
 fn main() {
     println!("=== Profiling n=5000, d=8 bottlenecks ===\n");
-    
+
     let mut rng = ChaCha8Rng::seed_from_u64(123);
     let uniform = Uniform::new(0.0, 1.0);
 
@@ -39,7 +40,10 @@ fn main() {
         }
         Array1::from(y_vec)
     };
-    println!("Data generation: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Data generation: {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Time: Design matrix construction
     let t1 = Instant::now();
@@ -53,7 +57,8 @@ fn main() {
         let mut penalty = compute_penalty("cr", k, Some(knots), 1).unwrap();
 
         // Apply penalty normalization
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -70,33 +75,36 @@ fn main() {
         design_matrices.push(design);
         penalties_vec.push(penalty);
     }
-    println!("Basis & penalty construction: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Basis & penalty construction: {:.1}ms",
+        t1.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Time: Matrix assembly
     let t2 = Instant::now();
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
     for (i, mat) in design_matrices.iter().enumerate() {
-        full_design.slice_mut(ndarray::s![.., (i*k)..((i+1)*k)]).assign(mat);
+        full_design
+            .slice_mut(ndarray::s![.., (i * k)..((i + 1) * k)])
+            .assign(mat);
     }
 
     let mut penalties = Vec::new();
-    for (i, pen) in penalties_vec.iter().enumerate() {
-        let mut block = Array2::zeros((total_basis, total_basis));
-        block.slice_mut(ndarray::s![i*k..(i+1)*k, i*k..(i+1)*k]).assign(pen);
-        penalties.push(block);
+    for (i, pen) in penalties_vec.into_iter().enumerate() {
+        penalties.push(BlockPenalty::new(pen, i * k, total_basis));
     }
-    println!("Matrix assembly: {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Matrix assembly: {:.1}ms",
+        t2.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Time: Newton optimization
     println!("\nStarting Newton optimization (will show per-iteration timing)...");
     std::env::set_var("MGCV_PROFILE", "1");
 
-    let mut sp = SmoothingParameter::new_with_algorithm(
-        d,
-        OptimizationMethod::REML,
-        REMLAlgorithm::Newton
-    );
+    let mut sp =
+        SmoothingParameter::new_with_algorithm(d, OptimizationMethod::REML, REMLAlgorithm::Newton);
 
     let weights = Array1::ones(n);
     let t3 = Instant::now();
@@ -113,9 +121,24 @@ fn main() {
     }
 
     println!("\n=== Time Breakdown ===");
-    println!("Data generation:       {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
-    println!("Basis construction:    {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);  
-    println!("Matrix assembly:       {:.1}ms", t2.elapsed().as_secs_f64() * 1000.0);
-    println!("Newton optimization:   {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
-    println!("TOTAL:                 {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Data generation:       {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+    println!(
+        "Basis construction:    {:.1}ms",
+        t1.elapsed().as_secs_f64() * 1000.0
+    );
+    println!(
+        "Matrix assembly:       {:.1}ms",
+        t2.elapsed().as_secs_f64() * 1000.0
+    );
+    println!(
+        "Newton optimization:   {:.1}ms",
+        t3.elapsed().as_secs_f64() * 1000.0
+    );
+    println!(
+        "TOTAL:                 {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 }

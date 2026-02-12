@@ -5,6 +5,7 @@
 //! Iteratively Reweighted Least Squares) algorithm, similar to R's mgcv package.
 
 pub mod basis;
+pub mod block_penalty;
 pub mod blockwise_qr;
 pub mod chunked_qr;
 pub mod gam;
@@ -762,6 +763,13 @@ fn newton_pirls_py<'py>(
 
     let penalties_vec: Vec<_> = penalties.iter().map(|p| p.as_array().to_owned()).collect();
 
+    // Wrap dense penalties in BlockPenalty for the optimizer
+    // These are full p×p matrices from Python, so offset=0 and total_size=p
+    let block_penalties: Vec<crate::block_penalty::BlockPenalty> = penalties_vec
+        .iter()
+        .map(|p| crate::block_penalty::BlockPenalty::new(p.clone(), 0, p.nrows()))
+        .collect();
+
     let mut optimizer = NewtonPIRLS::new();
     if let Some(max_iter) = max_iter {
         optimizer.max_iter = max_iter;
@@ -779,7 +787,7 @@ fn newton_pirls_py<'py>(
             &x_array,
             &w_array,
             &initial_log_lambda_array,
-            &penalties_vec,
+            &block_penalties,
         )
         .map_err(|e| PyValueError::new_err(format!("Newton-PIRLS optimization failed: {}", e)))?;
 

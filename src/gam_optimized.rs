@@ -3,6 +3,7 @@
 #[cfg(feature = "blas")]
 use crate::reml::ScaleParameterMethod;
 use crate::{
+    block_penalty::BlockPenalty,
     gam::{SmoothTerm, GAM},
     pirls::fit_pirls_cached,
     smooth::{OptimizationMethod, SmoothingParameter},
@@ -15,8 +16,8 @@ use std::time::Instant;
 struct FitCache {
     /// Full design matrix (n x p)
     design_matrix: Array2<f64>,
-    /// Penalty matrices (one per smooth, each total_basis x total_basis)
-    penalties: Vec<Array2<f64>>,
+    /// Penalty matrices (one per smooth, block-diagonal representation)
+    penalties: Vec<BlockPenalty>,
     /// Penalty scale factors (one per smooth)
     penalty_scales: Vec<f64>,
     /// X'X matrix (cached for reuse)
@@ -95,17 +96,11 @@ impl FitCache {
 
             penalty_scales.push(scale_factor);
 
-            // Build penalty matrix with normalization
-            let mut penalty_full = Array2::zeros((total_basis, total_basis));
+            // Build block penalty (only stores the k×k non-zero block, not the full p×p matrix)
+            let scaled_block = &smooth.penalty * scale_factor;
+            let block_penalty = BlockPenalty::new(scaled_block, col_offset, total_basis);
 
-            // Use slicing for penalty block (faster than loops)
-            let mut penalty_block = penalty_full.slice_mut(s![
-                col_offset..col_offset + num_basis,
-                col_offset..col_offset + num_basis
-            ]);
-            penalty_block.assign(&(&smooth.penalty * scale_factor));
-
-            penalties.push(penalty_full);
+            penalties.push(block_penalty);
             col_offset += num_basis;
         }
         let penalty_time = penalty_start.elapsed();
@@ -143,15 +138,15 @@ impl FitCache {
 }
 
 /// Initialize lambda with smart heuristic based on data
-fn initialize_lambda_smart(y: &Array1<f64>, x: &Array2<f64>, penalty: &Array2<f64>) -> f64 {
+fn initialize_lambda_smart(y: &Array1<f64>, x: &Array2<f64>, penalty: &BlockPenalty) -> f64 {
     // Use a heuristic based on the ratio of signal variance to penalty norm
     let y_var = {
         let y_mean = y.sum() / y.len() as f64;
         y.iter().map(|yi| (yi - y_mean).powi(2)).sum::<f64>() / y.len() as f64
     };
 
-    // Penalty norm (Frobenius)
-    let penalty_norm = penalty.iter().map(|x| x * x).sum::<f64>().sqrt();
+    // Penalty norm (Frobenius) - only from the non-zero block
+    let penalty_norm = penalty.block.iter().map(|x| x * x).sum::<f64>().sqrt();
 
     // Design matrix norm
     let x_norm = x.iter().map(|x| x * x).sum::<f64>().sqrt();

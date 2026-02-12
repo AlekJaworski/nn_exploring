@@ -1,11 +1,14 @@
+use mgcv_rust::basis::{BasisFunction, CubicRegressionSpline};
+use mgcv_rust::block_penalty::BlockPenalty;
+use mgcv_rust::penalty::compute_penalty;
 /// Comprehensive Rust Newton benchmark matching R's setup
 /// Uses cubic regression splines like the R benchmark
-
-use mgcv_rust::smooth::{SmoothingParameter, OptimizationMethod};
-use mgcv_rust::basis::{CubicRegressionSpline, BasisFunction};
-use mgcv_rust::penalty::compute_penalty;
+use mgcv_rust::smooth::{OptimizationMethod, SmoothingParameter};
 use ndarray::{Array1, Array2};
-use rand::{SeedableRng, distributions::{Distribution, Uniform}};
+use rand::{
+    distributions::{Distribution, Uniform},
+    SeedableRng,
+};
 use rand_chacha::ChaCha8Rng;
 use std::f64::consts::PI;
 use std::time::Instant;
@@ -44,7 +47,8 @@ fn run_benchmark(n: usize, d: usize, k: usize) -> (f64, Vec<f64>) {
         let mut penalty = compute_penalty("cr", k, Some(knots), 1).unwrap();
 
         // Apply penalty normalization
-        let inf_norm_X = design.rows()
+        let inf_norm_X = design
+            .rows()
             .into_iter()
             .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
             .fold(0.0f64, f64::max);
@@ -66,20 +70,16 @@ fn run_benchmark(n: usize, d: usize, k: usize) -> (f64, Vec<f64>) {
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
     for (i, mat) in design_matrices.iter().enumerate() {
-        full_design.slice_mut(ndarray::s![.., (i*k)..((i+1)*k)]).assign(mat);
+        full_design
+            .slice_mut(ndarray::s![.., (i * k)..((i + 1) * k)])
+            .assign(mat);
     }
 
     // Assemble block-diagonal penalty
     let mut full_penalty_list = Vec::new();
-    for penalty in penalties_vec {
-        let mut block_penalty = Array2::zeros((total_basis, total_basis));
-        let start_idx = full_penalty_list.len() * k;
-        for i in 0..k {
-            for j in 0..k {
-                block_penalty[[start_idx + i, start_idx + j]] = penalty[[i, j]];
-            }
-        }
-        full_penalty_list.push(block_penalty);
+    for (idx, penalty) in penalties_vec.into_iter().enumerate() {
+        let start_idx = idx * k;
+        full_penalty_list.push(BlockPenalty::new(penalty, start_idx, total_basis));
     }
 
     // Weights (all ones)
@@ -89,7 +89,9 @@ fn run_benchmark(n: usize, d: usize, k: usize) -> (f64, Vec<f64>) {
     let mut smoother = SmoothingParameter::new(d, OptimizationMethod::REML);
 
     let start = Instant::now();
-    smoother.optimize(&y, &full_design, &w, &full_penalty_list, 30, 0.05).unwrap();
+    smoother
+        .optimize(&y, &full_design, &w, &full_penalty_list, 30, 0.05)
+        .unwrap();
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
     (elapsed, smoother.lambda.clone())
@@ -105,17 +107,14 @@ fn main() {
         (1000, 1, 10),
         (1000, 2, 10),
         (1000, 4, 10),
-
         (2000, 1, 10),
         (2000, 2, 10),
         (2000, 4, 10),
         (2000, 8, 8),
-
         (5000, 1, 10),
         (5000, 2, 10),
         (5000, 4, 8),
         (5000, 8, 8),
-
         (10000, 1, 10),
         (10000, 2, 10),
         (10000, 4, 8),

@@ -3,6 +3,7 @@
 //! This module provides optimized versions of REML gradient/Hessian calculations
 //! that cache expensive operations like QR decompositions.
 
+use crate::block_penalty::BlockPenalty;
 use crate::linalg::solve;
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
@@ -46,9 +47,11 @@ impl REMLCache {
         x: &Array2<f64>,
         w: &Array1<f64>,
         lambdas: &[f64],
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         sqrt_penalties: &[Array2<f64>],
     ) -> Result<Self> {
+        // Convert BlockPenalty to dense for internal use (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
         let n = y.len();
         let p = x.ncols();
         let m = lambdas.len();
@@ -139,7 +142,7 @@ impl REMLCache {
 
         // Compute beta
         let mut a = xtwx.clone();
-        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        for (lambda, penalty) in lambdas.iter().zip(penalties_dense.iter()) {
             a.scaled_add(*lambda, penalty);
         }
 
@@ -185,8 +188,10 @@ impl REMLCache {
         x: &Array2<f64>,
         w: &Array1<f64>,
         lambdas: &[f64],
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
     ) -> Result<Array1<f64>> {
+        // Convert BlockPenalty to dense for internal use (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
         let n = y.len();
         let p = x.ncols();
         let m = lambdas.len();
@@ -198,7 +203,7 @@ impl REMLCache {
         // Pre-compute P = RSS + Σλⱼ·β'·Sⱼ·β
         let mut penalty_sum = 0.0;
         for j in 0..m {
-            let s_j_beta = penalties[j].dot(&self.beta);
+            let s_j_beta = penalties_dense[j].dot(&self.beta);
             let beta_s_j_beta: f64 = self
                 .beta
                 .iter()
@@ -214,7 +219,7 @@ impl REMLCache {
 
         for i in 0..m {
             let lambda_i = lambdas[i];
-            let penalty_i = &penalties[i];
+            let penalty_i = &penalties_dense[i];
             let rank_i = self.penalty_ranks[i] as f64;
             let sqrt_penalty = &self.sqrt_penalties[i];
 
@@ -276,8 +281,8 @@ impl REMLCache {
 
             let mut implicit_pen = 0.0;
             for j in 0..m {
-                let s_j_beta = penalties[j].dot(&self.beta);
-                let s_j_dbeta = penalties[j].dot(&dbeta_drho);
+                let s_j_beta = penalties_dense[j].dot(&self.beta);
+                let s_j_dbeta = penalties_dense[j].dot(&dbeta_drho);
                 let term1: f64 = s_j_beta
                     .iter()
                     .zip(dbeta_drho.iter())
@@ -314,7 +319,7 @@ impl REMLCache {
         x: &Array2<f64>,
         w: &Array1<f64>,
         lambdas: &[f64],
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
     ) -> Result<()> {
         // Only rebuild if lambdas changed significantly
         let max_change = lambdas

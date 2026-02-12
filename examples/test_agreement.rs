@@ -1,13 +1,14 @@
 use ndarray::{Array1, Array2};
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::env;
 
 use mgcv_rust::{
     basis::{BasisFunction, CubicRegressionSpline},
+    block_penalty::BlockPenalty,
     penalty::compute_penalty,
-    smooth::{SmoothingParameter, OptimizationMethod, REMLAlgorithm},
     pirls::{fit_pirls, Family, PiRLSResult},
+    smooth::{OptimizationMethod, REMLAlgorithm, SmoothingParameter},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,11 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         REMLAlgorithm::FellnerSchall
     };
 
-    let mut sp = SmoothingParameter::new_with_algorithm(
-        d,
-        OptimizationMethod::REML,
-        algorithm
-    );
+    let mut sp = SmoothingParameter::new_with_algorithm(d, OptimizationMethod::REML, algorithm);
 
     // Build design matrix and penalties
     let mut design_matrices = Vec::new();
@@ -80,16 +77,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_basis = k * d;
     let mut full_design = Array2::zeros((n, total_basis));
     for (i, design) in design_matrices.iter().enumerate() {
-        full_design.slice_mut(ndarray::s![.., i*k..(i+1)*k]).assign(design);
+        full_design
+            .slice_mut(ndarray::s![.., i * k..(i + 1) * k])
+            .assign(design);
     }
 
     // Create block diagonal penalty matrices (one for each smooth)
-    // Each penalty matrix is total_basis x total_basis with the individual penalty in the appropriate block
     let mut penalties = Vec::new();
-    for (i, individual_penalty) in individual_penalties.iter().enumerate() {
-        let mut block_penalty = Array2::zeros((total_basis, total_basis));
-        block_penalty.slice_mut(ndarray::s![i*k..(i+1)*k, i*k..(i+1)*k]).assign(individual_penalty);
-        penalties.push(block_penalty);
+    for (i, individual_penalty) in individual_penalties.into_iter().enumerate() {
+        penalties.push(BlockPenalty::new(individual_penalty, i * k, total_basis));
     }
 
     // Optimize smoothing parameters
@@ -104,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &penalties,
         Family::Gaussian,
         20,
-        1e-6
+        1e-6,
     )?;
 
     // Output results

@@ -1,5 +1,6 @@
 //! Smoothing parameter selection using REML optimization
 
+use crate::block_penalty::BlockPenalty;
 use crate::chunked_qr::IncrementalQR;
 use crate::linalg::solve;
 #[cfg(feature = "blas")]
@@ -104,7 +105,7 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
@@ -117,7 +118,7 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         max_iter: usize,
         tolerance: f64,
         beta: Option<&Array1<f64>>,
@@ -150,7 +151,7 @@ impl SmoothingParameter {
         &mut self,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
     ) {
         let n = x.nrows();
         let p = x.ncols();
@@ -174,11 +175,7 @@ impl SmoothingParameter {
 
         // Initialize each lambda based on its penalty matrix scale
         for (i, penalty) in penalties.iter().enumerate() {
-            let mut penalty_trace = 0.0;
-            let penalty_size = penalty.nrows().min(penalty.ncols());
-            for j in 0..penalty_size {
-                penalty_trace += penalty[[j, j]];
-            }
+            let penalty_trace = penalty.trace();
 
             // FIXED: Scale-invariant initialization
             // lambda ~ 0.1 * trace(S) / (trace(X'WX)/n)
@@ -203,7 +200,7 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         max_iter: usize,
         tolerance: f64,
         beta: Option<&Array1<f64>>,
@@ -225,8 +222,9 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalty: &Array2<f64>,
+        penalty: &BlockPenalty,
     ) -> Result<()> {
+        let penalty_dense = penalty.to_dense();
         let mut best_lambda = self.lambda[0];
         let mut best_reml = f64::INFINITY;
 
@@ -234,7 +232,7 @@ impl SmoothingParameter {
         for i in 0..50 {
             let log_lambda = -4.0 + i as f64 * 0.12; // -4 to 2 (0.0001 to 100)
             let lambda = 10.0_f64.powf(log_lambda);
-            let reml = reml_criterion(y, x, w, lambda, penalty, None)?;
+            let reml = reml_criterion(y, x, w, lambda, &penalty_dense, None)?;
 
             if reml < best_reml {
                 best_reml = reml;
@@ -249,7 +247,7 @@ impl SmoothingParameter {
             let log_lambda = log_best - search_width + i as f64 * (2.0 * search_width / 29.0);
             let lambda = log_lambda.exp();
             if lambda > 0.0 {
-                let reml = reml_criterion(y, x, w, lambda, penalty, None)?;
+                let reml = reml_criterion(y, x, w, lambda, &penalty_dense, None)?;
 
                 if reml < best_reml {
                     best_reml = reml;
@@ -272,18 +270,20 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
-        let m = penalties.len();
+        // Convert BlockPenalty to dense for reml.rs functions (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
+        let m = penalties_dense.len();
 
         // OPTIMIZATION: Pre-compute sqrt_penalties once (expensive eigendecomp)
         // Penalties don't change during Newton optimization, so cache them
         let sqrt_penalties_start = std::time::Instant::now();
         let mut sqrt_penalties = Vec::new();
         let mut penalty_ranks = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_dense.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             let rank = sqrt_pen.ncols();
             sqrt_penalties.push(sqrt_pen);
@@ -362,8 +362,15 @@ impl SmoothingParameter {
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
             // Compute current REML value for convergence check
-            let current_reml =
-                reml_criterion_multi_cached(y, x, w, &lambdas, penalties, None, Some(&xtwx))?;
+            let current_reml = reml_criterion_multi_cached(
+                y,
+                x,
+                w,
+                &lambdas,
+                &penalties_dense,
+                None,
+                Some(&xtwx),
+            )?;
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
@@ -374,7 +381,7 @@ impl SmoothingParameter {
                 x,
                 w,
                 &lambdas,
-                penalties,
+                &penalties_dense,
                 Some(&sqrt_penalties),
                 Some(&xtwx),
                 Some(&xtwy),
@@ -385,7 +392,8 @@ impl SmoothingParameter {
 
             let t_hess = Instant::now();
             // OPTIMIZATION: Use cached X'WX to avoid recomputation (~2-3ms savings for n=5000)
-            let mut hessian = reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?;
+            let mut hessian =
+                reml_hessian_multi_cached(y, x, w, &lambdas, &penalties_dense, &xtwx)?;
             let hess_time = t_hess.elapsed().as_micros();
 
             if std::env::var("MGCV_PROFILE").is_ok() {
@@ -593,7 +601,7 @@ impl SmoothingParameter {
                     x,
                     w,
                     &new_lambdas,
-                    penalties,
+                    &penalties_dense,
                     None,
                     Some(&xtwx),
                 ) {
@@ -694,7 +702,8 @@ impl SmoothingParameter {
 
                 // Steepest descent: step = -gradient (scaled very small)
                 // Recompute gradient since it was moved earlier
-                let gradient_sd = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+                let gradient_sd =
+                    reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, &penalties_dense)?;
 
                 // Try progressively smaller steepest descent steps
                 let mut sd_worked = false;
@@ -715,7 +724,7 @@ impl SmoothingParameter {
                         x,
                         w,
                         &new_lambdas_sd,
-                        penalties,
+                        &penalties_dense,
                         None,
                         Some(&xtwx),
                     ) {
@@ -748,7 +757,7 @@ impl SmoothingParameter {
                     // Check if we're close enough to converged before giving up
                     // When at a minimum, no further progress is possible but gradient may still be small
                     let gradient_check =
-                        reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+                        reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, &penalties_dense)?;
                     let grad_norm_final = gradient_check
                         .iter()
                         .map(|g| g.abs())
@@ -794,7 +803,7 @@ impl SmoothingParameter {
         _y: &Array1<f64>,
         _x: &Array2<f64>,
         _w: &Array1<f64>,
-        _penalties: &[Array2<f64>],
+        _penalties: &[BlockPenalty],
         _max_iter: usize,
         _tolerance: f64,
     ) -> Result<()> {
@@ -824,7 +833,7 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         _max_iter: usize,
         _tolerance: f64,
         beta: Option<&Array1<f64>>,
@@ -832,7 +841,9 @@ impl SmoothingParameter {
         use crate::reml::compute_xtwx;
         use ndarray_linalg::{Cholesky, InverseInto, UPLO};
 
-        let m = penalties.len();
+        // Convert BlockPenalty to dense for reml.rs functions (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
+        let m = penalties_dense.len();
         let p = x.ncols();
         let n = x.nrows();
 
@@ -845,7 +856,7 @@ impl SmoothingParameter {
 
         // Pre-compute penalty ranks
         let mut penalty_ranks = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_dense.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             penalty_ranks.push(sqrt_pen.ncols());
         }
@@ -857,7 +868,7 @@ impl SmoothingParameter {
 
         // Compute A = X'WX + Σλᵢ·Sᵢ
         let mut a = xtwx.clone();
-        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        for (lambda, penalty) in lambdas.iter().zip(penalties_dense.iter()) {
             a.scaled_add(*lambda, penalty);
         }
 
@@ -916,7 +927,7 @@ impl SmoothingParameter {
 
         // Fellner-Schall update for each smoothing parameter
         for i in 0..m {
-            let penalty_i = &penalties[i];
+            let penalty_i = &penalties_dense[i];
             let rank_i = penalty_ranks[i] as f64;
             let lambda_i = lambdas[i];
 
@@ -983,7 +994,7 @@ impl SmoothingParameter {
         _y: &Array1<f64>,
         _x: &Array2<f64>,
         _w: &Array1<f64>,
-        _penalties: &[Array2<f64>],
+        _penalties: &[BlockPenalty],
         _max_iter: usize,
         _tolerance: f64,
         _beta: Option<&Array1<f64>>,
@@ -1012,18 +1023,20 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         chunk_size: usize,
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
-        let m = penalties.len();
+        // Convert BlockPenalty to dense for reml.rs functions (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
+        let m = penalties_dense.len();
         let p = x.ncols();
         let n = x.nrows();
 
         // Pre-compute penalty ranks
         let mut penalty_ranks = Vec::new();
-        for penalty in penalties.iter() {
+        for penalty in penalties_dense.iter() {
             let sqrt_pen = penalty_sqrt(penalty)?;
             penalty_ranks.push(sqrt_pen.ncols());
         }
@@ -1061,7 +1074,7 @@ impl SmoothingParameter {
             // Augment with penalty terms: √λᵢ·√Sᵢ
             // penalty_sqrt returns L (p × rank) such that L·L' = S
             // We need to augment with L' scaled by √λ (rank × p rows)
-            for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            for (lambda, penalty) in lambdas.iter().zip(penalties_dense.iter()) {
                 let sqrt_pen = penalty_sqrt(penalty)?;
                 if sqrt_pen.ncols() > 0 {
                     // Only if penalty has non-zero rank
@@ -1091,7 +1104,7 @@ impl SmoothingParameter {
             let mut max_change: f64 = 0.0;
 
             for i in 0..m {
-                let penalty_i = &penalties[i];
+                let penalty_i = &penalties_dense[i];
                 let rank_i = penalty_ranks[i] as f64;
 
                 // Compute tr(A^{-1}·Sᵢ) using QR-based method
@@ -1146,7 +1159,7 @@ impl SmoothingParameter {
         _y: &Array1<f64>,
         _x: &Array2<f64>,
         _w: &Array1<f64>,
-        _penalties: &[Array2<f64>],
+        _penalties: &[BlockPenalty],
         _chunk_size: usize,
         _max_iter: usize,
         _tolerance: f64,
@@ -1162,10 +1175,13 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalties: &[Array2<f64>],
+        penalties: &[BlockPenalty],
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
+        // Convert BlockPenalty to dense for reml.rs functions (Phase 1: intermediate conversion)
+        let penalties_dense: Vec<Array2<f64>> = penalties.iter().map(|p| p.to_dense()).collect();
+
         // Similar to REML but using GCV criterion
         let mut log_lambda: Vec<f64> = self.lambda.iter().map(|l| l.ln()).collect();
 
@@ -1176,20 +1192,20 @@ impl SmoothingParameter {
                 let old_log_lambda = log_lambda[i];
 
                 // For single smooth case
-                if penalties.len() != 1 {
+                if penalties_dense.len() != 1 {
                     panic!("Multiple smooths not yet properly implemented for GCV");
                 }
 
                 let lambda_current = log_lambda[i].exp();
 
-                let gcv_current = gcv_criterion(y, x, w, lambda_current, &penalties[0])?;
+                let gcv_current = gcv_criterion(y, x, w, lambda_current, &penalties_dense[0])?;
 
                 // Numerical gradient
                 let delta = 0.01;
                 log_lambda[i] += delta;
                 let lambda_plus = log_lambda[i].exp();
 
-                let gcv_plus = gcv_criterion(y, x, w, lambda_plus, &penalties[0])?;
+                let gcv_plus = gcv_criterion(y, x, w, lambda_plus, &penalties_dense[0])?;
 
                 // Reset
                 log_lambda[i] = old_log_lambda;
@@ -1221,12 +1237,13 @@ impl SmoothingParameter {
         y: &Array1<f64>,
         x: &Array2<f64>,
         w: &Array1<f64>,
-        penalty: &Array2<f64>,
+        penalty: &BlockPenalty,
         lambda_min: f64,
         lambda_max: f64,
         num_points: usize,
         method: OptimizationMethod,
     ) -> Result<f64> {
+        let penalty_dense = penalty.to_dense();
         let log_lambda_min = lambda_min.ln();
         let log_lambda_max = lambda_max.ln();
         let step = (log_lambda_max - log_lambda_min) / (num_points - 1) as f64;
@@ -1239,8 +1256,8 @@ impl SmoothingParameter {
             let lambda = log_lambda.exp();
 
             let score = match method {
-                OptimizationMethod::REML => reml_criterion(y, x, w, lambda, penalty, None)?,
-                OptimizationMethod::GCV => gcv_criterion(y, x, w, lambda, penalty)?,
+                OptimizationMethod::REML => reml_criterion(y, x, w, lambda, &penalty_dense, None)?,
+                OptimizationMethod::GCV => gcv_criterion(y, x, w, lambda, &penalty_dense)?,
             };
 
             if score < best_score {
@@ -1266,13 +1283,15 @@ mod tests {
 
     #[test]
     fn test_grid_search() {
+        use crate::block_penalty::BlockPenalty;
+
         let n = 20;
         let p = 5;
 
         let y = Array1::from_vec((0..n).map(|i| i as f64).collect());
         let x = Array2::from_shape_fn((n, p), |(i, j)| ((i as f64) * 0.1).powi(j as i32));
         let w = Array1::ones(n);
-        let penalty = Array2::eye(p);
+        let penalty = BlockPenalty::new(Array2::eye(p), 0, p);
 
         let result = SmoothingParameter::grid_search(
             &y,
@@ -1292,7 +1311,7 @@ mod tests {
 
     #[test]
     fn test_chunked_fellner_schall_basic() {
-        use crate::penalty::compute_penalty;
+        use crate::block_penalty::BlockPenalty;
         use ndarray_rand::rand_distr::Uniform;
         use ndarray_rand::RandomExt;
 
@@ -1305,7 +1324,7 @@ mod tests {
         let w = Array1::ones(n);
 
         // Simple identity penalty
-        let penalty = Array2::eye(k);
+        let penalty = BlockPenalty::new(Array2::eye(k), 0, k);
         let penalties = vec![penalty];
 
         let mut sp = SmoothingParameter::new_with_algorithm(
@@ -1329,6 +1348,7 @@ mod tests {
     #[test]
     #[ignore = "known bug: chunked Fellner-Schall diverges (dead code, not used in production path)"]
     fn test_chunked_vs_batch_agreement() {
+        use crate::block_penalty::BlockPenalty;
         use ndarray_rand::rand_distr::Uniform;
         use ndarray_rand::RandomExt;
 
@@ -1341,17 +1361,17 @@ mod tests {
         let w = Array1::ones(n);
 
         // Create a non-trivial penalty (second-order difference)
-        let mut penalty = Array2::zeros((k, k));
+        let mut penalty_mat = Array2::zeros((k, k));
         for i in 0..k {
-            penalty[[i, i]] = 2.0;
+            penalty_mat[[i, i]] = 2.0;
             if i > 0 {
-                penalty[[i, i - 1]] = -1.0;
+                penalty_mat[[i, i - 1]] = -1.0;
             }
             if i < k - 1 {
-                penalty[[i, i + 1]] = -1.0;
+                penalty_mat[[i, i + 1]] = -1.0;
             }
         }
-        let penalties = vec![penalty];
+        let penalties = vec![BlockPenalty::new(penalty_mat.clone(), 0, k)];
 
         // Optimize with batch method
         let mut sp_batch = SmoothingParameter::new_with_algorithm(
@@ -1365,7 +1385,7 @@ mod tests {
             let xtwx = x.t().dot(&x);
             let xtwy = x.t().dot(&y);
             let mut a_mat = xtwx.clone();
-            a_mat.scaled_add(1.0, &penalties[0]);
+            a_mat.scaled_add(1.0, &penalty_mat);
             let beta = a_mat.solve(&xtwy).unwrap();
             sp_batch
                 .optimize_reml_fellner_schall(&y, &x, &w, &penalties, 30, 1e-6, Some(&beta))
@@ -1400,27 +1420,22 @@ mod tests {
 
     #[test]
     fn test_chunked_multiple_smooths() {
+        use crate::block_penalty::BlockPenalty;
         use ndarray_rand::rand_distr::Uniform;
         use ndarray_rand::RandomExt;
 
         // Create test data with 2 smooths
         let n = 150;
         let k = 8;
+        let total = 2 * k;
 
-        let x = Array2::random((n, 2 * k), Uniform::new(0.0, 1.0));
+        let x = Array2::random((n, total), Uniform::new(0.0, 1.0));
         let y = Array1::random(n, Uniform::new(0.0, 1.0));
         let w = Array1::ones(n);
 
-        // Two penalties - one for each smooth
-        let mut penalty1 = Array2::zeros((2 * k, 2 * k));
-        for i in 0..k {
-            penalty1[[i, i]] = 1.0;
-        }
-
-        let mut penalty2 = Array2::zeros((2 * k, 2 * k));
-        for i in k..(2 * k) {
-            penalty2[[i, i]] = 1.0;
-        }
+        // Two penalties - one for each smooth (as k×k blocks)
+        let penalty1 = BlockPenalty::new(Array2::eye(k), 0, total);
+        let penalty2 = BlockPenalty::new(Array2::eye(k), k, total);
 
         let penalties = vec![penalty1, penalty2];
 
@@ -1444,6 +1459,7 @@ mod tests {
 
     #[test]
     fn test_chunked_various_chunk_sizes() {
+        use crate::block_penalty::BlockPenalty;
         use ndarray_rand::rand_distr::Uniform;
         use ndarray_rand::RandomExt;
 
@@ -1454,7 +1470,7 @@ mod tests {
         let y = Array1::random(n, Uniform::new(0.0, 1.0));
         let w = Array1::ones(n);
 
-        let penalty = Array2::eye(k);
+        let penalty = BlockPenalty::new(Array2::eye(k), 0, k);
         let penalties = vec![penalty];
 
         // Test different chunk sizes

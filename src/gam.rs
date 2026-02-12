@@ -2,6 +2,7 @@
 
 use crate::{
     basis::{BasisFunction, BoundaryCondition, CubicRegressionSpline, CubicSpline},
+    block_penalty::BlockPenalty,
     penalty::compute_penalty,
     pirls::{fit_pirls, Family},
     smooth::{OptimizationMethod, SmoothingParameter},
@@ -250,15 +251,15 @@ impl GAM {
             // S_rescaled = S / maS = S * maXX / ||S||_inf
 
             // Compute infinity norm of design matrix (max absolute row sum)
-            let inf_norm_X = design
+            let inf_norm_x = design
                 .rows()
                 .into_iter()
                 .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
-            let maXX = inf_norm_X * inf_norm_X;
+            let ma_xx = inf_norm_x * inf_norm_x;
 
             // Compute infinity norm of penalty matrix (max absolute row sum)
-            let inf_norm_S = (0..num_basis)
+            let inf_norm_s = (0..num_basis)
                 .map(|i| {
                     (0..num_basis)
                         .map(|j| smooth.penalty[[i, j]].abs())
@@ -267,8 +268,8 @@ impl GAM {
                 .fold(0.0f64, f64::max);
 
             // Apply normalization: maS = ||S||_inf / maXX, S_new = S / maS
-            let scale_factor = if inf_norm_S > 1e-10 {
-                maXX / inf_norm_S
+            let scale_factor = if inf_norm_s > 1e-10 {
+                ma_xx / inf_norm_s
             } else {
                 1.0 // Avoid division by zero for degenerate penalties
             };
@@ -287,11 +288,17 @@ impl GAM {
             col_offset += num_basis;
         }
 
+        // Convert dense p×p penalties to BlockPenalty for the new API
+        let block_penalties: Vec<BlockPenalty> = penalties
+            .into_iter()
+            .map(|p| BlockPenalty::new(p.clone(), 0, p.nrows()))
+            .collect();
+
         // Initialize smoothing parameters
         let mut smoothing_params = SmoothingParameter::new(self.smooth_terms.len(), opt_method);
 
         // Outer loop: optimize smoothing parameters
-        let mut weights = Array1::ones(n);
+        let mut weights;
 
         for _outer_iter in 0..max_outer_iter {
             // Inner loop: PiRLS with current smoothing parameters
@@ -299,7 +306,7 @@ impl GAM {
                 y,
                 &full_design,
                 &smoothing_params.lambda,
-                &penalties,
+                &block_penalties,
                 self.family,
                 max_inner_iter,
                 tolerance,
@@ -314,7 +321,7 @@ impl GAM {
                 y,
                 &full_design,
                 &weights,
-                &penalties,
+                &block_penalties,
                 10, // max iterations for lambda optimization
                 tolerance,
             )?;
@@ -332,7 +339,7 @@ impl GAM {
                     y,
                     &full_design,
                     &smoothing_params.lambda,
-                    &penalties,
+                    &block_penalties,
                     self.family,
                     max_inner_iter,
                     tolerance,
@@ -365,7 +372,7 @@ impl GAM {
             y,
             &full_design,
             &smoothing_params.lambda,
-            &penalties,
+            &block_penalties,
             self.family,
             max_inner_iter,
             tolerance,
@@ -455,6 +462,7 @@ impl GAM {
     }
 
     /// Store fit results (used by fit_optimized and fit_parallel)
+    #[allow(dead_code)]
     pub(crate) fn store_results(
         &mut self,
         pirls_result: crate::pirls::PiRLSResult,
