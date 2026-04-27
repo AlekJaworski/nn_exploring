@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
+
+# Python debug/scratch
 debug_*.py
 test_singular_*.py
 test_lambda_*.py
@@ -18,9 +21,35 @@ check_*.py
 compare_*.py
 investigate_*.py
 analyze_*.py
+
+# Markdown scratch
 derive_*.md
 summary_*.md
 INVESTIGATION_PLAN.md
-.venv/
+
+# Numpy artifacts
 *.npz
 *.npy
+
+# Build artifacts and binaries
+*.tar.gz
+*.bak
+/test_reml_updates
+
+# R session files
+.RData
+.Rhistory
+
+# Generated images and plots (commit deliberate ones under docs/img/ if needed)
+*.png
+*.jpg
+*.jpeg
+
+# Benchmark outputs (regeneratable)
+/benchmark_*.txt
+/*_benchmark_results.json
+/large_n_benchmark_results.json
+/rust_vs_r_benchmark_results.json
+
+# Cloned mgcv source (used as a reference, not part of this repo)
+/mgcv_analysis/
