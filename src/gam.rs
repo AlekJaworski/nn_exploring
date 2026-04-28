@@ -128,6 +128,67 @@ impl SmoothTerm {
             self.basis.num_basis() // k for unconstrained
         }
     }
+
+    /// Apply mgcv's sum-to-zero identifiability constraint to the basis.
+    /// Computes a (k × k-1) reparameterization Z such that the column sums
+    /// of (X_raw @ Z) over the training data are exactly zero. The basis
+    /// becomes (k-1)-dimensional and the penalty is transformed
+    /// `S_new = Z' S Z`.
+    ///
+    /// Construction: Householder reflection of the column-sums vector
+    /// `c = 1' X_raw`, taking the last (k-1) columns of the reflector.
+    /// This is the same `absorb.cons` step mgcv applies to every smooth
+    /// by default, so that the global intercept absorbs the mean.
+    ///
+    /// Idempotent: a no-op if the constraint is already set.
+    pub fn apply_sum_to_zero_centering(&mut self, x_data: &Array1<f64>) -> Result<()> {
+        if self.constraint_matrix.is_some() {
+            return Ok(());
+        }
+        let basis_raw = self.basis.evaluate(x_data)?;
+        let k = basis_raw.ncols();
+        if k <= 1 {
+            // 1-column basis can't be reduced; leave unconstrained.
+            return Ok(());
+        }
+        let c_row = basis_raw.sum_axis(ndarray::Axis(0)); // length k
+
+        // Householder reflector that maps c → ±||c|| e_0. Its last
+        // (k-1) columns span the null space of c, which is exactly Z.
+        let c_norm = c_row.dot(&c_row).sqrt();
+        if c_norm < 1e-30 {
+            // c is already zero; basis happens to be sum-to-zero already.
+            // Drop a redundant column by keeping the last (k-1) of I.
+            let mut z = Array2::<f64>::zeros((k, k - 1));
+            for j in 1..k {
+                z[[j, j - 1]] = 1.0;
+            }
+            let new_penalty = z.t().dot(&self.penalty).dot(&z);
+            self.penalty = new_penalty;
+            self.constraint_matrix = Some(z);
+            return Ok(());
+        }
+        let mut v = c_row.clone();
+        let sign = if c_row[0] >= 0.0 { 1.0 } else { -1.0 };
+        v[0] += sign * c_norm;
+        let v_norm_sq = v.dot(&v);
+
+        let mut z = Array2::<f64>::zeros((k, k - 1));
+        // For j in 1..k, the j-th column of the Householder matrix is
+        // e_j - (2 v_j / v'v) v. Stored as the (j-1)-th column of Z.
+        for j in 1..k {
+            let coef = 2.0 * v[j] / v_norm_sq;
+            for i in 0..k {
+                let e_ij = if i == j { 1.0 } else { 0.0 };
+                z[[i, j - 1]] = e_ij - coef * v[i];
+            }
+        }
+
+        let new_penalty = z.t().dot(&self.penalty).dot(&z);
+        self.penalty = new_penalty;
+        self.constraint_matrix = Some(z);
+        Ok(())
+    }
 }
 
 /// Generalized Additive Model
@@ -212,6 +273,14 @@ impl GAM {
             )));
         }
 
+        // Apply mgcv's sum-to-zero centering before evaluating bases
+        // (idempotent — only kicks in on first fit). Layout matches
+        // FitCache::new in gam_optimized.rs: [intercept | smooths...].
+        for (i, smooth) in self.smooth_terms.iter_mut().enumerate() {
+            let x_col = x.column(i).to_owned();
+            smooth.apply_sum_to_zero_centering(&x_col)?;
+        }
+
         // Construct design matrix by evaluating all basis functions
         let mut design_matrices: Vec<Array2<f64>> = Vec::new();
         let mut total_basis = 0;
@@ -223,9 +292,11 @@ impl GAM {
             design_matrices.push(basis_matrix);
         }
 
-        // Combine all design matrices efficiently using ndarray slicing
-        let mut full_design = Array2::zeros((n, total_basis));
-        let mut col_offset = 0;
+        // Combine all design matrices: [1 | smooth_1 | smooth_2 | ...]
+        let total_cols = total_basis + 1;
+        let mut full_design = Array2::zeros((n, total_cols));
+        full_design.column_mut(0).fill(1.0);
+        let mut col_offset = 1;
 
         for design in &design_matrices {
             let num_cols = design.ncols();
@@ -236,8 +307,9 @@ impl GAM {
         }
 
         // Construct penalty matrices with mgcv-style normalization
+        // (block-diagonal, intercept column unpenalized).
         let mut penalties: Vec<Array2<f64>> = Vec::new();
-        col_offset = 0;
+        col_offset = 1;
 
         for (idx, smooth) in self.smooth_terms.iter().enumerate() {
             let num_basis = smooth.num_basis();
@@ -274,7 +346,7 @@ impl GAM {
                 1.0 // Avoid division by zero for degenerate penalties
             };
 
-            let mut penalty_full = Array2::zeros((total_basis, total_basis));
+            let mut penalty_full = Array2::zeros((total_cols, total_cols));
 
             // Place this smooth's normalized penalty in the appropriate block using slicing
             penalty_full
@@ -417,7 +489,10 @@ impl GAM {
             )));
         }
 
-        // Construct design matrix
+        // Construct design matrix [1 | smooth_1 | smooth_2 | ...] —
+        // each smooth.evaluate applies its constraint matrix internally,
+        // so we just need to prepend the intercept column to match the
+        // layout used at fit time.
         let mut design_matrices: Vec<Array2<f64>> = Vec::new();
         let mut total_basis = 0;
 
@@ -428,8 +503,10 @@ impl GAM {
             design_matrices.push(basis_matrix);
         }
 
-        let mut full_design = Array2::zeros((n, total_basis));
-        let mut col_offset = 0;
+        let total_cols = total_basis + 1;
+        let mut full_design = Array2::zeros((n, total_cols));
+        full_design.column_mut(0).fill(1.0);
+        let mut col_offset = 1;
 
         for design in &design_matrices {
             let num_cols = design.ncols();

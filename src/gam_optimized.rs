@@ -29,19 +29,30 @@ struct FitCache {
 
 impl FitCache {
     /// Build cache from data and smooth terms
-    fn new(x: &Array2<f64>, smooth_terms: &[SmoothTerm]) -> Result<Self> {
+    ///
+    /// On first construction we apply mgcv's sum-to-zero identifiability
+    /// constraint to each smooth (`SmoothTerm::apply_sum_to_zero_centering`),
+    /// shrinking each smooth's effective basis from k to k-1, and prepend
+    /// an explicit intercept column so the full design has columns
+    /// `[1 | Z_1' X_1 | Z_2' X_2 | ...]` matching mgcv's lpmatrix layout.
+    /// The block penalties offset by 1 to account for the unpenalized
+    /// intercept.
+    fn new(x: &Array2<f64>, smooth_terms: &mut [SmoothTerm]) -> Result<Self> {
         let cache_start = Instant::now();
         let n = x.nrows();
 
-        // Evaluate all basis functions (this is expensive, so cache it)
+        // Evaluate all basis functions (this is expensive, so cache it).
+        // First time through, also computes the sum-to-zero constraint Z
+        // and transforms the per-smooth penalty.
         let basis_start = Instant::now();
         let mut design_matrices: Vec<Array2<f64>> = Vec::new();
         let mut covariates: Vec<Array1<f64>> = Vec::new();
         let mut total_basis = 0;
 
-        for (i, smooth) in smooth_terms.iter().enumerate() {
+        for (i, smooth) in smooth_terms.iter_mut().enumerate() {
             let x_col = x.column(i).to_owned();
-            let basis_matrix = smooth.evaluate(&x_col)?;
+            smooth.apply_sum_to_zero_centering(&x_col)?;
+            let basis_matrix = smooth.evaluate(&x_col)?; // applies Z internally
             total_basis += smooth.num_basis();
             design_matrices.push(basis_matrix);
             covariates.push(x_col);
@@ -65,15 +76,13 @@ impl FitCache {
             max_unique_1d: 1000,
             min_n_for_discretize: 2000, // Only discretize for n >= 2000
         };
-        let discretized = if n >= config.min_n_for_discretize {
-            Some(DiscretizedDesign::new(
-                &design_matrices,
-                &covariates,
-                &config,
-            ))
-        } else {
-            None
-        };
+        // Discretization is disabled while sum-to-zero centering + intercept
+        // are landing — DiscretizedDesign assumes total_basis == Σ k_i with
+        // no intercept column, which is no longer true. Re-enable once
+        // discrete.rs handles the intercept column (an unpenalized leading
+        // column of ones); for now the dense BLAS path is used everywhere.
+        let _ = (&design_matrices, &covariates, &config);
+        let discretized: Option<DiscretizedDesign> = None;
         let disc_time = disc_start.elapsed();
 
         if std::env::var("MGCV_PROFILE").is_ok() {
@@ -103,14 +112,16 @@ impl FitCache {
             }
         }
 
-        // Build full design matrix using efficient slicing (not loops!)
-        // We still keep this for REML gradient/Hessian which need per-row X access
-        let mut full_design = Array2::zeros((n, total_basis));
-        let mut col_offset = 0;
+        // Build full design matrix [1 | smooth_1 | smooth_2 | ...] —
+        // matches mgcv's lpmatrix layout. The intercept column absorbs
+        // the global mean now that each smooth is sum-to-zero centered.
+        let total_cols = total_basis + 1;
+        let mut full_design = Array2::zeros((n, total_cols));
+        full_design.column_mut(0).fill(1.0);
 
+        let mut col_offset = 1; // first col is the intercept
         for design in &design_matrices {
             let num_cols = design.ncols();
-            // Use ndarray slicing - much faster than element-by-element
             full_design
                 .slice_mut(s![.., col_offset..col_offset + num_cols])
                 .assign(design);
@@ -118,10 +129,12 @@ impl FitCache {
         }
 
         // Compute penalty normalizations (cache these!)
+        // Block penalties live in the smooth columns; the intercept column
+        // (offset 0) is unpenalized, so first smooth starts at offset 1.
         let penalty_start = Instant::now();
         let mut penalties = Vec::new();
         let mut penalty_scales = Vec::new();
-        col_offset = 0;
+        col_offset = 1;
 
         for (idx, smooth) in smooth_terms.iter().enumerate() {
             let num_basis = smooth.num_basis();
@@ -151,9 +164,10 @@ impl FitCache {
 
             penalty_scales.push(scale_factor);
 
-            // Build block penalty (only stores the k×k non-zero block, not the full p×p matrix)
+            // Build block penalty. total_size = total_cols (= 1 + Σ(k_j-1))
+            // because the penalty acts on the full beta including intercept.
             let scaled_block = &smooth.penalty * scale_factor;
-            let block_penalty = BlockPenalty::new(scaled_block, col_offset, total_basis);
+            let block_penalty = BlockPenalty::new(scaled_block, col_offset, total_cols);
 
             penalties.push(block_penalty);
             col_offset += num_basis;
@@ -349,7 +363,7 @@ impl GAM {
         }
 
         // Build cache (design matrix, penalties, normalizations)
-        let mut cache = FitCache::new(x, &self.smooth_terms)?;
+        let mut cache = FitCache::new(x, &mut self.smooth_terms)?;
 
         // Initialize smoothing parameters with chosen algorithm
         // Auto-select Fellner-Schall for small n (< 2000) where Newton's expensive
