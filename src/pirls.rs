@@ -170,7 +170,11 @@ pub fn fit_pirls_cached(
         penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
     }
     let num_penalties = lambda.len();
-    let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
 
     for iteration in 0..max_iter {
         iter = iteration + 1;
@@ -301,7 +305,15 @@ fn fit_pirls_gaussian_fast(
     }
 
     let num_penalties = lambda.len();
-    let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
+    // mgcv-exact mode uses a much smaller ridge so β is essentially
+    // (X'X + λS)^{-1} X'y unperturbed; the default ridge of 1e-5 *
+    // (1+sqrt(m)) * max_diag was causing predictions to shift by
+    // ~1e-3 even at machine-precision-matched X / S / λ.
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
     let ridge: f64 = ridge_scale * max_diag;
     for i in 0..p {
         a[[i, i]] += ridge;
@@ -433,7 +445,11 @@ pub fn fit_pirls_discretized(
         penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
     }
     let num_penalties = lambda.len();
-    let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
 
     for iteration in 0..max_iter {
         iter = iteration + 1;
@@ -545,7 +561,11 @@ fn fit_pirls_gaussian_discretized(
     }
 
     let num_penalties = lambda.len();
-    let ridge_scale = 1e-5 * (1.0 + (num_penalties as f64).sqrt());
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
     let ridge: f64 = ridge_scale * max_diag;
     for i in 0..p {
         a[[i, i]] += ridge;

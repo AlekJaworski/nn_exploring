@@ -607,6 +607,21 @@ impl PyGAM {
         Ok(PyArray2::from_owned_array(py, design_matrix.clone()))
     }
 
+    /// Per-smooth centred penalty matrix as stored on SmoothTerm.
+    /// Returns a list of ndarrays, one per smooth (each is the
+    /// post-centring penalty Z'SZ, after any pre-Z normalisation if
+    /// mgcv_exact was used at fit time). Diagnostic only.
+    fn get_smooth_penalties<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, numpy::PyArray2<f64>>>> {
+        let mut out = Vec::with_capacity(self.inner.smooth_terms.len());
+        for smooth in &self.inner.smooth_terms {
+            out.push(numpy::PyArray2::from_owned_array(py, smooth.penalty.clone()));
+        }
+        Ok(out)
+    }
+
     /// Per-smooth penalty scale factor used by the optimizer
     /// (gam_optimized.rs::FitCache::new computes `ma_xx / inf_norm_s`
     /// for each smooth and uses it as a multiplier on S_j during the

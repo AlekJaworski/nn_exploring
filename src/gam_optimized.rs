@@ -95,10 +95,13 @@ impl FitCache {
             max_unique_1d: 1000,
             min_n_for_discretize: 2000, // Only discretize for n >= 2000
         };
-        let discretized = if n >= config.min_n_for_discretize {
-            // has_intercept = true: discrete.rs prepends a virtual
-            // unit-column term so the smooth col_offsets shift to start
-            // at 1, matching the dense full_design layout.
+        // mgcv_exact mode disables the discretized path; the
+        // scatter-gather X'WX has tiny binning errors (~1e-5) that
+        // shift predictions enough to break the 1e-3 byte-for-byte
+        // bar. Default mode keeps discretization for perf.
+        let mgcv_exact_disable_disc =
+            !design_matrices.is_empty() && std::env::var("MGCV_EXACT_FIT").is_ok();
+        let discretized = if n >= config.min_n_for_discretize && !mgcv_exact_disable_disc {
             Some(DiscretizedDesign::new(
                 &design_matrices,
                 &covariates,
@@ -391,6 +394,29 @@ impl GAM {
                 self.smooth_terms.len()
             )));
         }
+
+        // mgcv_exact mode: signal PiRLS to use a tiny ridge (1e-12)
+        // instead of the default 1e-5 * (1+sqrt(m)) * max_diag, which
+        // perturbs β enough to shift predictions by ~1e-3. We use an
+        // env var so PiRLS can read it without threading a flag
+        // through every call. Cleared in a guard below.
+        struct MgcvExactGuard {
+            was_set: bool,
+        }
+        impl Drop for MgcvExactGuard {
+            fn drop(&mut self) {
+                if !self.was_set {
+                    std::env::remove_var("MGCV_EXACT_FIT");
+                }
+            }
+        }
+        let _ridge_guard = if self.mgcv_exact {
+            let was_set = std::env::var("MGCV_EXACT_FIT").is_ok();
+            std::env::set_var("MGCV_EXACT_FIT", "1");
+            Some(MgcvExactGuard { was_set })
+        } else {
+            None
+        };
 
         // Build cache (design matrix, penalties, normalizations)
         let mut cache = FitCache::new(x, &mut self.smooth_terms, self.mgcv_exact)?;

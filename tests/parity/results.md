@@ -28,17 +28,17 @@ Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. Bar at 1e
 
 | case | max_absdiff | our λ_0 | mgcv λ_0 | λ ratio |
 |---|---|---|---|---|
-| 1d_gaussian_near_linear_n500_k10_cr | 2.52e-04 | 2.42e+05 | 4.90e+07 | 2.02e+02 |
-| 1d_gaussian_sigmoid_n300_k10_cr | 2.60e-04 | 1.13e+01 | 1.13e+01 | 9.98e-01 |
-| 1d_gaussian_smooth_n100_k10_cr | 2.27e-04 | 5.57e+00 | 5.55e+00 | 9.98e-01 |
-| 1d_gaussian_smooth_n500_k10_cr | 2.24e-04 | 5.10e+00 | 5.10e+00 | 9.99e-01 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | 2.57e-04 | 9.96e+00 | 9.95e+00 | 1.00e+00 |
-| 1d_gaussian_wiggly_n500_k20_cr | 6.91e-04 | 4.15e-01 | 4.15e-01 | 9.99e-01 |
-| 2d_gaussian_additive_n2000_k15_cr | 2.06e-03 | 2.66e+01 | 2.63e+01 | 9.87e-01 |
-| 2d_gaussian_additive_n500_k10_cr | 1.03e-03 | 5.24e+00 | 5.21e+00 | 9.95e-01 |
-| 3d_gaussian_mixed_n800_k10_cr | 1.99e-03 | 5.22e+00 | 5.22e+00 | 1.00e+00 |
-| 4d_gaussian_mixed_n1000_k10_cr | 8.29e-04 | 5.16e+00 | 5.16e+00 | 1.00e+00 |
-| 5d_gaussian_mixed_n1500_k8_cr | 1.66e-03 | 2.43e+00 | 2.42e+00 | 9.99e-01 |
+| 1d_gaussian_near_linear_n500_k10_cr | 6.04e-08 | 4.18e+07 | 4.90e+07 | 1.17e+00 |
+| 1d_gaussian_sigmoid_n300_k10_cr | 8.98e-09 | 1.13e+01 | 1.13e+01 | 1.00e+00 |
+| 1d_gaussian_smooth_n100_k10_cr | 3.25e-08 | 5.55e+00 | 5.55e+00 | 1.00e+00 |
+| 1d_gaussian_smooth_n500_k10_cr | 4.31e-09 | 5.10e+00 | 5.10e+00 | 1.00e+00 |
+| 1d_gaussian_sparse_edges_n400_k10_cr | 1.10e-09 | 9.95e+00 | 9.95e+00 | 1.00e+00 |
+| 1d_gaussian_wiggly_n500_k20_cr | 8.08e-10 | 4.15e-01 | 4.15e-01 | 1.00e+00 |
+| 2d_gaussian_additive_n2000_k15_cr | 1.19e-09 | 2.63e+01 | 2.63e+01 | 1.00e+00 |
+| 2d_gaussian_additive_n500_k10_cr | 1.26e-07 | 5.21e+00 | 5.21e+00 | 1.00e+00 |
+| 3d_gaussian_mixed_n800_k10_cr | 1.79e-05 | 5.22e+00 | 5.22e+00 | 1.00e+00 |
+| 4d_gaussian_mixed_n1000_k10_cr | 3.76e-07 | 5.16e+00 | 5.16e+00 | 1.00e+00 |
+| 5d_gaussian_mixed_n1500_k8_cr | 1.18e-06 | 2.42e+00 | 2.42e+00 | 1.00e+00 |
 
 ## Newton trajectory vs mgcv (Stage 3)
 
@@ -63,18 +63,18 @@ First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's 
 
 | case | rust median ms | rust min ms | mgcv median ms | rust/mgcv |
 |---|---|---|---|---|
-| 1d_gaussian_near_linear_n500_k10_cr | 1.61e+00 | 1.54e+00 | 2.48e+01 | 6.52e-02 |
-| 1d_gaussian_sigmoid_n300_k10_cr | 1.38e+00 | 1.35e+00 | 1.79e+01 | 7.73e-02 |
-| 1d_gaussian_smooth_n100_k10_cr | 4.64e-01 | 4.26e-01 | 1.54e+01 | 3.01e-02 |
-| 1d_gaussian_smooth_n500_k10_cr | 1.29e+00 | 1.15e+00 | 2.00e+01 | 6.45e-02 |
-| 1d_gaussian_smooth_n500_k20_bs | 1.13e+01 | 9.88e+00 | 2.88e+01 | 3.92e-01 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | 9.18e-01 | 7.66e-01 | 1.72e+01 | 5.34e-02 |
-| 1d_gaussian_wiggly_n500_k20_cr | 4.29e+00 | 3.90e+00 | 2.07e+01 | 2.07e-01 |
-| 2d_binomial_logit_n1000_k10_cr | 4.38e+01 | 4.26e+01 | 8.09e+01 | 5.41e-01 |
-| 2d_gamma_log_n1000_k10_cr | 7.76e+00 | 7.21e+00 | 1.37e+02 | 5.66e-02 |
-| 2d_gaussian_additive_n2000_k15_cr | 1.75e+01 | 1.50e+01 | 3.14e+01 | 5.58e-01 |
-| 2d_gaussian_additive_n500_k10_cr | 2.02e+00 | 1.95e+00 | 2.33e+01 | 8.66e-02 |
-| 2d_poisson_log_n1000_k10_cr | 7.44e+00 | 7.00e+00 | 1.06e+02 | 7.03e-02 |
-| 3d_gaussian_mixed_n800_k10_cr | 2.61e+01 | 2.46e+01 | 4.16e+01 | 6.27e-01 |
-| 4d_gaussian_mixed_n1000_k10_cr | 4.04e+01 | 3.95e+01 | 5.97e+01 | 6.76e-01 |
-| 5d_gaussian_mixed_n1500_k8_cr | 5.88e+01 | 5.64e+01 | 7.86e+01 | 7.48e-01 |
+| 1d_gaussian_near_linear_n500_k10_cr | 2.57e+00 | 1.83e+00 | 2.74e+01 | 9.37e-02 |
+| 1d_gaussian_sigmoid_n300_k10_cr | 1.50e+00 | 1.41e+00 | 1.75e+01 | 8.57e-02 |
+| 1d_gaussian_smooth_n100_k10_cr | 4.96e-01 | 4.80e-01 | 1.94e+01 | 2.55e-02 |
+| 1d_gaussian_smooth_n500_k10_cr | 1.59e+00 | 1.24e+00 | 2.21e+01 | 7.16e-02 |
+| 1d_gaussian_smooth_n500_k20_bs | 1.32e+01 | 1.14e+01 | 3.18e+01 | 4.15e-01 |
+| 1d_gaussian_sparse_edges_n400_k10_cr | 9.30e-01 | 8.17e-01 | 1.93e+01 | 4.81e-02 |
+| 1d_gaussian_wiggly_n500_k20_cr | 5.69e+00 | 5.04e+00 | 2.20e+01 | 2.59e-01 |
+| 2d_binomial_logit_n1000_k10_cr | 5.13e+01 | 4.62e+01 | 9.22e+01 | 5.57e-01 |
+| 2d_gamma_log_n1000_k10_cr | 9.62e+00 | 8.85e+00 | 1.63e+02 | 5.92e-02 |
+| 2d_gaussian_additive_n2000_k15_cr | 2.01e+01 | 1.75e+01 | 3.93e+01 | 5.11e-01 |
+| 2d_gaussian_additive_n500_k10_cr | 2.51e+00 | 2.37e+00 | 2.65e+01 | 9.49e-02 |
+| 2d_poisson_log_n1000_k10_cr | 9.31e+00 | 8.54e+00 | 1.18e+02 | 7.92e-02 |
+| 3d_gaussian_mixed_n800_k10_cr | 2.62e+01 | 2.55e+01 | 4.53e+01 | 5.77e-01 |
+| 4d_gaussian_mixed_n1000_k10_cr | 4.39e+01 | 4.33e+01 | 6.82e+01 | 6.43e-01 |
+| 5d_gaussian_mixed_n1500_k8_cr | 6.40e+01 | 6.14e+01 | 8.66e+01 | 7.39e-01 |
