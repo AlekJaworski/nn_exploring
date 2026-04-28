@@ -436,14 +436,28 @@ impl GAM {
             selected_algorithm,
         );
         smoothing_params.scale_method = scale_method;
-        // Note: NOT setting mgcv_exact_score on the optimizer.
-        // Probed in 3g and rolled back: wiring just the score into the
-        // line search without also wiring the gradient/Hessian creates
-        // an inconsistent optimizer (step direction from default-REML,
-        // acceptance from mgcv-REML). Stage 4 results worsen from
-        // 5/12 → 2/12 passing. Re-enable once the gradient is also
-        // wired through; until then mgcv_exact only affects basis
-        // preparation (which is enough for λ to match within 1%).
+        // mgcv_exact: optimizer wiring DISABLED in 3h after probing.
+        // FD gradient/Hessian (smooth.rs::reml_gradient_finite_diff +
+        // reml_hessian_finite_diff) makes the optimizer self-consistent
+        // but converges to OUR mgcv-exact-formula's minimum, which
+        // still differs from mgcv's true minimum by a small λ-dependent
+        // amount (residual REML formula gap, see 3e). Stage 4 went
+        // 5/12 → 2/12 because the slightly-off optimum differs from
+        // mgcv's by enough to break the 1e-3 prediction threshold.
+        // Re-enable once the REML formula gap is closed (likely needs
+        // mgcv's QR-based log|H| in nat.param-style reparameterised
+        // space). Until then mgcv_exact stays at basis-only.
+        let _ = (&cache.penalties, &mut smoothing_params); // silence unused
+        if false && self.mgcv_exact {
+            let mut mp: usize = 1;
+            for (idx, smooth) in self.smooth_terms.iter().enumerate() {
+                let nb = smooth.num_basis();
+                let rank_s = crate::reml::estimate_rank(&cache.penalties[idx]);
+                mp += nb.saturating_sub(rank_s);
+            }
+            smoothing_params.mgcv_exact_score = true;
+            smoothing_params.mp = mp;
+        }
 
         // Smart initialization for lambda
         if !cache.penalties.is_empty() {

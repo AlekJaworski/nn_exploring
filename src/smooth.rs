@@ -39,6 +39,110 @@ fn dispatch_reml_score(
     }
 }
 
+/// Central-difference gradient of the REML score wrt log(λ_j), using
+/// whichever score function dispatch_reml_score selects. Used in
+/// mgcv_exact mode where the closed-form gradient
+/// (reml_gradient_multi_qr_adaptive) was derived for the default REML
+/// formula and would be inconsistent with the score the line search
+/// uses. O(2m) score evaluations.
+#[cfg(feature = "blas")]
+fn reml_gradient_finite_diff(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+) -> Result<Array1<f64>> {
+    let m = lambdas.len();
+    let h: f64 = 1.0e-4;
+    let log_lambdas: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
+    let mut grad = Array1::<f64>::zeros(m);
+    for i in 0..m {
+        let mut log_plus = log_lambdas.clone();
+        let mut log_minus = log_lambdas.clone();
+        log_plus[i] += h;
+        log_minus[i] -= h;
+        let lam_plus: Vec<f64> = log_plus.iter().map(|l| l.exp()).collect();
+        let lam_minus: Vec<f64> = log_minus.iter().map(|l| l.exp()).collect();
+        let r_plus = dispatch_reml_score(sp, y, x, w, &lam_plus, penalties, cached_xtwx)?;
+        let r_minus = dispatch_reml_score(sp, y, x, w, &lam_minus, penalties, cached_xtwx)?;
+        grad[i] = (r_plus - r_minus) / (2.0 * h);
+    }
+    Ok(grad)
+}
+
+/// Central-difference Hessian of the REML score wrt log(λ). Pairs with
+/// reml_gradient_finite_diff. O(1 + 2m + 2m²) score evaluations:
+/// diagonal entries via second central differences (reml at λ ±
+/// h·e_i); off-diagonal via mixed differences. Symmetric output.
+#[cfg(feature = "blas")]
+fn reml_hessian_finite_diff(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+) -> Result<Array2<f64>> {
+    let m = lambdas.len();
+    let h: f64 = 1.0e-3;
+    let log_lambdas: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
+    let r0 = dispatch_reml_score(sp, y, x, w, lambdas, penalties, cached_xtwx)?;
+
+    // Cache REML at log_λ ± h·e_i for i = 0..m
+    let mut r_plus = vec![0.0f64; m];
+    let mut r_minus = vec![0.0f64; m];
+    for i in 0..m {
+        let mut lp = log_lambdas.clone();
+        let mut lm = log_lambdas.clone();
+        lp[i] += h;
+        lm[i] -= h;
+        let lam_p: Vec<f64> = lp.iter().map(|l| l.exp()).collect();
+        let lam_m: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
+        r_plus[i] = dispatch_reml_score(sp, y, x, w, &lam_p, penalties, cached_xtwx)?;
+        r_minus[i] = dispatch_reml_score(sp, y, x, w, &lam_m, penalties, cached_xtwx)?;
+    }
+
+    let mut hess = Array2::<f64>::zeros((m, m));
+    let h2 = h * h;
+    // Diagonal: H_ii = (r(+h_i) - 2 r0 + r(-h_i)) / h²
+    for i in 0..m {
+        hess[[i, i]] = (r_plus[i] - 2.0 * r0 + r_minus[i]) / h2;
+    }
+    // Off-diagonal: H_ij = [r(+h_i +h_j) - r(+h_i -h_j) - r(-h_i +h_j) + r(-h_i -h_j)] / (4h²)
+    for i in 0..m {
+        for j in (i + 1)..m {
+            let mut lpp = log_lambdas.clone();
+            let mut lpm = log_lambdas.clone();
+            let mut lmp = log_lambdas.clone();
+            let mut lmm = log_lambdas.clone();
+            lpp[i] += h;
+            lpp[j] += h;
+            lpm[i] += h;
+            lpm[j] -= h;
+            lmp[i] -= h;
+            lmp[j] += h;
+            lmm[i] -= h;
+            lmm[j] -= h;
+            let lam_pp: Vec<f64> = lpp.iter().map(|l| l.exp()).collect();
+            let lam_pm: Vec<f64> = lpm.iter().map(|l| l.exp()).collect();
+            let lam_mp: Vec<f64> = lmp.iter().map(|l| l.exp()).collect();
+            let lam_mm: Vec<f64> = lmm.iter().map(|l| l.exp()).collect();
+            let rpp = dispatch_reml_score(sp, y, x, w, &lam_pp, penalties, cached_xtwx)?;
+            let rpm = dispatch_reml_score(sp, y, x, w, &lam_pm, penalties, cached_xtwx)?;
+            let rmp = dispatch_reml_score(sp, y, x, w, &lam_mp, penalties, cached_xtwx)?;
+            let rmm = dispatch_reml_score(sp, y, x, w, &lam_mm, penalties, cached_xtwx)?;
+            let off = (rpp - rpm - rmp + rmm) / (4.0 * h2);
+            hess[[i, j]] = off;
+            hess[[j, i]] = off;
+        }
+    }
+    Ok(hess)
+}
+
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OptimizationMethod {
@@ -503,27 +607,37 @@ impl SmoothingParameter {
             let current_reml =
                 dispatch_reml_score(self, y, x, w, &lambdas, penalties, Some(&xtwx))?;
 
-            // Compute gradient and Hessian
-            // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
-            // OPTIMIZATION: Pass cached sqrt_penalties, X'WX, X'Wy to avoid recomputation
+            // Compute gradient and Hessian.
+            // - Default mode: closed-form QR-based formulas, fast.
+            // - mgcv_exact mode: finite differences of dispatch_reml_score
+            //   so the gradient/Hessian are SELF-CONSISTENT with the score
+            //   the line search uses. Slower (O(m²) score evals per iter)
+            //   but eliminates the inconsistency that bit us in 3g.
             let t_grad = Instant::now();
-            let gradient = reml_gradient_multi_qr_adaptive_cached_edf(
-                y,
-                x,
-                w,
-                &lambdas,
-                penalties,
-                Some(&sqrt_penalties),
-                Some(&xtwx),
-                Some(&xtwy),
-                xtwx_chol.as_ref(),
-                self.scale_method,
-            )?;
+            let gradient = if self.mgcv_exact_score {
+                reml_gradient_finite_diff(self, y, x, w, &lambdas, penalties, Some(&xtwx))?
+            } else {
+                reml_gradient_multi_qr_adaptive_cached_edf(
+                    y,
+                    x,
+                    w,
+                    &lambdas,
+                    penalties,
+                    Some(&sqrt_penalties),
+                    Some(&xtwx),
+                    Some(&xtwy),
+                    xtwx_chol.as_ref(),
+                    self.scale_method,
+                )?
+            };
             let grad_time = t_grad.elapsed().as_micros();
 
             let t_hess = Instant::now();
-            // OPTIMIZATION: Use cached X'WX to avoid recomputation (~2-3ms savings for n=5000)
-            let mut hessian = reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?;
+            let mut hessian = if self.mgcv_exact_score {
+                reml_hessian_finite_diff(self, y, x, w, &lambdas, penalties, Some(&xtwx))?
+            } else {
+                reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?
+            };
             let hess_time = t_hess.elapsed().as_micros();
 
             if std::env::var("MGCV_PROFILE").is_ok() {
