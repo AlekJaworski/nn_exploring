@@ -175,11 +175,26 @@ def fit_one(case) -> dict[str, Any]:
         # n_iter: bam reports outer.info$iter when available, else $iter
         outer_info = fit.rx2("outer.info")
         n_iter = None
+        score_history: list[float] | None = None
+        final_grad: list[float] | None = None
         if outer_info is not ro.NULL and outer_info is not None:
             try:
                 n_iter = int(np.asarray(outer_info.rx2("iter")).ravel()[0])
             except Exception:
                 n_iter = None
+            try:
+                # outer.info$score.hist is a 200-slot vector with NaN
+                # padding past the actual iteration count. Strip the
+                # NaN tail so consumers see only iter 0 .. n_iter.
+                sh_raw = np.asarray(outer_info.rx2("score.hist"), dtype=float)
+                sh_clean = sh_raw[~np.isnan(sh_raw)]
+                score_history = sh_clean.tolist()
+            except Exception:
+                score_history = None
+            try:
+                final_grad = _to_np(outer_info.rx2("grad")).tolist()
+            except Exception:
+                final_grad = None
         if n_iter is None:
             try:
                 n_iter = int(np.asarray(fit.rx2("iter")).ravel()[0])
@@ -199,7 +214,7 @@ def fit_one(case) -> dict[str, Any]:
         pred_train_se = _to_np(pred_train_full.rx2("se.fit"))
         pred_test_se = _to_np(pred_test_full.rx2("se.fit"))
 
-    return {
+    out: dict[str, Any] = {
         "schema_version": 1,
         "name": case.name,
         "description": case.description,
@@ -225,6 +240,14 @@ def fit_one(case) -> dict[str, Any]:
             "predictions_test_se": pred_test_se.tolist(),
         },
     }
+    # Optional trajectory fields (mgcv stores these on outer.info; they
+    # are the canonical "where did Newton go each step" record). We treat
+    # them as additive to v1: missing on legacy fixtures, present on new.
+    if score_history is not None:
+        out["mgcv_output"]["score_history"] = score_history
+    if final_grad is not None:
+        out["mgcv_output"]["final_grad"] = final_grad
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
