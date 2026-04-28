@@ -145,6 +145,123 @@ def _gen_5d_mixed(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndar
     return x, y
 
 
+def _gen_6d_heatmap_pricing(
+    rng: np.random.Generator, n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Mirror neighbourhoods/heatmap_logic.py::build_pricing_model — the
+    location-based pricing model that powers neighborhood heatmaps.
+
+    Production uses `family="t-dist"` (robust regression) which
+    mgcv_rust doesn't support yet; we use Gaussian as a proxy. The
+    feature shape (lat/lon + days_ago + sqft + beds + year_built) and
+    k_default=6 settings are production-exact.
+
+    Features:
+      x0  lat (normalised)            ~ N(0, 0.05)   — small geographic spread
+      x1  lon (normalised)            ~ N(0, 0.08)
+      x2  days_ago_contract_date      ~ U[0, 365]    — ~1-year window
+      x3  sqft (normalised log)       ~ N(0, 1)
+      x4  beds                        ~ U[1, 6]
+      x5  year_built (normalised)     ~ Beta(5, 2)·1 (skewed toward newer)
+
+    Target: log-price-like Gaussian; combines a 2D lat-lon spatial
+    surface with monotone size/age effects and date depreciation.
+    """
+    x0 = rng.normal(0.0, 0.05, n)              # lat offset
+    x1 = rng.normal(0.0, 0.08, n)              # lon offset
+    x2 = rng.uniform(0.0, 365.0, n)            # days_ago
+    x3 = rng.normal(0.0, 1.0, n)               # log sqft
+    x4 = rng.uniform(1.0, 6.0, n)              # beds
+    x5 = rng.beta(5.0, 2.0, n)                 # year_built normalised
+
+    # Spatial pricing: 2D smooth surface (additive proxy)
+    lat_eff = 0.6 * np.sin(20 * x0)
+    lon_eff = 0.5 * np.cos(15 * x1)
+    days_eff = -0.0008 * x2                    # depreciation
+    sqft_eff = 0.4 * x3
+    beds_eff = 0.05 * x4
+    year_eff = 0.5 * x5
+
+    x = np.column_stack([x0, x1, x2, x3, x4, x5])
+    y = (
+        12.5  # base log-price
+        + lat_eff
+        + lon_eff
+        + days_eff
+        + sqft_eff
+        + beds_eff
+        + year_eff
+        + rng.normal(0, 0.1, n)
+    )
+    return x, y
+
+
+def _gen_4d_small_neighbourhood(
+    rng: np.random.Generator, n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Production edge case: small neighborhood with just-enough data.
+    Production guards against `n < MIN_PROPERTIES` (~100) but a real
+    sparse area can have ~300 properties. Tests robustness when the
+    optimizer has to choose between under- and over-smoothing.
+    Features: days_ago + sqft + beds + condition (typical minimal set).
+    """
+    x0 = rng.uniform(0.0, 1825.0, n)           # days
+    x1 = rng.normal(0.0, 1.0, n)               # log sqft
+    x2 = rng.uniform(1.0, 6.0, n)              # beds
+    x3 = rng.uniform(1.0, 10.0, n)             # condition
+
+    days_eff = -0.0001 * x0
+    sqft_eff = 0.3 * x1
+    beds_eff = 0.05 * x2
+    cond_eff = 0.04 * (x3 - 5)
+
+    x = np.column_stack([x0, x1, x2, x3])
+    y = (
+        days_eff
+        + sqft_eff
+        + beds_eff
+        + cond_eff
+        + rng.normal(0, 0.15, n)               # higher noise (small-sample)
+    )
+    return x, y
+
+
+def _gen_5d_skewed_features(
+    rng: np.random.Generator, n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Production-realistic feature distributions: log-normal sqft,
+    log-normal lot_sqft (long right tail), skewed bedrooms (mode ~3),
+    sigmoid-shaped year_built. Tests basis behaviour on skewed inputs
+    that real housing data has.
+    """
+    sqft = rng.lognormal(7.5, 0.4, n)          # ~1800 sqft median, long tail
+    lot_sqft = rng.lognormal(9.0, 0.7, n)      # ~8000 sqft median, very long tail
+    # Beds: mostly 3, some 2/4, few 1/5/6
+    beds = rng.choice(
+        [1, 2, 3, 4, 5, 6], size=n,
+        p=[0.02, 0.18, 0.45, 0.25, 0.08, 0.02]
+    ).astype(float)
+    year = rng.uniform(0.0, 1.0, n)            # year_built normalised, uniform
+    days = rng.uniform(0.0, 730.0, n)          # 2-year window
+
+    sqft_eff = 0.3 * np.log(sqft / 1800)
+    lot_eff = 0.1 * np.log(lot_sqft / 8000)
+    beds_eff = 0.06 * beds
+    year_eff = 0.4 * year ** 2
+    days_eff = -0.0002 * days
+
+    x = np.column_stack([sqft, lot_sqft, beds, year, days])
+    y = (
+        sqft_eff
+        + lot_eff
+        + beds_eff
+        + year_eff
+        + days_eff
+        + rng.normal(0, 0.1, n)
+    )
+    return x, y
+
+
 def _gen_8d_neighbourhoods_like(
     rng: np.random.Generator, n: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -400,6 +517,44 @@ CASES: list[Case] = [
         bs=["cr"] * 8,
         family="gaussian", link="identity", method="REML",
         generator=_gen_8d_neighbourhoods_like,
+    ),
+    Case(
+        name="6d_heatmap_pricing_n8000",
+        description="Heatmap pricing model proxy (lat/lon + features)",
+        seed=2026,
+        n=8000,
+        d=6,
+        # k mapping mirrors heatmap_logic.py::build_pricing_model:
+        # k_default=6 with k=25 for date (consistent with FeatureAdjuster).
+        # lat/lon get k=10 each (typical for spatial smooths).
+        k=[10, 10, 25, 6, 6, 6],
+        bs=["cr"] * 6,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_6d_heatmap_pricing,
+    ),
+    Case(
+        name="4d_small_neighbourhood_n300",
+        description="Edge case: sparse neighborhood (n just above MIN_PROPERTIES)",
+        seed=2027,
+        n=300,
+        d=4,
+        # Conservative k_default=6 — production uses min_k=2 to fall
+        # back when data is too sparse, but n=300 supports k=6 for all.
+        k=[12, 6, 6, 6],
+        bs=["cr"] * 4,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_4d_small_neighbourhood,
+    ),
+    Case(
+        name="5d_skewed_features_n5000",
+        description="Production-realistic skewed feature distributions",
+        seed=2028,
+        n=5000,
+        d=5,
+        k=[6, 6, 6, 6, 25],  # last is days_ago, gets k=25
+        bs=["cr"] * 5,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_5d_skewed_features,
     ),
 ]
 
