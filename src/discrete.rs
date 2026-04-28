@@ -221,14 +221,31 @@ impl DiscretizedDesign {
     /// * `basis_matrices` - Per-term basis matrices (each n x k_i)
     /// * `covariates` - Per-term covariate vectors
     /// * `config` - Discretization configuration
+    /// * `has_intercept` - When true, prepend a unit column at column 0
+    ///   modelled as a "virtual intercept term": single-bin CompressedBasis
+    ///   with values=[[1.0]] and indices=[0; n]. This makes the existing
+    ///   scatter-gather paths handle the leading intercept column for free
+    ///   (X'WX[0,0] = Σw, X'WX[0,j]/X'Wy[0]/eta intercept contribution all
+    ///   work out without special-casing).
     pub fn new(
         basis_matrices: &[Array2<f64>],
         covariates: &[Array1<f64>],
         config: &DiscretizeConfig,
+        has_intercept: bool,
     ) -> Self {
         let n = basis_matrices[0].nrows();
-        let mut terms = Vec::with_capacity(basis_matrices.len());
+        let mut terms = Vec::with_capacity(basis_matrices.len() + 1);
         let mut col_offset = 0;
+
+        if has_intercept {
+            terms.push(CompressedBasis {
+                values: Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(),
+                indices: vec![0u32; n],
+                col_offset: 0,
+                num_basis: 1,
+            });
+            col_offset = 1;
+        }
 
         for (basis, covariate) in basis_matrices.iter().zip(covariates.iter()) {
             let k = basis.ncols();

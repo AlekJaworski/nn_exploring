@@ -76,13 +76,19 @@ impl FitCache {
             max_unique_1d: 1000,
             min_n_for_discretize: 2000, // Only discretize for n >= 2000
         };
-        // Discretization is disabled while sum-to-zero centering + intercept
-        // are landing — DiscretizedDesign assumes total_basis == Σ k_i with
-        // no intercept column, which is no longer true. Re-enable once
-        // discrete.rs handles the intercept column (an unpenalized leading
-        // column of ones); for now the dense BLAS path is used everywhere.
-        let _ = (&design_matrices, &covariates, &config);
-        let discretized: Option<DiscretizedDesign> = None;
+        let discretized = if n >= config.min_n_for_discretize {
+            // has_intercept = true: discrete.rs prepends a virtual
+            // unit-column term so the smooth col_offsets shift to start
+            // at 1, matching the dense full_design layout.
+            Some(DiscretizedDesign::new(
+                &design_matrices,
+                &covariates,
+                &config,
+                true,
+            ))
+        } else {
+            None
+        };
         let disc_time = disc_start.elapsed();
 
         if std::env::var("MGCV_PROFILE").is_ok() {
