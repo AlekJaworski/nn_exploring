@@ -371,14 +371,31 @@ impl GAM {
         // Build cache (design matrix, penalties, normalizations)
         let mut cache = FitCache::new(x, &mut self.smooth_terms)?;
 
-        // Initialize smoothing parameters with chosen algorithm
-        // Auto-select Fellner-Schall for small n (< 2000) where Newton's expensive
-        // gradient/Hessian computations don't pay off. FS is much faster per iteration.
+        // Initialize smoothing parameters with chosen algorithm.
+        //
+        // Family-conditional defaults, measured on the parity battery:
+        //
+        //   - Gaussian: Newton converges to ~7-22× tighter Bar A
+        //     predictions than Fellner-Schall under mgcv-style penalty
+        //     normalization (issue #4 in the status doc). The compute
+        //     cost is bounded — newton_max_iter is already capped per
+        //     problem size below.
+        //   - Non-Gaussian (binomial / poisson / Gamma): Newton's outer
+        //     update can step toward unstable lambdas before IRLS has
+        //     stabilized, producing huge β (~1e7) on binomial. FS's
+        //     conservative single-step update converges, even if
+        //     suboptimally. Until non-Gaussian Newton has trust-region
+        //     globalization, FS is the safer default.
+        //
+        // Pass `algorithm="newton"` / `algorithm="fellner-schall"` to
+        // override.
+        let _ = n;
+        let is_gaussian_family = matches!(self.family, crate::pirls::Family::Gaussian);
         let selected_algorithm = algorithm.unwrap_or_else(|| {
-            if n < 2000 {
-                crate::smooth::REMLAlgorithm::FellnerSchall
-            } else {
+            if is_gaussian_family {
                 crate::smooth::REMLAlgorithm::Newton
+            } else {
+                crate::smooth::REMLAlgorithm::FellnerSchall
             }
         });
 

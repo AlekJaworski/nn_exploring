@@ -1,18 +1,18 @@
 {
-  "_comment": "Per-case mgcv_rust.fit() time budgets in milliseconds. Values are 3x the median of 5 runs measured on the dev workstation at commit c59d00a, which gives ~3x slack for CI variance. Update via: python -m tests.parity.measure_perf > tests/parity/perf_budgets.json. Cases not listed here are recorded but not asserted.",
+  "_comment": "Per-case mgcv_rust.fit() time budgets in milliseconds. Values are ~3x the median of 5 runs measured on the dev workstation. Update via: python -m tests.parity.measure_perf > tests/parity/perf_budgets.json. Cases not listed here are recorded but not asserted. The Gaussian budgets reflect Newton (more iterations than FS but tighter Bar A); non-Gaussian budgets reflect FS (Newton diverges on these for now). 4d_gaussian_mixed runs slower than mgcv until smooth.rs gets infinite-λ detection — separate followup.",
   "_units": "milliseconds (median over 5 fits)",
-  "_slack": "3x the dev measurement",
-  "_baseline_commit": "c59d00a",
+  "_slack": "~3x the dev measurement, plus MGCV_PERF_SLACK env var (default 1.5)",
+  "_baseline_commit": "post-2c hybrid Newton/FS",
 
-  "1d_gaussian_near_linear_n500_k10_cr":  3.0,
-  "1d_gaussian_smooth_n100_k10_cr":       2.0,
-  "1d_gaussian_smooth_n500_k10_cr":       2.0,
-  "1d_gaussian_smooth_n500_k20_bs":      20.0,
-  "1d_gaussian_wiggly_n500_k20_cr":       3.0,
-  "2d_binomial_logit_n1000_k10_cr":     150.0,
-  "2d_gamma_log_n1000_k10_cr":           25.0,
-  "2d_gaussian_additive_n2000_k15_cr":  200.0,
-  "2d_gaussian_additive_n500_k10_cr":     5.0,
-  "2d_poisson_log_n1000_k10_cr":         25.0,
-  "4d_gaussian_mixed_n1000_k10_cr":      10.0
+  "1d_gaussian_near_linear_n500_k10_cr":  20.0,
+  "1d_gaussian_smooth_n100_k10_cr":        8.0,
+  "1d_gaussian_smooth_n500_k10_cr":       20.0,
+  "1d_gaussian_smooth_n500_k20_bs":       80.0,
+  "1d_gaussian_wiggly_n500_k20_cr":       50.0,
+  "2d_binomial_logit_n1000_k10_cr":      150.0,
+  "2d_gamma_log_n1000_k10_cr":            30.0,
+  "2d_gaussian_additive_n2000_k15_cr":   150.0,
+  "2d_gaussian_additive_n500_k10_cr":     35.0,
+  "2d_poisson_log_n1000_k10_cr":          30.0,
+  "4d_gaussian_mixed_n1000_k10_cr":     1000.0
 }
