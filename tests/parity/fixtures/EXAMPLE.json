@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "name": "EXAMPLE",
+  "description": "Hand-crafted minimal example so the schema is round-trippable. Not a real fixture; will be ignored by the test runner (filename starts with EXAMPLE).",
+  "metadata": {
+    "mgcv_version": "1.9-1",
+    "r_version": "R 4.3.3",
+    "generated_at": "2026-04-28T00:00:00Z"
+  },
+  "inputs": {
+    "seed": 42,
+    "n": 4,
+    "d": 1,
+    "k": [4],
+    "bs": ["cr"],
+    "family": "gaussian",
+    "link": "identity",
+    "method": "REML",
+    "weights": null,
+    "x_train":  [[0.1], [0.3], [0.6], [0.9]],
+    "y_train":  [0.1, 0.5, 0.8, 0.9],
+    "x_test":   [[0.2], [0.5], [0.8]],
+    "x_extrap": [[-0.1], [1.1]]
+  },
+  "mgcv_output": {
+    "beta": [0.575, 0.0, 0.0, 0.0, 0.0],
+    "vcov": [
+      [0.01, 0.00, 0.00, 0.00, 0.00],
+      [0.00, 0.01, 0.00, 0.00, 0.00],
+      [0.00, 0.00, 0.01, 0.00, 0.00],
+      [0.00, 0.00, 0.00, 0.01, 0.00],
+      [0.00, 0.00, 0.00, 0.00, 0.01]
+    ],
+    "lambda": [1.0],
+    "edf_per_smooth": {"x0": 2.0},
+    "edf_total": 3.0,
+    "deviance": 0.05,
+    "scale": 0.025,
+    "n_iter": 5,
+    "predictions_train":    [0.1, 0.5, 0.8, 0.9],
+    "predictions_test":     [0.3, 0.65, 0.85],
+    "predictions_extrap":   [-0.05, 0.95],
+    "predictions_train_se": [0.05, 0.04, 0.04, 0.05],
+    "predictions_test_se":  [0.05, 0.04, 0.05]
+  }
+}
