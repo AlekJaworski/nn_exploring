@@ -592,6 +592,144 @@ impl PyGAM {
 
         Ok(PyArray2::from_owned_array(py, design_matrix.clone()))
     }
+
+    /// Per-smooth penalty scale factor used by the optimizer
+    /// (gam_optimized.rs::FitCache::new computes `ma_xx / inf_norm_s`
+    /// for each smooth and uses it as a multiplier on S_j during the
+    /// fit). The reported λ values from get_all_lambdas() multiply the
+    /// SCALED penalty, not the raw S_j — so to compare with mgcv,
+    /// divide by the scale factors here.
+    #[cfg(feature = "blas")]
+    fn get_penalty_scale_factors<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let mut scales = Vec::with_capacity(self.inner.smooth_terms.len());
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            let block = design_matrix.slice(ndarray::s![.., col_offset..col_offset + nb]);
+            let inf_norm_x = block
+                .rows()
+                .into_iter()
+                .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+                .fold(0.0f64, f64::max);
+            let ma_xx = inf_norm_x * inf_norm_x;
+            let inf_norm_s = (0..nb)
+                .map(|i| (0..nb).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
+                .fold(0.0f64, f64::max);
+            let sf = if inf_norm_s > 1e-10 { ma_xx / inf_norm_s } else { 1.0 };
+            scales.push(sf);
+            col_offset += nb;
+        }
+        Ok(numpy::PyArray1::from_vec(py, scales))
+    }
+
+    /// Evaluate this fitted GAM's REML score at an arbitrary lambda
+    /// vector, reusing the cached design matrix, IRLS weights, and
+    /// per-smooth (centred) penalty matrices. Returns the same score
+    /// the Newton optimiser was minimising during fit().
+    ///
+    /// `mgcv_coords` controls how the input lambdas are interpreted:
+    ///   - `False` (default): lambdas are in our optimizer's coordinate
+    ///     system (matching what get_all_lambdas returns). The
+    ///     effective penalty is `λ_j * scale_factor_j * S_j`.
+    ///   - `True`: lambdas are mgcv's raw values that multiply S_j
+    ///     directly. We divide them by our scale_factor before applying,
+    ///     so the effective penalty becomes `λ_j * S_j` exactly as
+    ///     mgcv would compute. Use this to compare REML at mgcv's
+    ///     converged λ in our score.
+    ///
+    /// Used by the parity test suite to probe whether mgcv_rust and
+    /// mgcv are optimising the same objective: compute our REML at
+    /// mgcv's converged λ (with mgcv_coords=True) and compare to our
+    /// REML at our own converged λ (mgcv_coords=False).
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_at(
+        &self,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+        mgcv_coords: Option<bool>,
+    ) -> PyResult<f64> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        if lambdas.len() != self.inner.smooth_terms.len() {
+            return Err(PyValueError::new_err(format!(
+                "lambdas length ({}) must match number of smooth terms ({})",
+                lambdas.len(),
+                self.inner.smooth_terms.len()
+            )));
+        }
+        // We always work the REML criterion through with the *raw*
+        // (unscaled) penalties S_j. The optimizer's reported λ
+        // multiplies a SCALED S_j (= scale_factor_j * S_j), so to get
+        // the same effective penalty in raw-S terms we multiply each
+        // optimizer-coordinate λ by its scale factor. mgcv-coordinate
+        // λ values are already raw multipliers and pass through.
+        let total_cols = design_matrix.ncols();
+        let use_mgcv_coords = mgcv_coords.unwrap_or(false);
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> =
+            Vec::with_capacity(self.inner.smooth_terms.len());
+        let mut effective_lambdas: Vec<f64> = Vec::with_capacity(lambdas.len());
+        let mut col_offset = 1usize;
+        for (i, smooth) in self.inner.smooth_terms.iter().enumerate() {
+            let nb = smooth.num_basis();
+            // Always pass the raw (unscaled) S_j to the REML criterion.
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            // Compute scale_factor once, only used to convert
+            // optimizer-coordinate λ to a raw multiplier.
+            let block = design_matrix.slice(ndarray::s![.., col_offset..col_offset + nb]);
+            let inf_norm_x = block
+                .rows()
+                .into_iter()
+                .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+                .fold(0.0f64, f64::max);
+            let ma_xx = inf_norm_x * inf_norm_x;
+            let inf_norm_s = (0..nb)
+                .map(|i| (0..nb).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
+                .fold(0.0f64, f64::max);
+            let scale_factor = if inf_norm_s > 1e-10 { ma_xx / inf_norm_s } else { 1.0 };
+            let lam_i = if use_mgcv_coords {
+                lambdas[i]
+            } else {
+                lambdas[i] * scale_factor
+            };
+            effective_lambdas.push(lam_i);
+            col_offset += nb;
+        }
+        let lambdas_to_use = effective_lambdas;
+        let y_array = y.as_array().to_owned();
+        crate::reml::reml_criterion_multi_cached(
+            &y_array,
+            design_matrix,
+            weights,
+            &lambdas_to_use,
+            &penalties,
+            None,
+            None,
+        )
+        .map_err(|e| PyValueError::new_err(format!("REML evaluation failed: {}", e)))
+    }
 }
 
 /// Compute penalty matrix for debugging/comparison

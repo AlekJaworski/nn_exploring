@@ -478,6 +478,14 @@ pub fn reml_criterion_multi_cached(
         - log_pseudo_det_sum)
         / 2.0;
 
+    if std::env::var("MGCV_REML_DEBUG").is_ok() {
+        eprintln!(
+            "[REML_DEBUG] λ={:?}\n  rss={:.6} rss_bsb={:.6} phi={:.6} n_minus_edf={:.6}\n  log_det_a={:.6} log_lambda_sum={:.6} log_pseudo_det_sum={:.6}\n  total_rank={} REML={:.6}",
+            lambdas, rss, rss_bsb, phi, n_minus_edf,
+            log_det_a, log_lambda_sum, log_pseudo_det_sum, total_rank, reml
+        );
+    }
+
     Ok(reml)
 }
 
