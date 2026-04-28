@@ -8,14 +8,36 @@ pub use crate::reml::ScaleParameterMethod;
 #[cfg(feature = "blas")]
 use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
-    reml_criterion_multi_cached, reml_gradient_multi_qr_adaptive,
-    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_multi_cached,
+    reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
+    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
+    reml_hessian_multi_cached,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
 use std::time::Instant;
+
+/// Dispatch to either mgcv-exact REML or default REML based on the
+/// SmoothingParameter flag. mgcv_exact_score=true is set by
+/// gam_optimized.rs::fit_optimized_full when the GAM was constructed
+/// with mgcv_exact=True.
+#[cfg(feature = "blas")]
+fn dispatch_reml_score(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+) -> Result<f64> {
+    if sp.mgcv_exact_score {
+        reml_criterion_multi_cached_mgcv_exact(y, x, w, lambdas, penalties, cached_xtwx, sp.mp)
+    } else {
+        reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
+    }
+}
 
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +67,16 @@ pub struct SmoothingParameter {
     /// - EDF: Exact O(p³/3) using effective degrees of freedom (matches mgcv)
     #[cfg(feature = "blas")]
     pub scale_method: ScaleParameterMethod,
+    /// When true, the line-search REML evaluations use mgcv's exact
+    /// formula (gam.fit3.r:621) instead of our default formula. The
+    /// gradient/Hessian still use the default formula since they're
+    /// only used to determine STEP DIRECTION; the line search uses the
+    /// score for STEP ACCEPTANCE. With mgcv-exact score driving
+    /// acceptance, the optimizer converges closer to mgcv's optimum.
+    pub mgcv_exact_score: bool,
+    /// Mp = nsdf + Σ null.space.dim_j (constant in λ). Required for
+    /// the mgcv-exact REML score; pre-computed once per fit.
+    pub mp: usize,
 }
 
 impl SmoothingParameter {
@@ -56,6 +88,8 @@ impl SmoothingParameter {
             reml_algorithm: REMLAlgorithm::Newton, // Default to Newton (matches bam())
             #[cfg(feature = "blas")]
             scale_method: ScaleParameterMethod::EDF, // Default to EDF (matches mgcv)
+            mgcv_exact_score: false,
+            mp: 0,
         }
     }
 
@@ -71,6 +105,8 @@ impl SmoothingParameter {
             reml_algorithm: algorithm,
             #[cfg(feature = "blas")]
             scale_method: ScaleParameterMethod::Rank,
+            mgcv_exact_score: false,
+            mp: 0,
         }
     }
 
@@ -86,6 +122,8 @@ impl SmoothingParameter {
             method,
             reml_algorithm: REMLAlgorithm::Newton,
             scale_method: ScaleParameterMethod::EDF,
+            mgcv_exact_score: false,
+            mp: 0,
         }
     }
 
@@ -461,8 +499,9 @@ impl SmoothingParameter {
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
             // Compute current REML value for convergence check
+            // (dispatches to mgcv-exact formula when mgcv_exact_score=true)
             let current_reml =
-                reml_criterion_multi_cached(y, x, w, &lambdas, penalties, None, Some(&xtwx))?;
+                dispatch_reml_score(self, y, x, w, &lambdas, penalties, Some(&xtwx))?;
 
             // Compute gradient and Hessian
             // Use QR-based gradient computation (adaptive: block-wise for large n >= 2000)
@@ -724,16 +763,8 @@ impl SmoothingParameter {
 
                 let new_lambdas: Vec<f64> = new_log_lambda.iter().map(|l| l.exp()).collect();
 
-                // Evaluate REML
-                match reml_criterion_multi_cached(
-                    y,
-                    x,
-                    w,
-                    &new_lambdas,
-                    penalties,
-                    None,
-                    Some(&xtwx),
-                ) {
+                // Evaluate REML (mgcv-exact dispatch)
+                match dispatch_reml_score(self, y, x, w, &new_lambdas, penalties, Some(&xtwx)) {
                     Ok(new_reml) => {
                         // OPTIMIZATION: Armijo condition for early stopping
                         // Accept if: new_reml ≤ current_reml + c₁ * step_scale * grad·step
@@ -847,14 +878,8 @@ impl SmoothingParameter {
                     let new_lambdas_sd: Vec<f64> =
                         new_log_lambda_sd.iter().map(|l| l.exp()).collect();
 
-                    if let Ok(new_reml_sd) = reml_criterion_multi_cached(
-                        y,
-                        x,
-                        w,
-                        &new_lambdas_sd,
-                        penalties,
-                        None,
-                        Some(&xtwx),
+                    if let Ok(new_reml_sd) = dispatch_reml_score(
+                        self, y, x, w, &new_lambdas_sd, penalties, Some(&xtwx),
                     ) {
                         if std::env::var("MGCV_PROFILE").is_ok() {
                             eprintln!("[PROFILE]     SD scale={}: REML={:.6} (current={:.6}, improvement={})",
