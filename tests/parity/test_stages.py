@@ -149,6 +149,21 @@ def test_design_matrix_span(fixture_path, fixture: Fixture, tolerances: Toleranc
 # Stage 2: internal consistency of mgcv_rust's prediction path           #
 # --------------------------------------------------------------------- #
 
+# mgcv_rust's Family enum hardcodes the canonical link per family — the
+# Python API has no link parameter. So the inverse link applied internally
+# by gam.predict()/get_fitted_values() is always the *canonical* one,
+# regardless of what link the fixture was generated under. The Stage 2
+# invariant (predict ≟ X @ β with inverse link) only holds when we use
+# mgcv_rust's actual inverse link, not the fixture's.
+_CANONICAL_INVERSE_LINK = {
+    "gaussian": lambda eta: eta,                      # identity
+    "binomial": lambda eta: 1.0 / (1.0 + np.exp(-np.clip(eta, -20, 20))),  # logit
+    "poisson":  lambda eta: np.exp(np.clip(eta, None, 20)),                # log
+    "Gamma":    lambda eta: 1.0 / np.where(np.abs(eta) < 1e-10, 1e-10, eta),  # inverse
+    "gamma":    lambda eta: 1.0 / np.where(np.abs(eta) < 1e-10, 1e-10, eta),  # inverse
+}
+
+
 def test_predict_matches_design_dot_coef(fixture_path, fixture: Fixture) -> None:
     """
     Sanity: gam.predict(x_train) should match get_design_matrix() @
@@ -156,8 +171,20 @@ def test_predict_matches_design_dot_coef(fixture_path, fixture: Fixture) -> None
     Gaussian/identity this is just X @ β. Failure here means the
     Python API's predict() and design_matrix paths internally disagree
     — independent of any mgcv comparison.
+
+    Important: applies mgcv_rust's *canonical* inverse link per family
+    (Gamma → 1/η, not exp(η)), since the Family enum has no link
+    parameter. A non-canonical-link fixture (e.g. Gamma(link="log"))
+    will still pass this stage if mgcv_rust's internal predict and
+    design-matrix paths are self-consistent, even though the fit
+    diverges from the mgcv fixture (that divergence is Bar A's
+    territory).
     """
     fix = fixture
+    inv_link = _CANONICAL_INVERSE_LINK.get(fix.inputs.family)
+    if inv_link is None:
+        pytest.skip(f"no canonical inverse link known for family={fix.inputs.family!r}")
+
     g = _fit_mgcv_rust(fix)
     X = np.asarray(g.get_design_matrix(), dtype=float)
     beta = np.asarray(g.get_coefficients(), dtype=float)
@@ -168,16 +195,7 @@ def test_predict_matches_design_dot_coef(fixture_path, fixture: Fixture) -> None
             f"— mgcv_rust may apply an internal transform; can't run this stage"
         )
 
-    eta = X @ beta  # link scale
-    if fix.inputs.link == "identity":
-        mu = eta
-    elif fix.inputs.link == "log":
-        mu = np.exp(eta)
-    elif fix.inputs.link == "logit":
-        mu = 1.0 / (1.0 + np.exp(-eta))
-    else:
-        pytest.skip(f"unknown link for inverse: {fix.inputs.link}")
-
+    mu = inv_link(X @ beta)
     pred = np.asarray(g.predict(np.asarray(fix.inputs.x_train, dtype=float)), dtype=float)
 
     diff = np.abs(mu - pred)
