@@ -129,6 +129,204 @@ impl SmoothTerm {
         }
     }
 
+    /// mgcv-exact path: normalise the penalty using mgcv's pre-centring
+    /// recipe (smooth.r:3766-3773), then apply the standard sum-to-zero
+    /// Z. Order matters: mgcv computes `maS = ||S_raw||_∞ / ||X_raw||_∞²`
+    /// on the *uncentred* basis and penalty, then sets `S_norm = S_raw / maS`
+    /// before passing to absorb.cons. Our default mode does this *after*
+    /// Z, which gives a different scale factor.
+    pub fn apply_mgcv_normalisation_then_centring(
+        &mut self,
+        x_data: &Array1<f64>,
+    ) -> Result<()> {
+        if self.constraint_matrix.is_some() {
+            return Ok(());
+        }
+        let basis_raw = self.basis.evaluate(x_data)?;
+        let k = basis_raw.ncols();
+        if k <= 1 {
+            return Ok(());
+        }
+        // Step 1: mgcv-style normalisation on RAW basis and penalty.
+        // ma_xx = ||X_raw||_∞² (max row sum of |X_raw|, squared)
+        let inf_norm_x: f64 = basis_raw
+            .rows()
+            .into_iter()
+            .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+            .fold(0.0f64, f64::max);
+        let ma_xx = inf_norm_x * inf_norm_x;
+        // ||S_raw||_∞ — for symmetric S equals max col abs sum
+        let inf_norm_s: f64 = (0..k)
+            .map(|i| (0..k).map(|j| self.penalty[[i, j]].abs()).sum::<f64>())
+            .fold(0.0f64, f64::max);
+        let scale_factor = if inf_norm_s > 1e-10 {
+            ma_xx / inf_norm_s
+        } else {
+            1.0
+        };
+        // Apply scale to RAW penalty
+        self.penalty = &self.penalty * scale_factor;
+
+        // Step 2: standard sum-to-zero Z (Householder of column means).
+        let c_row = basis_raw.sum_axis(ndarray::Axis(0)) / (basis_raw.nrows() as f64);
+        let c_norm = c_row.dot(&c_row).sqrt();
+        let z_kkm1: Array2<f64> = if c_norm < 1e-30 {
+            let mut z = Array2::<f64>::zeros((k, k - 1));
+            for j in 1..k {
+                z[[j, j - 1]] = 1.0;
+            }
+            z
+        } else {
+            let mut v = c_row.clone();
+            let sign = if c_row[0] >= 0.0 { 1.0 } else { -1.0 };
+            v[0] += sign * c_norm;
+            let v_norm_sq = v.dot(&v);
+            let mut z = Array2::<f64>::zeros((k, k - 1));
+            for j in 1..k {
+                let coef = 2.0 * v[j] / v_norm_sq;
+                for i in 0..k {
+                    let e_ij = if i == j { 1.0 } else { 0.0 };
+                    z[[i, j - 1]] = e_ij - coef * v[i];
+                }
+            }
+            z
+        };
+        // Step 3: penalty becomes Z' S_norm_raw Z (S already pre-scaled).
+        let new_penalty = z_kkm1.t().dot(&self.penalty).dot(&z_kkm1);
+        self.penalty = new_penalty;
+        self.constraint_matrix = Some(z_kkm1);
+        Ok(())
+    }
+
+    /// mgcv-exact path (DEPRECATED, see apply_mgcv_normalisation_then_centring):
+    /// sum-to-zero centring **followed by** nat.param (smooth.r:15-128,
+    /// type=2, unit.fnorm=FALSE). mgcv only invokes nat.param when
+    /// `diagonal.penalty=TRUE` is requested — which gam()/bam() do NOT
+    /// use by default. Kept here for future experimentation.
+    pub fn apply_sum_to_zero_centering_mgcv_exact(
+        &mut self,
+        x_data: &Array1<f64>,
+    ) -> Result<()> {
+        if self.constraint_matrix.is_some() {
+            return Ok(());
+        }
+        let basis_raw = self.basis.evaluate(x_data)?;
+        let k = basis_raw.ncols();
+        if k <= 1 {
+            return Ok(());
+        }
+
+        // Step 1: standard sum-to-zero Z (Householder of column means;
+        // matches mgcv's qr(t(colMeans(X))) up to column signs, and
+        // since the resulting Z'SZ is invariant to those signs, the
+        // downstream nat.param gives the same diagonal penalty).
+        let c_row = basis_raw.sum_axis(ndarray::Axis(0)) / (basis_raw.nrows() as f64);
+        let c_norm = c_row.dot(&c_row).sqrt();
+        let z_kkm1: Array2<f64>;
+        if c_norm < 1e-30 {
+            // Column means already zero — drop a redundant col.
+            let mut z = Array2::<f64>::zeros((k, k - 1));
+            for j in 1..k {
+                z[[j, j - 1]] = 1.0;
+            }
+            z_kkm1 = z;
+        } else {
+            let mut v = c_row.clone();
+            let sign = if c_row[0] >= 0.0 { 1.0 } else { -1.0 };
+            v[0] += sign * c_norm;
+            let v_norm_sq = v.dot(&v);
+            let mut z = Array2::<f64>::zeros((k, k - 1));
+            for j in 1..k {
+                let coef = 2.0 * v[j] / v_norm_sq;
+                for i in 0..k {
+                    let e_ij = if i == j { 1.0 } else { 0.0 };
+                    z[[i, j - 1]] = e_ij - coef * v[i];
+                }
+            }
+            z_kkm1 = z;
+        }
+
+        // Step 2: nat.param(type=2, unit.fnorm=FALSE) on (X_centred, Z'SZ)
+        let s_centred = z_kkm1.t().dot(&self.penalty).dot(&z_kkm1); // (k-1) × (k-1)
+        let x_centred = basis_raw.dot(&z_kkm1); // n × (k-1)
+
+        // Eigendecompose S_centred. ndarray-linalg returns eigenvalues
+        // in ASCENDING order; mgcv's eigen() returns DESCENDING. We
+        // reverse so eigenvalue 0 is the largest.
+        use ndarray_linalg::{Eigh, UPLO};
+        let (evals_asc, evecs_asc) = s_centred
+            .eigh(UPLO::Upper)
+            .map_err(|e| GAMError::LinAlgError(format!("S_centred eigh failed: {:?}", e)))?;
+        let p = evals_asc.len(); // k-1
+        let mut evals = vec![0.0f64; p];
+        for i in 0..p {
+            evals[i] = evals_asc[p - 1 - i];
+        }
+        let mut evecs = Array2::<f64>::zeros((p, p));
+        for j in 0..p {
+            for i in 0..p {
+                evecs[[i, j]] = evecs_asc[[i, p - 1 - j]];
+            }
+        }
+
+        // Determine rank: count eigenvalues > tol * max
+        let max_eig = evals[0].max(0.0);
+        let tol = f64::EPSILON.powf(0.8);
+        let rank: usize = evals.iter().filter(|&&v| v > max_eig * tol).count();
+
+        // Build E vector (length p). Initialised to 1's; first `rank`
+        // entries are sqrt(eigenvalue). Null entries (rank+1..p) get
+        // assigned later from col norms.
+        let mut e_vec = vec![1.0f64; p];
+        for i in 0..rank {
+            e_vec[i] = evals[i].sqrt().max(1e-300);
+        }
+
+        // Rotate basis: X' = X_centred * U
+        let x_rot = x_centred.dot(&evecs); // n × p
+
+        // Compute col_norm[j] = sum(X_rot[:,j]^2) / E[j]^2
+        let mut col_norms = vec![0.0f64; p];
+        for j in 0..p {
+            let s: f64 = x_rot.column(j).iter().map(|v| v * v).sum();
+            col_norms[j] = s / (e_vec[j] * e_vec[j]);
+        }
+
+        // av_norm = mean over the rank penalised columns
+        let null_exists = rank < p;
+        let av_norm: f64 = if rank > 0 {
+            col_norms[..rank].iter().sum::<f64>() / (rank as f64)
+        } else {
+            1.0
+        };
+        if null_exists && av_norm > 0.0 {
+            for j in rank..p {
+                e_vec[j] = (col_norms[j] / av_norm).sqrt().max(1e-300);
+            }
+        }
+
+        // M = U / E (column-wise division of U by E)
+        let mut m_mat = evecs.clone();
+        for j in 0..p {
+            for i in 0..p {
+                m_mat[[i, j]] /= e_vec[j];
+            }
+        }
+
+        // Combined transformation Z_total = Z * M  (k × p)
+        let z_total = z_kkm1.dot(&m_mat);
+
+        // New penalty: diag(1's for rank, 0's for null)
+        let mut new_penalty = Array2::<f64>::zeros((p, p));
+        for i in 0..rank {
+            new_penalty[[i, i]] = 1.0;
+        }
+
+        self.penalty = new_penalty;
+        self.constraint_matrix = Some(z_total);
+        Ok(())
+    }
+
     /// Apply mgcv's sum-to-zero identifiability constraint to the basis.
     /// Computes a (k × k-1) reparameterization Z such that the column sums
     /// of (X_raw @ Z) over the training data are exactly zero. The basis

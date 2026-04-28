@@ -62,7 +62,15 @@ impl FitCache {
 
         for (i, smooth) in smooth_terms.iter_mut().enumerate() {
             let x_col = x.column(i).to_owned();
-            smooth.apply_sum_to_zero_centering(&x_col)?;
+            if mgcv_exact {
+                // mgcv-exact: normalise penalty using ||X_raw||_∞²/||S_raw||_∞
+                // BEFORE applying the centring Z (matches smooth.r:3766
+                // ordering). Our default does it after Z, which gives a
+                // different scale factor.
+                smooth.apply_mgcv_normalisation_then_centring(&x_col)?;
+            } else {
+                smooth.apply_sum_to_zero_centering(&x_col)?;
+            }
             let basis_matrix = smooth.evaluate(&x_col)?; // applies Z internally
             total_basis += smooth.num_basis();
             design_matrices.push(basis_matrix);
