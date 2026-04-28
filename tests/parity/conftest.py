@@ -99,6 +99,8 @@ def _render_markdown(records: list[dict[str, Any]]) -> str:
         "columns give the actual numbers so ratchets are easy to see. Bar B "
         "and C are tracked, not blocking.",
         "",
+        "## Bar A / B / C",
+        "",
     ]
     lines.append(
         "| case | A train | A test | A extrap | train abs | train rel | "
@@ -106,9 +108,11 @@ def _render_markdown(records: list[dict[str, Any]]) -> str:
     )
     lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for r in records:
-        a = r["bar_a"]
-        b = r["bar_b"]
-        c = r["bar_c"]
+        a = r.get("bar_a")
+        b = r.get("bar_b") or {}
+        c = r.get("bar_c") or {}
+        if a is None:
+            continue  # perf-only record
         lines.append(
             "| {name} | {atr} | {ate} | {aex} | {tabs} | {trel} | {eabs} "
             "| {bma} | {dr} | {lr} |".format(
@@ -124,6 +128,31 @@ def _render_markdown(records: list[dict[str, Any]]) -> str:
                 lr=_fmt_num(c.get("lambda_max_relerr")),
             )
         )
+
+    # ---- perf section -----------------------------------------------------
+    perf_records = [r for r in records if "perf" in r]
+    if perf_records:
+        lines.append("")
+        lines.append("## Perf (median over N=5 fits, lower is better)")
+        lines.append("")
+        lines.append(
+            "| case | rust median ms | rust min ms | mgcv median ms | rust/mgcv |"
+        )
+        lines.append("|---|---|---|---|---|")
+        for r in perf_records:
+            perf = r["perf"]
+            rust = perf.get("rust") or {}
+            mgcv = perf.get("mgcv")
+            ratio = perf.get("rust_over_mgcv")
+            lines.append(
+                "| {name} | {rmed} | {rmin} | {mmed} | {ratio} |".format(
+                    name=r["name"],
+                    rmed=_fmt_num(rust.get("median_ms")),
+                    rmin=_fmt_num(rust.get("min_ms")),
+                    mmed=_fmt_num((mgcv or {}).get("median_ms")) if mgcv else "—",
+                    ratio=_fmt_num(ratio),
+                )
+            )
     return "\n".join(lines) + "\n"
 
 

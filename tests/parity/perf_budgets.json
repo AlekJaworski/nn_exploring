@@ -1,0 +1,18 @@
+{
+  "_comment": "Per-case mgcv_rust.fit() time budgets in milliseconds. Values are 3x the median of 5 runs measured on the dev workstation at commit c59d00a, which gives ~3x slack for CI variance. Update via: python -m tests.parity.measure_perf > tests/parity/perf_budgets.json. Cases not listed here are recorded but not asserted.",
+  "_units": "milliseconds (median over 5 fits)",
+  "_slack": "3x the dev measurement",
+  "_baseline_commit": "c59d00a",
+
+  "1d_gaussian_near_linear_n500_k10_cr":  3.0,
+  "1d_gaussian_smooth_n100_k10_cr":       2.0,
+  "1d_gaussian_smooth_n500_k10_cr":       2.0,
+  "1d_gaussian_smooth_n500_k20_bs":      20.0,
+  "1d_gaussian_wiggly_n500_k20_cr":       3.0,
+  "2d_binomial_logit_n1000_k10_cr":     150.0,
+  "2d_gamma_log_n1000_k10_cr":           25.0,
+  "2d_gaussian_additive_n2000_k15_cr":  200.0,
+  "2d_gaussian_additive_n500_k10_cr":     5.0,
+  "2d_poisson_log_n1000_k10_cr":         25.0,
+  "4d_gaussian_mixed_n1000_k10_cr":      10.0
+}
