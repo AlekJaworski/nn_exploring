@@ -611,9 +611,20 @@ impl SmoothingParameter {
 
             prev_reml = current_reml;
 
-            // Compute Newton step: step = -H^(-1) · g
-            // With preconditioning: solve (D^-1 H D^-1) step_precond = -(D^-1 g)
-            // Then back-transform: step = D^-1 step_precond
+            // Compute Newton step: step = -H^(-1) · g  via mgcv-style
+            // eigenvalue handling for indefinite Hessians (gam.fit3.r:1397-1417).
+            // The preconditioned Hessian can have negative or near-zero
+            // eigenvalues in the high-λ asymptote regime; mgcv's recipe is:
+            //   1. eigendecompose H = U Λ U'
+            //   2. set d_i ← |d_i| for all i  (Gill-Murray-Wright p.107-8)
+            //   3. floor d_i ← max(d) * eps^0.7 if too small
+            //   4. invert: d_i ← 1/d_i
+            //   5. step_precond = -U diag(1/d) U' g_precond
+            //
+            // Without (2), the indefinite-H solve produces a step in the
+            // wrong direction in the negative-eigenvalue subspace, which is
+            // the dominant failure mode for the high-λ trap (4d_mixed,
+            // 1d_near_linear) in our parity battery.
 
             // Precondition gradient: g_precond = D^-1 * g
             let mut gradient_precond = Array1::<f64>::zeros(m);
@@ -621,8 +632,35 @@ impl SmoothingParameter {
                 gradient_precond[i] = gradient[i] / diag_precond[i];
             }
 
-            // Solve preconditioned system
-            let step_precond = solve(hessian.clone(), -gradient_precond)?;
+            use ndarray_linalg::{Eigh, UPLO};
+            let (eigvals, eigvecs) = hessian.eigh(UPLO::Upper).map_err(|e| {
+                GAMError::LinAlgError(format!("Hessian eigh failed: {:?}", e))
+            })?;
+
+            // Modify eigenvalues: ABS for indefinite, floor for tiny.
+            // mgcv's low.d = max(d) * .Machine$double.eps^.7 ≈ max(d) * 1.5e-11.
+            let mut d = eigvals.to_vec();
+            for di in d.iter_mut() {
+                if *di < 0.0 {
+                    *di = -*di;
+                }
+            }
+            let max_d = d.iter().cloned().fold(0.0f64, f64::max);
+            let low_d = max_d * (f64::EPSILON.powf(0.7));
+            for di in d.iter_mut() {
+                if *di < low_d {
+                    *di = low_d;
+                }
+            }
+
+            // step_precond = -U diag(1/d) U^T g_precond
+            // (Note: ndarray_linalg returns eigvecs with columns as eigenvectors.)
+            let utg = eigvecs.t().dot(&gradient_precond);
+            let mut scaled = Array1::<f64>::zeros(m);
+            for i in 0..m {
+                scaled[i] = -utg[i] / d[i];
+            }
+            let step_precond = eigvecs.dot(&scaled);
 
             // Back-transform: step = D^-1 * step_precond
             let mut step = Array1::<f64>::zeros(m);

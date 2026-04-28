@@ -426,15 +426,13 @@ impl GAM {
         let mut total_pirls_time = 0.0;
         let mut total_reml_time = 0.0;
 
-        // Adaptive iteration count for Newton: use more iterations for larger/more complex problems
-        let num_basis: usize = cache.design_matrix.ncols();
-        let newton_max_iter = if num_basis >= n {
-            50 // More iterations for overparameterized case
-        } else if num_basis >= n / 2 {
-            30 // Moderate iterations for k close to n
-        } else {
-            10 // Standard for well-posed problems
-        };
+        // Newton iteration cap. mgcv defaults to 200 with proper
+        // score-scaled convergence; in our parity battery mgcv typically
+        // converges in 3-10 iters but takes the full count when a
+        // smoothing parameter is asymptoting to infinity. We mirror
+        // mgcv: 200 outer iterations, but the user-passed max_iter is
+        // also respected (so callers can shorten for snappy fits).
+        let newton_max_iter = max_outer_iter.max(200);
 
         let is_newton = smoothing_params.reml_algorithm == crate::smooth::REMLAlgorithm::Newton;
 

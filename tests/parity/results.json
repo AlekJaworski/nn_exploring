@@ -3,36 +3,36 @@
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.024150903062260698,
-        "max_relerr": 0.061621854798197574,
+        "max_absdiff": 0.024434748346366386,
+        "max_relerr": 0.06234609574426995,
         "n": 20,
         "ok": false,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.01119867279478337,
-        "max_relerr": 0.022040605847925672,
+        "max_absdiff": 0.011333143359117115,
+        "max_relerr": 0.02230526334448266,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.01095748778412925,
-        "max_relerr": 0.021473706609011874,
+        "max_absdiff": 0.011089176824151226,
+        "max_relerr": 0.021731781440101367,
         "n": 500,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 1.0649250731541577,
-      "beta_maxrelerr": 5.413929632184239,
+      "beta_maxabsdiff": 1.0650705667471376,
+      "beta_maxrelerr": 5.41438362414846,
       "beta_ok": false,
-      "deviance_actual": 4.7211689040313045,
+      "deviance_actual": 4.720611587657991,
       "deviance_expected": 4.781734200752369,
-      "deviance_relerr": 0.012665968909676048,
+      "deviance_relerr": 0.01278252000806755,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -41,12 +41,12 @@
     },
     "bar_c": {
       "lambda_actual": [
-        120.00278912720646
+        117.3643861987682
       ],
       "lambda_expected": [
         49002768.779082626
       ],
-      "lambda_max_relerr": 0.999997551101864,
+      "lambda_max_relerr": 0.9999976049437792,
       "lambda_ok": false
     },
     "description": "Linear-with-noise; tests very-high-lambda regime",
@@ -54,54 +54,54 @@
     "name": "1d_gaussian_near_linear_n500_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 79.31774700045935,
-        "median_ms": 42.5454139995054,
-        "min_ms": 31.772678999914206,
+        "max_ms": 86.29621799991583,
+        "median_ms": 27.586803000303917,
+        "min_ms": 26.90243899996858,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 7.018057000095723,
-        "median_ms": 5.553675000555813,
-        "min_ms": 5.157409999810625,
+        "max_ms": 2.1145980008441256,
+        "median_ms": 1.4865930006635608,
+        "min_ms": 1.476544999604812,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.13053522056737715
+      "rust_over_mgcv": 0.053887831824774454
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.003035741426013927,
-        "max_relerr": 0.15167140836074075,
+        "max_absdiff": 0.002975981407166539,
+        "max_relerr": 0.14863497003563714,
         "n": 20,
         "ok": false,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.0015709800978377375,
-        "max_relerr": 0.02033179218463969,
+        "max_absdiff": 0.0015441148255056492,
+        "max_relerr": 0.019929061125384586,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.0016591736542778263,
-        "max_relerr": 0.01962117517021883,
+        "max_absdiff": 0.0016257212674194027,
+        "max_relerr": 0.019225571526972247,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.09181421215553964,
-      "beta_maxrelerr": 0.24669772653957014,
+      "beta_maxabsdiff": 0.09183758562857736,
+      "beta_maxrelerr": 0.24678754409930828,
       "beta_ok": false,
-      "deviance_actual": 3.540121103907053,
+      "deviance_actual": 3.5400781769318956,
       "deviance_expected": 3.5378621445842695,
-      "deviance_relerr": 0.0006385097074065765,
+      "deviance_relerr": 0.0006263761155924103,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -110,12 +110,12 @@
     },
     "bar_c": {
       "lambda_actual": [
-        3.014291923655342
+        3.0099426612644624
       ],
       "lambda_expected": [
         5.553688642000233
       ],
-      "lambda_max_relerr": 0.45724506396352355,
+      "lambda_max_relerr": 0.4580281943604976,
       "lambda_ok": false
     },
     "description": "Small-n version of smooth 1D",
@@ -123,54 +123,54 @@
     "name": "1d_gaussian_smooth_n100_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 151.72178800003167,
-        "median_ms": 20.424391999767977,
-        "min_ms": 15.591886000038357,
+        "max_ms": 167.14339899954211,
+        "median_ms": 19.517606000590604,
+        "min_ms": 16.387579998990986,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 2.478716999576136,
-        "median_ms": 1.5468839992536232,
-        "min_ms": 1.5313670000978163,
+        "max_ms": 0.7657349997316487,
+        "median_ms": 0.6575210009032162,
+        "min_ms": 0.4699279998021666,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.07573708922504013
+      "rust_over_mgcv": 0.033688609191276815
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.0002667666990179285,
-        "max_relerr": 0.004560278861774388,
+        "max_absdiff": 0.00026677428259175295,
+        "max_relerr": 0.004560783842389605,
         "n": 20,
         "ok": true,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.00020985008079754675,
-        "max_relerr": 0.0010577505071356931,
+        "max_absdiff": 0.00020986691664004464,
+        "max_relerr": 0.001057900530463788,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.00021052640388041777,
-        "max_relerr": 0.0011321523677871672,
+        "max_absdiff": 0.00021054246095664197,
+        "max_relerr": 0.0011323099845208416,
         "n": 500,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.7886743413428853,
-      "beta_maxrelerr": 4.645985603409254,
+      "beta_maxabsdiff": 0.7886743362655482,
+      "beta_maxrelerr": 4.645985637744361,
       "beta_ok": false,
-      "deviance_actual": 20.58228944097495,
+      "deviance_actual": 20.582289457568802,
       "deviance_expected": 20.58216302008782,
-      "deviance_relerr": 6.1422546798328876e-06,
+      "deviance_relerr": 6.1430609046990454e-06,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -179,12 +179,12 @@
     },
     "bar_c": {
       "lambda_actual": [
-        1.781368336513772
+        1.7813748346058027
       ],
       "lambda_expected": [
         5.096003490705175
       ],
-      "lambda_max_relerr": 0.65043816399206,
+      "lambda_max_relerr": 0.6504368888571347,
       "lambda_ok": false
     },
     "description": "Smooth 1D sin curve, Gaussian noise, k=10 cr-spline",
@@ -192,54 +192,54 @@
     "name": "1d_gaussian_smooth_n500_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 22.874291999869456,
-        "median_ms": 18.114838999281346,
-        "min_ms": 16.523786999641743,
+        "max_ms": 18.935492998934933,
+        "median_ms": 18.437561000610003,
+        "min_ms": 17.891793000671896,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 5.3827410001758835,
-        "median_ms": 3.9858350000940845,
-        "min_ms": 3.7709279995397083,
+        "max_ms": 1.4259519994084258,
+        "median_ms": 1.3495809998858022,
+        "min_ms": 1.29491499865253,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.2200314891152061
+      "rust_over_mgcv": 0.07319737137906426
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.09094570668579016,
-        "max_relerr": 3.868193196671549,
+        "max_absdiff": 0.09093863349636622,
+        "max_relerr": 3.867851505949568,
         "n": 20,
         "ok": false,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.03269075231343427,
-        "max_relerr": 0.9022202073381663,
+        "max_absdiff": 0.03268778349445717,
+        "max_relerr": 0.9021382719808093,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.032994657558909846,
-        "max_relerr": 0.9936512028498451,
+        "max_absdiff": 0.03299166700659806,
+        "max_relerr": 0.9935611408179392,
         "n": 500,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 1.0063189680136149,
-      "beta_maxrelerr": 23.138665238539392,
+      "beta_maxabsdiff": 1.006286837625614,
+      "beta_maxrelerr": 23.13861575636077,
       "beta_ok": false,
-      "deviance_actual": 20.422610596605068,
+      "deviance_actual": 20.42249540448443,
       "deviance_expected": 20.471427583044616,
-      "deviance_relerr": 0.002384640066820735,
+      "deviance_relerr": 0.0023902670373957624,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -248,12 +248,12 @@
     },
     "bar_c": {
       "lambda_actual": [
-        0.10265806938184364
+        0.10246798429317226
       ],
       "lambda_expected": [
         13.581592411252654
       ],
-      "lambda_max_relerr": 0.9924413819621924,
+      "lambda_max_relerr": 0.9924553777502353,
       "lambda_ok": false
     },
     "description": "Same data, k=20 B-spline (overparameterized)",
@@ -261,54 +261,54 @@
     "name": "1d_gaussian_smooth_n500_k20_bs",
     "perf": {
       "mgcv": {
-        "max_ms": 34.19976500026678,
-        "median_ms": 26.735169999483333,
-        "min_ms": 25.6177060000482,
+        "max_ms": 32.66552500099351,
+        "median_ms": 30.825738000203273,
+        "min_ms": 28.91086799900222,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 27.376721000109683,
-        "median_ms": 23.249863000273763,
-        "min_ms": 20.975166000425816,
+        "max_ms": 11.605034000240266,
+        "median_ms": 11.134598000353435,
+        "min_ms": 9.804762999920058,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.869635876664449
+      "rust_over_mgcv": 0.36121107628566784
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.001036630322074572,
-        "max_relerr": 0.0036723513157583265,
+        "max_absdiff": 0.0010515266011847935,
+        "max_relerr": 0.0028947078521000765,
         "n": 20,
         "ok": true,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.0006584871378805257,
-        "max_relerr": 0.006537141609139119,
+        "max_absdiff": 0.0006600480607605874,
+        "max_relerr": 0.006249501078418963,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.0006828524797903857,
-        "max_relerr": 0.017653215842234348,
+        "max_absdiff": 0.0006841583533432338,
+        "max_relerr": 0.016797326800836756,
         "n": 500,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 1.5066525426357138,
-      "beta_maxrelerr": 6.97619035741698,
+      "beta_maxabsdiff": 1.5066529974837293,
+      "beta_maxrelerr": 6.976187740110125,
       "beta_ok": false,
-      "deviance_actual": 11.143992058898032,
+      "deviance_actual": 11.143995635072903,
       "deviance_expected": 11.143668788841321,
-      "deviance_relerr": 2.9009302307582257e-05,
+      "deviance_relerr": 2.9330217702562556e-05,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -317,12 +317,12 @@
     },
     "bar_c": {
       "lambda_actual": [
-        0.0935214132566
+        0.09356665236542346
       ],
       "lambda_expected": [
         0.41478998861280547
       ],
-      "lambda_max_relerr": 0.7745330991006643,
+      "lambda_max_relerr": 0.774424034007327,
       "lambda_ok": false
     },
     "description": "Higher-frequency 1D, k=20 cr",
@@ -330,18 +330,18 @@
     "name": "1d_gaussian_wiggly_n500_k20_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 32.82175499953155,
-        "median_ms": 21.41511299942067,
-        "min_ms": 19.3234719999964,
+        "max_ms": 35.21102000013343,
+        "median_ms": 24.66977299991413,
+        "min_ms": 22.422525000365567,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 18.502708000596613,
-        "median_ms": 11.44309999926918,
-        "min_ms": 10.531137999350904,
+        "max_ms": 4.419070999574615,
+        "median_ms": 4.0660710001247935,
+        "min_ms": 4.0005450009630295,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.5343469352498277
+      "rust_over_mgcv": 0.16481996004336752
     }
   },
   {
@@ -401,18 +401,18 @@
     "name": "2d_binomial_logit_n1000_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 118.93997599963768,
-        "median_ms": 92.48176600067382,
-        "min_ms": 86.8462170001294,
+        "max_ms": 127.91929200102459,
+        "median_ms": 125.74227400000382,
+        "min_ms": 115.63736300013261,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 45.71414499969251,
-        "median_ms": 41.70457100008207,
-        "min_ms": 39.05401799966057,
+        "max_ms": 57.31242399997427,
+        "median_ms": 55.490868999186205,
+        "min_ms": 51.14043700086768,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.45094912006522686
+      "rust_over_mgcv": 0.44130638991930843
     }
   },
   {
@@ -472,54 +472,54 @@
     "name": "2d_gamma_log_n1000_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 171.3854919998994,
-        "median_ms": 160.6382260006285,
-        "min_ms": 141.80492699961178,
+        "max_ms": 224.9959040000249,
+        "median_ms": 214.31950999976834,
+        "min_ms": 203.90949099964928,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 9.560702000271704,
-        "median_ms": 8.583982000345713,
-        "min_ms": 7.946143000481243,
+        "max_ms": 12.046533998727682,
+        "median_ms": 11.775070001021959,
+        "min_ms": 11.349205000442453,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.05343673304953037
+      "rust_over_mgcv": 0.05494166163889926
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.003560854769993904,
-        "max_relerr": 0.003302972961614522,
+        "max_absdiff": 0.003255531406976875,
+        "max_relerr": 0.0029717673808682932,
         "n": 20,
         "ok": true,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.0019626559484091644,
-        "max_relerr": 0.06253582831875613,
+        "max_absdiff": 0.002039196992111192,
+        "max_relerr": 0.059772674165166774,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.0021388082616136117,
-        "max_relerr": 0.7210206409748554,
+        "max_absdiff": 0.0021386474120105303,
+        "max_relerr": 0.9681158125163303,
         "n": 2000,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.9465499455040225,
-      "beta_maxrelerr": 129.28737686928253,
+      "beta_maxabsdiff": 0.9462545642225185,
+      "beta_maxrelerr": 129.24703132677487,
       "beta_ok": false,
-      "deviance_actual": 78.73310507515458,
+      "deviance_actual": 78.73161907467922,
       "deviance_expected": 78.7496172844805,
-      "deviance_relerr": 0.00020967986760189817,
+      "deviance_relerr": 0.00022854980661377993,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -528,14 +528,14 @@
     },
     "bar_c": {
       "lambda_actual": [
-        5.42332700326932,
-        7.260420740298702
+        5.4192955145981045,
+        7.082657416813965
       ],
       "lambda_expected": [
         26.26616184154031,
         31.68949515134897
       ],
-      "lambda_max_relerr": 0.7935241914678127,
+      "lambda_max_relerr": 0.7936776774889351,
       "lambda_ok": false
     },
     "description": "Larger n, finer basis",
@@ -543,54 +543,54 @@
     "name": "2d_gaussian_additive_n2000_k15_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 45.667907999813906,
-        "median_ms": 39.022537999699125,
-        "min_ms": 31.13420599947858,
+        "max_ms": 67.68991199896846,
+        "median_ms": 50.49913299990294,
+        "min_ms": 48.1903500003682,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 59.270017000017106,
-        "median_ms": 36.30510199946002,
-        "min_ms": 34.69109799971193,
+        "max_ms": 27.419017998909112,
+        "median_ms": 24.1495339996618,
+        "min_ms": 22.7870670005359,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.9303623972315677
+      "rust_over_mgcv": 0.4782168042312373
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.0017905485140681243,
-        "max_relerr": 0.002044449997896596,
+        "max_absdiff": 0.0017905486878670995,
+        "max_relerr": 0.002044451387694622,
         "n": 20,
         "ok": true,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.0010687766920289832,
-        "max_relerr": 0.008120168884339668,
+        "max_absdiff": 0.0010687768791699526,
+        "max_relerr": 0.008120174283105113,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.0010358088113924246,
-        "max_relerr": 0.032887121121161156,
+        "max_absdiff": 0.0010358090088886662,
+        "max_relerr": 0.03288707809811751,
         "n": 500,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 1.0195475039911321,
-      "beta_maxrelerr": 17.45909162151716,
+      "beta_maxabsdiff": 1.0195475037949606,
+      "beta_maxrelerr": 17.45909161815785,
       "beta_ok": false,
-      "deviance_actual": 19.481684214307368,
+      "deviance_actual": 19.481684213595123,
       "deviance_expected": 19.48176270526785,
-      "deviance_relerr": 4.028945515384792e-06,
+      "deviance_relerr": 4.028982074935198e-06,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -599,14 +599,14 @@
     },
     "bar_c": {
       "lambda_actual": [
-        1.590183390211907,
-        2.7728062558399578
+        1.5901833628057263,
+        2.7728062206334156
       ],
       "lambda_expected": [
         5.212284131534652,
         6.647201540453615
       ],
-      "lambda_max_relerr": 0.6949162113801134,
+      "lambda_max_relerr": 0.6949162166381115,
       "lambda_ok": false
     },
     "description": "2D additive sin/cos, k=10 cr per smooth",
@@ -614,18 +614,18 @@
     "name": "2d_gaussian_additive_n500_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 42.0589490004204,
-        "median_ms": 30.495809000058216,
-        "min_ms": 27.316923000398674,
+        "max_ms": 42.434158000105526,
+        "median_ms": 35.158467000655946,
+        "min_ms": 32.58744300001126,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 13.04646100015816,
-        "median_ms": 10.807067000314419,
-        "min_ms": 9.578762999808532,
+        "max_ms": 3.3344650000799447,
+        "median_ms": 2.888209999582614,
+        "min_ms": 2.7016580006602453,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.3543787607108173
+      "rust_over_mgcv": 0.08214834849109687
     }
   },
   {
@@ -685,54 +685,54 @@
     "name": "2d_poisson_log_n1000_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 158.25914200013358,
-        "median_ms": 133.7914900004762,
-        "min_ms": 126.41886100027477,
+        "max_ms": 174.14350999933959,
+        "median_ms": 153.21795400086557,
+        "min_ms": 150.06546400036314,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 11.839261000204715,
-        "median_ms": 10.907791999670735,
-        "min_ms": 9.196153000630147,
+        "max_ms": 13.493612999809557,
+        "median_ms": 13.020468000831897,
+        "min_ms": 10.412346000521211,
         "n_runs": 5
       },
-      "rust_over_mgcv": 0.08152829450985195
+      "rust_over_mgcv": 0.08498004092104207
     }
   },
   {
     "bar_a": {
       "extrap": {
         "atol": 0.001,
-        "max_absdiff": 0.0016733940192522612,
-        "max_relerr": 0.052735005307458935,
+        "max_absdiff": 0.0016056884584831344,
+        "max_relerr": 0.05309527254219268,
         "n": 20,
         "ok": true,
         "rtol": 0.05
       },
       "test": {
         "atol": 1e-06,
-        "max_absdiff": 0.002399495316766087,
-        "max_relerr": 0.3309286060314869,
+        "max_absdiff": 0.0017907502671648534,
+        "max_relerr": 0.14124255209469996,
         "n": 100,
         "ok": false,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
-        "max_absdiff": 0.00260891998411511,
-        "max_relerr": 0.14078742654778104,
+        "max_absdiff": 0.0019027999663956408,
+        "max_relerr": 0.08149082942286445,
         "n": 1000,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.5041762756760214,
-      "beta_maxrelerr": 6.273935066310661,
+      "beta_maxabsdiff": 0.5040066553478124,
+      "beta_maxrelerr": 6.274011589953047,
       "beta_ok": false,
-      "deviance_actual": 38.716044042098865,
+      "deviance_actual": 38.70045666106378,
       "deviance_expected": 38.711606945811866,
-      "deviance_relerr": 0.00011461927409032824,
+      "deviance_relerr": 0.00028803466525405703,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -741,10 +741,10 @@
     },
     "bar_c": {
       "lambda_actual": [
-        1.6858860104859072,
-        1.4762648365822146,
-        1299.2923569843686,
-        4397.356936215542
+        1.685919950132231,
+        1.4761722807507867,
+        883.257787265985,
+        3621.8150984995896
       ],
       "lambda_expected": [
         5.155883544985488,
@@ -752,7 +752,7 @@
         2972.211930531614,
         262171987.00555438
       ],
-      "lambda_max_relerr": 0.9999832272052158,
+      "lambda_max_relerr": 0.9999861853467266,
       "lambda_ok": false
     },
     "description": "4D additive mixing wiggly, smooth, quadratic, near-linear",
@@ -760,18 +760,18 @@
     "name": "4d_gaussian_mixed_n1000_k10_cr",
     "perf": {
       "mgcv": {
-        "max_ms": 66.86415399963153,
-        "median_ms": 59.41737699959049,
-        "min_ms": 56.039566000436025,
+        "max_ms": 89.7439590007707,
+        "median_ms": 86.45079300004,
+        "min_ms": 79.2955790002452,
         "n_runs": 5
       },
       "rust": {
-        "max_ms": 268.6548190004032,
-        "median_ms": 252.6711710006566,
-        "min_ms": 245.07353300032264,
+        "max_ms": 59.07250100062811,
+        "median_ms": 58.19320099908509,
+        "min_ms": 57.434551999904215,
         "n_runs": 5
       },
-      "rust_over_mgcv": 4.252479388351291
+      "rust_over_mgcv": 0.6731366940619986
     }
   }
 ]
