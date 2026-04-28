@@ -448,11 +448,11 @@ impl GAM {
         // mgcv's QR-based log|H| in nat.param-style reparameterised
         // space). Until then mgcv_exact stays at basis-only.
         let _ = (&cache.penalties, &mut smoothing_params); // silence unused
-        if false && self.mgcv_exact {
+        if self.mgcv_exact {
             let mut mp: usize = 1;
             for (idx, smooth) in self.smooth_terms.iter().enumerate() {
                 let nb = smooth.num_basis();
-                let rank_s = crate::reml::estimate_rank(&cache.penalties[idx]);
+                let rank_s = crate::reml::estimate_rank_eigen(&cache.penalties[idx]);
                 mp += nb.saturating_sub(rank_s);
             }
             smoothing_params.mgcv_exact_score = true;

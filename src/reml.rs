@@ -129,6 +129,12 @@ fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64
 
 /// Estimate the rank of a matrix using row norms as approximation to singular values
 /// For symmetric matrices like penalty matrices, this gives a reasonable estimate
+///
+/// LEGACY: hardcodes "subtract 2 for cr-spline null space" which is correct for
+/// the RAW (uncentred) cr-spline penalty but wrong for the centred Z'SZ penalty
+/// (centring removes one null-space dimension, so centred null = orig null - 1).
+/// New code should prefer `estimate_rank_eigen` which determines rank from
+/// the eigenvalue spectrum directly.
 pub fn estimate_rank(penalty: &BlockPenalty) -> usize {
     let non_zero_rows = penalty.estimate_rank();
 
@@ -140,6 +146,29 @@ pub fn estimate_rank(penalty: &BlockPenalty) -> usize {
 
     // Fallback for very small matrices
     1
+}
+
+/// Estimate the rank of a penalty block via its eigenvalue spectrum.
+/// Counts eigenvalues > tol * max_eigenvalue, where tol = eps^0.8 (matches
+/// mgcv's nat.param convention). Robust to centring — works on raw or
+/// post-Z penalty matrices.
+#[cfg(feature = "blas")]
+pub fn estimate_rank_eigen(penalty: &BlockPenalty) -> usize {
+    use ndarray_linalg::Eigh;
+    let block = penalty.block_view().to_owned();
+    if block.nrows() == 0 {
+        return 0;
+    }
+    let (eigenvalues, _) = match block.eigh(ndarray_linalg::UPLO::Upper) {
+        Ok(t) => t,
+        Err(_) => return penalty.estimate_rank().saturating_sub(1).max(1),
+    };
+    let max_eig = eigenvalues.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if max_eig <= 0.0 {
+        return 0;
+    }
+    let tol = f64::EPSILON.powf(0.8) * max_eig.max(1.0);
+    eigenvalues.iter().filter(|&&v| v > tol).count()
 }
 
 /// Compute the REML criterion for smoothing parameter selection
@@ -412,12 +441,12 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     let n_minus_tra = (n as f64) - tr_a;
     let scale_est = rss / n_minus_tra.max(1e-10);
 
-    // log|S+| terms
+    // log|S+| terms — use eigen-based rank (robust to centring)
     let mut log_lambda_sum = 0.0;
     let mut log_pseudo_det_sum = 0.0;
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
         if *lambda > 1e-10 {
-            let rank_s = estimate_rank(penalty);
+            let rank_s = estimate_rank_eigen(penalty);
             if rank_s > 0 {
                 log_lambda_sum += (rank_s as f64) * lambda.ln();
             }
@@ -436,10 +465,22 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     let pi = std::f64::consts::PI;
     let n_minus_mp = (n as f64) - (mp as f64);
     let _ = p;
-    let reml = dp / (2.0 * scale_est)
-        + 0.5 * n_minus_mp * (2.0 * pi * scale_est).ln()
-        + 0.5 * log_det_a
-        - 0.5 * (log_lambda_sum + log_pseudo_det_sum);
+    let term_dp = dp / (2.0 * scale_est);
+    let term_const = 0.5 * n_minus_mp * (2.0 * pi * scale_est).ln();
+    let term_log_h = 0.5 * log_det_a;
+    let term_log_s = 0.5 * (log_lambda_sum + log_pseudo_det_sum);
+    let reml = term_dp + term_const + term_log_h - term_log_s;
+
+    if std::env::var("MGCV_EXACT_DEBUG").is_ok() {
+        eprintln!(
+            "[MGCV_EXACT] λ={:?}\n  rss={:.6} bSb={:.6} dp={:.6} sigma2={:.8}\n  trA={:.6} n-trA={:.6} n-Mp={:.0} (Mp={})\n  log|H|={:.6} log|λS|+={:.6} (lambda_sum={:.6} pseudo_det={:.6})\n  TERMS: dp/2σ²={:.6} +const={:.6} +log|H|/2={:.6} -log|S|+/2={:.6} = REML {:.6}",
+            lambdas, rss, bsb, dp, scale_est,
+            tr_a, n_minus_tra, n_minus_mp, mp,
+            log_det_a, log_lambda_sum + log_pseudo_det_sum,
+            log_lambda_sum, log_pseudo_det_sum,
+            term_dp, term_const, term_log_h, term_log_s, reml
+        );
+    }
 
     Ok(reml)
 }

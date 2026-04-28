@@ -186,12 +186,20 @@ def test_mgcv_exact_predictions(
 
     diff = np.abs(pred_train - expected_train)
     max_absdiff = float(diff.max())
-    # Stash into results record for visibility
+    rust_lambdas = list(map(float, np.asarray(g.get_all_lambdas())))
+    mgcv_lambdas = list(map(float, fix.mgcv_output.lambda_))
+    # Per-dim λ ratios (rust / mgcv) — close to 1 means good match in
+    # current (post-3d) coord system.
+    lambda_ratios = [
+        (r / m) if m > 1e-300 else float("inf")
+        for r, m in zip(rust_lambdas, mgcv_lambdas)
+    ]
     matched = next((r for r in parity_results if r.get("name") == fix.name), None)
     rec = {
         "max_absdiff": max_absdiff,
-        "rust_lambda": list(map(float, np.asarray(g.get_all_lambdas()))),
-        "mgcv_lambda": list(map(float, fix.mgcv_output.lambda_)),
+        "rust_lambda": rust_lambdas,
+        "mgcv_lambda": mgcv_lambdas,
+        "lambda_ratios": lambda_ratios,
     }
     if matched is None:
         parity_results.append({"name": fix.name, "stage4": rec})

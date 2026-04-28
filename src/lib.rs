@@ -680,21 +680,21 @@ impl PyGAM {
         let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
         let mut col_offset = 1usize;
         // Mp = 1 (intercept) + Σ (k_j_centred - rank(S_j)) — null space per smooth.
+        // Use eigen-based rank (robust to centring; the legacy
+        // estimate_rank subtracts 2 which is the RAW penalty's null
+        // space, not the centred one's).
         let mut mp: usize = 1;
         for smooth in &self.inner.smooth_terms {
             let nb = smooth.num_basis();
-            let rank_s = crate::reml::estimate_rank(&crate::block_penalty::BlockPenalty::new(
+            let pen_block = crate::block_penalty::BlockPenalty::new(
                 smooth.penalty.clone(),
                 col_offset,
                 total_cols,
-            ));
+            );
+            let rank_s = crate::reml::estimate_rank_eigen(&pen_block);
             let null_dim = nb.saturating_sub(rank_s);
             mp += null_dim;
-            penalties.push(crate::block_penalty::BlockPenalty::new(
-                smooth.penalty.clone(),
-                col_offset,
-                total_cols,
-            ));
+            penalties.push(pen_block);
             col_offset += nb;
         }
         let y_array = y.as_array().to_owned();
