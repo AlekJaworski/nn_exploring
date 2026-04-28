@@ -14,5 +14,9 @@
   "2d_gaussian_additive_n2000_k15_cr":   150.0,
   "2d_gaussian_additive_n500_k10_cr":     35.0,
   "2d_poisson_log_n1000_k10_cr":          30.0,
-  "4d_gaussian_mixed_n1000_k10_cr":     1000.0
+  "4d_gaussian_mixed_n1000_k10_cr":     1000.0,
+  "1d_gaussian_sparse_edges_n400_k10_cr":  5.0,
+  "1d_gaussian_sigmoid_n300_k10_cr":       8.0,
+  "3d_gaussian_mixed_n800_k10_cr":        80.0,
+  "5d_gaussian_mixed_n1500_k8_cr":       250.0
 }
