@@ -135,14 +135,21 @@ fn parse_formula(formula: &str) -> PyResult<Vec<(usize, usize)>> {
 #[pyclass(name = "GAM")]
 pub struct PyGAM {
     inner: GAM,
+    /// Opt-in to a parallel "mgcv-exact" code path that uses mgcv's
+    /// basis Z, no penalty normalisation, and mgcv's REML formula
+    /// byte-for-byte. Default false — current behaviour preserved.
+    /// When true, fits should reproduce mgcv outputs to machine
+    /// precision (Stage 4 test). Slower; experimental until each piece
+    /// is implemented (basis Z → penalty norm drop → REML formula).
+    mgcv_exact: bool,
 }
 
 #[cfg(feature = "python")]
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None))]
-    fn new(family: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (family=None, mgcv_exact=None))]
+    fn new(family: Option<&str>, mgcv_exact: Option<bool>) -> PyResult<Self> {
         let fam = match family {
             Some("gaussian") | None => Family::Gaussian,
             Some("binomial") => Family::Binomial,
@@ -155,9 +162,16 @@ impl PyGAM {
                 )))
             }
         };
-        Ok(PyGAM {
-            inner: GAM::new(fam),
-        })
+        let mut g = GAM::new(fam);
+        let exact = mgcv_exact.unwrap_or(false);
+        g.mgcv_exact = exact;
+        Ok(PyGAM { inner: g, mgcv_exact: exact })
+    }
+
+    /// Whether this GAM is using the mgcv-exact code path.
+    #[getter]
+    fn mgcv_exact(&self) -> bool {
+        self.mgcv_exact
     }
 
     fn add_cubic_spline(

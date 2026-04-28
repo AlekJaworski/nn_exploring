@@ -213,6 +213,11 @@ pub struct GAM {
     pub design_matrix: Option<Array2<f64>>,
     /// Whether model has been fitted
     pub fitted: bool,
+    /// When true, the fit pipeline uses mgcv-faithful basis, penalty,
+    /// and score formulas (no per-smooth penalty normalisation, mgcv's
+    /// QR-based sum-to-zero Z, and gam.fit3.r:621 REML). Default false
+    /// preserves the current fast/working path.
+    pub mgcv_exact: bool,
 }
 
 impl GAM {
@@ -229,6 +234,7 @@ impl GAM {
             deviance: None,
             design_matrix: None,
             fitted: false,
+            mgcv_exact: false,
         }
     }
 
