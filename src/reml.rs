@@ -576,6 +576,185 @@ pub fn reml_gradient_mgcv_exact_closed_form(
     Ok(grad)
 }
 
+/// Closed-form Hessian of the mgcv-exact REML score w.r.t. log(λ_i, λ_j).
+///
+/// Formula (treating σ² as constant per gam.fit3.r:625's profile-REML
+/// convention; for Gaussian + canonical link + converged β):
+///
+/// H_ij = (1/(2σ²)) · [δ_ij λ_j β'S_jβ - 2 λ_i λ_j β'S_j A⁻¹ S_i β]
+///      + (1/2)     · [δ_ij λ_j tr(A⁻¹ S_j) - λ_i λ_j tr(A⁻¹ S_i A⁻¹ S_j)]
+///      - 0  (log|S|+ is linear in log λ, so its Hessian is zero)
+///
+/// Cost analysis vs the FD Hessian (O(2m² + 1) score evals at O(p³) each):
+///   - One A⁻¹: O(p³)         — already needed by gradient
+///   - Per smooth i: A⁻¹ S_i → only k_i nonzero columns; O(p · k²)
+///   - Per (i,j) pair: tr is O(k²) using sparse structure
+///   Total: O(p³ + m·p·k² + m²·k²) ≈ O(p³) once + O(m²·k²) cheap
+///   versus FD's O(m²·p³). Roughly m²·(p/k)² speedup.
+///
+/// Symmetric output. Both gradient and Hessian use the same cached
+/// β, σ², A⁻¹, but for clean separation of concerns we recompute them
+/// here. The Newton optimizer calls gradient and Hessian back-to-back
+/// at the same λ, so the redundancy is one extra inverse per iter.
+#[cfg(feature = "blas")]
+pub fn reml_hessian_mgcv_exact_closed_form(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+) -> Result<Array2<f64>> {
+    let n = y.len();
+    let m = lambdas.len();
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+
+    // A = X'WX + ΣλS, β = A^-1 X'Wy, σ² = RSS/(n-trA), A^-1
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+    let fitted = x.dot(&beta);
+    let rss: f64 = y
+        .iter()
+        .zip(fitted.iter())
+        .zip(w.iter())
+        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+        .sum();
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
+
+    // Pre-compute per-smooth quantities:
+    //   S_j_beta      = S_j β              (length p, sparse on j_range)
+    //   bsb_j         = β' S_j β           (scalar)
+    //   tr_aS_j       = tr(A^-1 S_j)       (scalar)
+    //   AinvS_j       = A^-1 S_j           (p × k_j cols on j_range; rest zero)
+    //                   stored as (p, k_j) matrix indexed by [row, col_within_block]
+    let mut s_beta_per_j: Vec<Array1<f64>> = Vec::with_capacity(m);
+    let mut bsb_per_j: Vec<f64> = Vec::with_capacity(m);
+    let mut tr_a_s_per_j: Vec<f64> = Vec::with_capacity(m);
+    // ainvs[j]: shape (p, k_j) — the k_j nonzero columns of A^-1 S_j.
+    let mut ainvs_per_j: Vec<Array2<f64>> = Vec::with_capacity(m);
+    let mut block_offsets: Vec<usize> = Vec::with_capacity(m);
+    let mut block_sizes: Vec<usize> = Vec::with_capacity(m);
+    let p = a.nrows();
+    for penalty in penalties_blocks.iter() {
+        let block = penalty.block_view();
+        let off = penalty.offset;
+        let k = block.nrows();
+        block_offsets.push(off);
+        block_sizes.push(k);
+
+        // S_j β  — only entries within the smooth's block are nonzero.
+        let mut s_beta = Array1::<f64>::zeros(p);
+        for r in 0..k {
+            let mut s = 0.0;
+            for c in 0..k {
+                s += block[[r, c]] * beta[off + c];
+            }
+            s_beta[off + r] = s;
+        }
+        s_beta_per_j.push(s_beta);
+
+        // β' S_j β
+        let mut bsb = 0.0;
+        for r in 0..k {
+            bsb += beta[off + r] * s_beta_per_j.last().unwrap()[off + r];
+        }
+        bsb_per_j.push(bsb);
+
+        // tr(A^-1 S_j) = Σ_{p,q in block} A^-1[off+p, off+q] S_j[q, p]
+        let mut tr_as = 0.0;
+        for ii in 0..k {
+            for jj in 0..k {
+                tr_as += a_inv[[off + ii, off + jj]] * block[[jj, ii]];
+            }
+        }
+        tr_a_s_per_j.push(tr_as);
+
+        // A^-1 S_j: shape (p, k). Column c is A^-1[:, off:off+k] @ block[:, c].
+        let mut ainvs = Array2::<f64>::zeros((p, k));
+        for c in 0..k {
+            for r in 0..p {
+                let mut s = 0.0;
+                for kk in 0..k {
+                    s += a_inv[[r, off + kk]] * block[[kk, c]];
+                }
+                ainvs[[r, c]] = s;
+            }
+        }
+        ainvs_per_j.push(ainvs);
+    }
+
+    // Assemble Hessian.
+    let mut hess = Array2::<f64>::zeros((m, m));
+    for i in 0..m {
+        let off_i = block_offsets[i];
+        let k_i = block_sizes[i];
+        let lam_i = lambdas[i];
+        for j in 0..m {
+            let off_j = block_offsets[j];
+            let k_j = block_sizes[j];
+            let lam_j = lambdas[j];
+
+            // β' S_j A^-1 S_i β: only rows in j_range of A^-1 S_i contribute
+            // because (S_j β)[r] is nonzero iff r in j_range. So
+            //   = Σ_{r in j_range} (S_j β)[r] · (A^-1 S_i β)[r]
+            // where (A^-1 S_i β)[r] = Σ_{c in i_range_local} ainvs_i[r, c-off_i] β[c].
+            // Pre-compute u_i = A^-1 S_i β as a length-p vector by gathering
+            // ainvs[:, c] · β[off_i + c]:
+            // (could cache per i but keeps memory small)
+            let s_beta_j = &s_beta_per_j[j];
+            let mut bsb_cross = 0.0;
+            for r in off_j..(off_j + k_j) {
+                let sj_r = s_beta_j[r];
+                if sj_r == 0.0 {
+                    continue;
+                }
+                // (A^-1 S_i β)[r]
+                let mut ainvs_i_beta_r = 0.0;
+                for c in 0..k_i {
+                    ainvs_i_beta_r += ainvs_per_j[i][[r, c]] * beta[off_i + c];
+                }
+                bsb_cross += sj_r * ainvs_i_beta_r;
+            }
+
+            // tr(A^-1 S_i A^-1 S_j): using sparse structure
+            //   = Σ_{p in j_range, r in i_range} (A^-1 S_i)[p, r-off_i] · (A^-1 S_j)[r, p-off_j]
+            // Note the index swap (trace).
+            let mut tr_cross = 0.0;
+            for r in 0..k_i {
+                for pp in 0..k_j {
+                    tr_cross +=
+                        ainvs_per_j[i][[off_j + pp, r]] * ainvs_per_j[j][[off_i + r, pp]];
+                }
+            }
+
+            // H_ij = (1/(2σ²))[δ_ij λ_j bsb_j - 2 λ_i λ_j β'S_jA⁻¹S_iβ]
+            //      + (1/2)   [δ_ij λ_j tr_aS_j - λ_i λ_j tr_cross]
+            let kron = if i == j { 1.0 } else { 0.0 };
+            let dp_part =
+                (kron * lam_j * bsb_per_j[j] - 2.0 * lam_i * lam_j * bsb_cross) / (2.0 * scale_est);
+            let logh_part = (kron * lam_j * tr_a_s_per_j[j] - lam_i * lam_j * tr_cross) / 2.0;
+            hess[[i, j]] = dp_part + logh_part;
+        }
+    }
+    Ok(hess)
+}
+
 /// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation
 pub fn reml_criterion_multi_cached(
     y: &Array1<f64>,

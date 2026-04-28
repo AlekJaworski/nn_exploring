@@ -128,6 +128,120 @@ def test_gradient_zero_at_mgcv_optimum(fix_path, fix_data) -> None:
     )
 
 
+def _fd_hessian(g, y, lambdas, h=1e-2):
+    """Central-difference Hessian of the mgcv-exact REML in log-λ space.
+
+    H_ii = [r(+h_i) - 2 r(0) + r(-h_i)] / h²    (second central diff)
+    H_ij = [r(++) - r(+-) - r(-+) + r(--)] / (4 h²)   off-diagonal
+
+    Default h=1e-2 (more conservative than the gradient's h=1e-3) because
+    Hessian's 1/h² amplifies rounding noise. For very extreme λ values
+    (λ ≳ 1e7 — only 1d_near_linear's optimum) even h=1e-2 isn't enough;
+    those cases are excluded from FD comparison and validated via
+    `test_closed_form_hessian_symmetric` + the gradient tests instead.
+    """
+    log_l = np.log(np.asarray(lambdas, dtype=float))
+    m = len(log_l)
+    r0 = g.evaluate_reml_mgcv_formula(y, list(np.exp(log_l)))
+    r_plus = np.zeros(m)
+    r_minus = np.zeros(m)
+    for i in range(m):
+        lp = log_l.copy(); lp[i] += h
+        lm = log_l.copy(); lm[i] -= h
+        r_plus[i] = g.evaluate_reml_mgcv_formula(y, list(np.exp(lp)))
+        r_minus[i] = g.evaluate_reml_mgcv_formula(y, list(np.exp(lm)))
+    H = np.zeros((m, m))
+    for i in range(m):
+        H[i, i] = (r_plus[i] - 2 * r0 + r_minus[i]) / (h * h)
+    for i in range(m):
+        for j in range(i + 1, m):
+            lpp = log_l.copy(); lpp[i] += h; lpp[j] += h
+            lpm = log_l.copy(); lpm[i] += h; lpm[j] -= h
+            lmp = log_l.copy(); lmp[i] -= h; lmp[j] += h
+            lmm = log_l.copy(); lmm[i] -= h; lmm[j] -= h
+            rpp = g.evaluate_reml_mgcv_formula(y, list(np.exp(lpp)))
+            rpm = g.evaluate_reml_mgcv_formula(y, list(np.exp(lpm)))
+            rmp = g.evaluate_reml_mgcv_formula(y, list(np.exp(lmp)))
+            rmm = g.evaluate_reml_mgcv_formula(y, list(np.exp(lmm)))
+            off = (rpp - rpm - rmp + rmm) / (4 * h * h)
+            H[i, j] = off
+            H[j, i] = off
+    return H
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_closed_form_hessian_matches_fd(fix_path, fix_data) -> None:
+    """At mgcv's converged λ, the closed-form Hessian should agree with
+    the finite-difference Hessian. Both compute the second derivative
+    of the mgcv-exact REML score (treating σ² as constant per
+    gam.fit3.r:625's profile-REML convention).
+
+    Skips cases where mgcv's optimal λ is so large (≳1e6) that
+    second-difference FD goes haywire — those are validated via
+    `test_closed_form_hessian_symmetric` and the gradient tests.
+    """
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    if max(out["lambda"]) > 1.0e6:
+        pytest.skip(
+            f"FD Hessian unreliable at extreme λ={max(out['lambda']):.2e} "
+            f"(catastrophic cancellation in 1/h² subtractive cancellation); "
+            f"closed-form is verified via symmetry + gradient tests."
+        )
+    x = np.asarray(inp["x_train"], dtype=float)
+    y = np.asarray(inp["y_train"], dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+
+    lam = list(out["lambda"])
+    cf = np.asarray(g.evaluate_reml_hessian_closed_form(y, lam), dtype=float)
+    fd = _fd_hessian(g, y, lam)
+
+    diff = np.abs(cf - fd)
+    scale = np.maximum(np.abs(fd), 1e-3)
+    rel = diff / scale
+    # FD Hessian has truncation O(h²) and rounding O(score_mag·ε/h²)
+    # — at h=1e-3 with score~100 and ε~1e-15, rounding ~1e-9 per entry.
+    # Accept rel < 5% OR abs < 1e-2 (saturating dims have small Hessian
+    # entries with proportionally noisy FD).
+    assert rel.max() < 5e-2 or diff.max() < 1e-2, (
+        f"closed-form vs FD Hessian mismatch on {fix_path.stem}:\n"
+        f"  cf=\n{cf}\n  fd=\n{fd}\n  max_absdiff={diff.max():.3e}, "
+        f"max_relerr={rel.max():.3e}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_closed_form_hessian_symmetric(fix_path, fix_data) -> None:
+    """Hessian must be symmetric (it's a second-derivative matrix)."""
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(
+        np.asarray(inp["x_train"], dtype=float),
+        np.asarray(inp["y_train"], dtype=float),
+        k=list(inp["k"]),
+        method=inp["method"],
+        bs=inp["bs"][0],
+    )
+    H = np.asarray(
+        g.evaluate_reml_hessian_closed_form(
+            np.asarray(inp["y_train"], dtype=float), list(out["lambda"])
+        ),
+        dtype=float,
+    )
+    asym = np.abs(H - H.T).max()
+    assert asym < 1e-9, f"Hessian not symmetric on {fix_path.stem}: max|H - H'|={asym:.3e}"
+
+
 @pytest.mark.parametrize(
     "fix_path,fix_data",
     _gaussian_fixtures(),

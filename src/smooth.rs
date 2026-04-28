@@ -10,7 +10,8 @@ use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
     reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
     reml_gradient_mgcv_exact_closed_form, reml_gradient_multi_qr_adaptive,
-    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_multi_cached,
+    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_mgcv_exact_closed_form,
+    reml_hessian_multi_cached,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -635,7 +636,7 @@ impl SmoothingParameter {
 
             let t_hess = Instant::now();
             let mut hessian = if self.mgcv_exact_score {
-                reml_hessian_finite_diff(self, y, x, w, &lambdas, penalties, Some(&xtwx))?
+                reml_hessian_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx))?
             } else {
                 reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?
             };

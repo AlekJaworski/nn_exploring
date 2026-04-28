@@ -1,1550 +1,161 @@
 [
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 1.6370550126598715e-06,
-        "max_relerr": 3.3253210424274713e-06,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.0757867463517812e-06,
-        "max_relerr": 1.4032055912209854e-06,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.0657341857900349e-06,
-        "max_relerr": 1.3756641119881026e-06,
-        "n": 500,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 1.0522654489343215,
-      "beta_maxrelerr": 5.42468996765942,
-      "beta_ok": false,
-      "deviance_actual": 4.7817308379917485,
-      "deviance_expected": 4.781734200752369,
-      "deviance_relerr": 7.032512638731775e-07,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        12146093.04269104
-      ],
-      "lambda_expected": [
-        49002768.779082626
-      ],
-      "lambda_max_relerr": 0.7521345559584843,
-      "lambda_ok": false
-    },
-    "description": "Linear-with-noise; tests very-high-lambda regime",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_near_linear_n500_k10_cr.json",
     "name": "1d_gaussian_near_linear_n500_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 91.5595590013254,
-        "median_ms": 31.41262499775621,
-        "min_ms": 28.63621699725627,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 3.0010340014996473,
-        "median_ms": 2.4516920020687394,
-        "min_ms": 2.417089999653399,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.07804798237154209
-    },
     "stage4": {
       "lambda_ratios": [
-        0.24786544404151578
+        2.156483727203151
       ],
-      "max_absdiff": 1.0657341857900349e-06,
+      "max_absdiff": 1.8844866778167102e-07,
       "mgcv_lambda": [
         49002768.779082626
       ],
       "rust_lambda": [
-        12146093.04269104
+        105673673.45999031
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": null,
-      "iter_diffs": [
-        {
-          "absdiff": 6.407768009587187,
-          "iter": 1,
-          "mgcv_reml": -435.90036700958717,
-          "reldiff_score_scale": 0.034891427630883626,
-          "rust_reml": -429.492599
-        },
-        {
-          "absdiff": 2.492046554347553,
-          "iter": 2,
-          "mgcv_reml": -444.4325765543476,
-          "reldiff_score_scale": 0.013569633275380123,
-          "rust_reml": -441.94053
-        },
-        {
-          "absdiff": 2.1722544863028475,
-          "iter": 3,
-          "mgcv_reml": -445.76789148630286,
-          "reldiff_score_scale": 0.011828309029181125,
-          "rust_reml": -443.595637
-        },
-        {
-          "absdiff": 1.6748042429458678,
-          "iter": 4,
-          "mgcv_reml": -445.81136124294585,
-          "reldiff_score_scale": 0.009119604665963442,
-          "rust_reml": -444.136557
-        },
-        {
-          "absdiff": 0.7007644126915693,
-          "iter": 5,
-          "mgcv_reml": -445.8242774126916,
-          "reldiff_score_scale": 0.003815785895360741,
-          "rust_reml": -445.123513
-        }
-      ],
-      "mgcv_final_reml": -445.8313276946852,
-      "n_mgcv_iters": 10,
-      "n_rust_iters": 10,
-      "rust_final_reml": -445.201564
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 6.60616512812573e-08,
-        "max_relerr": 2.3433747943303413e-06,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 2.2085374862257368e-08,
-        "max_relerr": 1.8614967333568117e-05,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 2.2890054372781687e-08,
-        "max_relerr": 3.817103291611789e-05,
-        "n": 300,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.41130307924244236,
-      "beta_maxrelerr": 26.41862328092332,
-      "beta_ok": false,
-      "deviance_actual": 1.8298278546775326,
-      "deviance_expected": 1.8298278352780584,
-      "deviance_relerr": 1.0601803008575712e-08,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        11.303466844681173
-      ],
-      "lambda_expected": [
-        11.30341191490778
-      ],
-      "lambda_max_relerr": 4.859574596277135e-06,
-      "lambda_ok": true
-    },
-    "description": "Logistic shape \u2014 flat-sharp-flat dose-response curve",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_sigmoid_n300_k10_cr.json",
     "name": "1d_gaussian_sigmoid_n300_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 205.1857279984688,
-        "median_ms": 24.84692600046401,
-        "min_ms": 24.26362999904086,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 1.4254929992603138,
-        "median_ms": 1.261298999452265,
-        "min_ms": 1.1828349997813348,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.0507627784390194
-    },
     "stage4": {
       "lambda_ratios": [
-        1.0000048595745963
+        0.9999992142557468
       ],
-      "max_absdiff": 2.2890054372781687e-08,
+      "max_absdiff": 3.716853901047923e-09,
       "mgcv_lambda": [
         11.30341191490778
       ],
       "rust_lambda": [
-        11.303466844681173
+        11.303403033316826
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": 6.162577349957019,
-          "iter": 1,
-          "mgcv_reml": -318.362352349957,
-          "reldiff_score_scale": 3.340974276340282,
-          "rust_reml": -312.199775
-        },
-        {
-          "absdiff": 0.8521607116869632,
-          "iter": 2,
-          "mgcv_reml": -318.449052711687,
-          "reldiff_score_scale": 0.46198966039328143,
-          "rust_reml": -317.596892
-        },
-        {
-          "absdiff": 0.5925142086258575,
-          "iter": 3,
-          "mgcv_reml": -318.44957820862584,
-          "reldiff_score_scale": 0.32122513308476613,
-          "rust_reml": -317.857064
-        },
-        {
-          "absdiff": 0.5824702324021587,
-          "iter": 4,
-          "mgcv_reml": -318.44957823240213,
-          "reldiff_score_scale": 0.3157799006292603,
-          "rust_reml": -317.867108
-        },
-        {
-          "absdiff": 0.582462232402122,
-          "iter": 5,
-          "mgcv_reml": -318.44957823240213,
-          "reldiff_score_scale": 0.3157755635162611,
-          "rust_reml": -317.867116
-        }
-      ],
-      "mgcv_final_reml": -318.44957823240213,
-      "n_mgcv_iters": 5,
-      "n_rust_iters": 5,
-      "rust_final_reml": -317.867116
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 3.2065165994632494e-07,
-        "max_relerr": 1.6525025051253015e-05,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.728600050182605e-07,
-        "max_relerr": 2.249843295668007e-06,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.8311991197006439e-07,
-        "max_relerr": 2.165552629561003e-06,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.09287997899480993,
-      "beta_maxrelerr": 0.25152303014912514,
-      "beta_ok": false,
-      "deviance_actual": 3.5378623819797594,
-      "deviance_expected": 3.5378621445842695,
-      "deviance_relerr": 6.7101396332253e-08,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        5.553736337918173
-      ],
-      "lambda_expected": [
-        5.553688642000233
-      ],
-      "lambda_max_relerr": 8.588151229763097e-06,
-      "lambda_ok": true
-    },
-    "description": "Small-n version of smooth 1D",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n100_k10_cr.json",
     "name": "1d_gaussian_smooth_n100_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 23.286043000553036,
-        "median_ms": 21.016759998019552,
-        "min_ms": 17.501055997854564,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 1.0105099972861353,
-        "median_ms": 0.8511640007782262,
-        "min_ms": 0.8294779981952161,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.04049929679258044
-    },
     "stage4": {
       "lambda_ratios": [
-        1.0000085881512297
+        0.9999947915649603
       ],
-      "max_absdiff": 1.8311991197006439e-07,
+      "max_absdiff": 1.1105809634426311e-07,
       "mgcv_lambda": [
         5.553688642000233
       ],
       "rust_lambda": [
-        5.553736337918173
+        5.55365971597371
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": 3.8039592255983603,
-          "iter": 1,
-          "mgcv_reml": -8.36176922559836,
-          "reldiff_score_scale": 140.29297315555795,
-          "rust_reml": -4.55781
-        },
-        {
-          "absdiff": 0.6451059401218,
-          "iter": 2,
-          "mgcv_reml": -8.3617769401218,
-          "reldiff_score_scale": 23.792008529156217,
-          "rust_reml": -7.716671
-        },
-        {
-          "absdiff": 0.6368949401217998,
-          "iter": 3,
-          "mgcv_reml": -8.3617769401218,
-          "reldiff_score_scale": 23.489180466534407,
-          "rust_reml": -7.724882
-        },
-        {
-          "absdiff": 0.6368879401217997,
-          "iter": 4,
-          "mgcv_reml": -8.3617769401218,
-          "reldiff_score_scale": 23.488922301093123,
-          "rust_reml": -7.724889
-        }
-      ],
-      "mgcv_final_reml": -8.3617769401218,
-      "n_mgcv_iters": 3,
-      "n_rust_iters": 4,
-      "rust_final_reml": -7.724889
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 5.8380685008518896e-09,
-        "max_relerr": 4.2392845071678247e-07,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.1595983062662185e-08,
-        "max_relerr": 1.0340653285742725e-07,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.1710323821745305e-08,
-        "max_relerr": 1.0864683259779688e-07,
-        "n": 500,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.788759629221621,
-      "beta_maxrelerr": 4.646899691353828,
-      "beta_ok": false,
-      "deviance_actual": 20.582163031183654,
-      "deviance_expected": 20.58216302008782,
-      "deviance_relerr": 5.390995762107408e-10,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        5.096016211991049
-      ],
-      "lambda_expected": [
-        5.096003490705175
-      ],
-      "lambda_max_relerr": 2.4963259734195594e-06,
-      "lambda_ok": true
-    },
-    "description": "Smooth 1D sin curve, Gaussian noise, k=10 cr-spline",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n500_k10_cr.json",
     "name": "1d_gaussian_smooth_n500_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 26.883296999585582,
-        "median_ms": 25.03239100042265,
-        "min_ms": 22.393219001969555,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 2.5473249988863245,
-        "median_ms": 1.7197090019180905,
-        "min_ms": 1.6428689996246248,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.06869935044914625
-    },
     "stage4": {
       "lambda_ratios": [
-        1.0000024963259735
+        0.9999995518923789
       ],
-      "max_absdiff": 1.1710323821745305e-08,
+      "max_absdiff": 2.089316719633416e-09,
       "mgcv_lambda": [
         5.096003490705175
       ],
       "rust_lambda": [
-        5.096016211991049
+        5.096001207147173
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": -8.281400621209812,
-          "iter": 1,
-          "mgcv_reml": -52.15774737879019,
-          "reldiff_score_scale": 0.06203137247104971,
-          "rust_reml": -60.439148
-        },
-        {
-          "absdiff": 0.7030707497036701,
-          "iter": 2,
-          "mgcv_reml": -64.11322174970367,
-          "reldiff_score_scale": 0.005266312492680407,
-          "rust_reml": -63.410151
-        },
-        {
-          "absdiff": 0.6314501735897835,
-          "iter": 3,
-          "mgcv_reml": -64.31593417358978,
-          "reldiff_score_scale": 0.0047298425358794725,
-          "rust_reml": -63.684484
-        },
-        {
-          "absdiff": 0.6256178198030895,
-          "iter": 4,
-          "mgcv_reml": -64.31601281980309,
-          "reldiff_score_scale": 0.004686155613017806,
-          "rust_reml": -63.690395
-        },
-        {
-          "absdiff": 0.625613819815598,
-          "iter": 5,
-          "mgcv_reml": -64.3160128198156,
-          "reldiff_score_scale": 0.004686125651333145,
-          "rust_reml": -63.690399
-        }
-      ],
-      "mgcv_final_reml": -64.3160128198156,
-      "n_mgcv_iters": 6,
-      "n_rust_iters": 5,
-      "rust_final_reml": -63.690399
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 0.09482796798487292,
-        "max_relerr": 3.874628188284991,
-        "n": 20,
-        "ok": false,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 0.032713761050649326,
-        "max_relerr": 0.9028552171250848,
-        "n": 100,
-        "ok": false,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 0.03302029341168866,
-        "max_relerr": 0.9944232398350532,
-        "n": 500,
-        "ok": false,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 1.0047798429076886,
-      "beta_maxrelerr": 23.1400826467144,
-      "beta_ok": false,
-      "deviance_actual": 20.414949580385155,
-      "deviance_expected": 20.471427583044616,
-      "deviance_relerr": 0.0027588697676481613,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        0.35241744123458435
-      ],
-      "lambda_expected": [
-        13.581592411252654
-      ],
-      "lambda_max_relerr": 0.9740518320265157,
-      "lambda_ok": false
-    },
-    "description": "Same data, k=20 B-spline (overparameterized)",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n500_k20_bs.json",
-    "name": "1d_gaussian_smooth_n500_k20_bs",
-    "perf": {
-      "mgcv": {
-        "max_ms": 40.44691899980535,
-        "median_ms": 36.01651399731054,
-        "min_ms": 34.137374997953884,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 10.117916001036065,
-        "median_ms": 9.414440999535145,
-        "min_ms": 8.545273998606717,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.26139234352991936
-    },
-    "trajectory": {
-      "first_diverged_iter": null,
-      "iter_diffs": [
-        {
-          "absdiff": 3.7910591008799344,
-          "iter": 1,
-          "mgcv_reml": -60.934419100879936,
-          "reldiff_score_scale": 0.046272685259056645,
-          "rust_reml": -57.14336
-        },
-        {
-          "absdiff": 3.1958562607637546,
-          "iter": 2,
-          "mgcv_reml": -63.947362260763754,
-          "reldiff_score_scale": 0.0390077935881249,
-          "rust_reml": -60.751506
-        },
-        {
-          "absdiff": 2.9140205743059298,
-          "iter": 3,
-          "mgcv_reml": -63.970434574305926,
-          "reldiff_score_scale": 0.03556778021265257,
-          "rust_reml": -61.056414
-        },
-        {
-          "absdiff": 2.910483627885185,
-          "iter": 4,
-          "mgcv_reml": -63.97043562788519,
-          "reldiff_score_scale": 0.03552460916093584,
-          "rust_reml": -61.059952
-        },
-        {
-          "absdiff": 2.9104826278851874,
-          "iter": 5,
-          "mgcv_reml": -63.97043562788519,
-          "reldiff_score_scale": 0.03552459695519493,
-          "rust_reml": -61.059953
-        }
-      ],
-      "mgcv_final_reml": -63.97043562788519,
-      "n_mgcv_iters": 5,
-      "n_rust_iters": 5,
-      "rust_final_reml": -61.059953
-    }
-  },
-  {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 3.824234595661835e-09,
-        "max_relerr": 2.314544539629767e-08,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.9232422321380227e-09,
-        "max_relerr": 9.652893100996511e-08,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.9278194596239473e-09,
-        "max_relerr": 5.450951147247276e-07,
-        "n": 400,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.033044975169391054,
-      "beta_maxrelerr": 3.683759433408232,
-      "beta_ok": false,
-      "deviance_actual": 8.90397676071725,
-      "deviance_expected": 8.90397676377867,
-      "deviance_relerr": 3.438262946856399e-10,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        9.953893888943185
-      ],
-      "lambda_expected": [
-        9.95389526824169
-      ],
-      "lambda_max_relerr": 1.3856871783101895e-07,
-      "lambda_ok": true
-    },
-    "description": "Sparse data near x=0 and x=1 \u2014 stresses extrap",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_sparse_edges_n400_k10_cr.json",
     "name": "1d_gaussian_sparse_edges_n400_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 23.963117997482186,
-        "median_ms": 23.46822699837503,
-        "min_ms": 21.109591998538235,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 1.9734309971681796,
-        "median_ms": 1.561876000778284,
-        "min_ms": 1.3837340011377819,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.0665527907534911
-    },
     "stage4": {
       "lambda_ratios": [
-        0.9999998614312822
+        1.0000003296374984
       ],
-      "max_absdiff": 1.9278194596239473e-09,
+      "max_absdiff": 4.628439409515295e-09,
       "mgcv_lambda": [
         9.95389526824169
       ],
       "rust_lambda": [
-        9.953893888943185
+        9.953898549418826
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": -7.957647977398381,
-          "iter": 1,
-          "mgcv_reml": -155.89315002260162,
-          "reldiff_score_scale": 0.05933620025805197,
-          "rust_reml": -163.850798
-        },
-        {
-          "absdiff": 0.6216972920647379,
-          "iter": 2,
-          "mgcv_reml": -169.46712829206473,
-          "reldiff_score_scale": 0.004635685710980922,
-          "rust_reml": -168.845431
-        },
-        {
-          "absdiff": 0.8029158295798027,
-          "iter": 3,
-          "mgcv_reml": -169.7786818295798,
-          "reldiff_score_scale": 0.0059869416930255865,
-          "rust_reml": -168.975766
-        },
-        {
-          "absdiff": 0.801133597535312,
-          "iter": 4,
-          "mgcv_reml": -169.7789225975353,
-          "reldiff_score_scale": 0.00597365248020811,
-          "rust_reml": -168.977789
-        },
-        {
-          "absdiff": 0.8011325977641093,
-          "iter": 5,
-          "mgcv_reml": -169.7789225977641,
-          "reldiff_score_scale": 0.005973645025414373,
-          "rust_reml": -168.97779
-        }
-      ],
-      "mgcv_final_reml": -169.7789225977641,
-      "n_mgcv_iters": 6,
-      "n_rust_iters": 5,
-      "rust_final_reml": -168.97779
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 4.922021457076653e-09,
-        "max_relerr": 2.542707178108014e-07,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.0694935492772117e-09,
-        "max_relerr": 9.360571098571306e-08,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.0870626343528755e-09,
-        "max_relerr": 2.7861736634418344e-07,
-        "n": 500,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 1.5067252567865883,
-      "beta_maxrelerr": 6.977464105865285,
-      "beta_ok": false,
-      "deviance_actual": 11.14366878997978,
-      "deviance_expected": 11.143668788841321,
-      "deviance_relerr": 1.0216188565541495e-10,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        0.4147900539176205
-      ],
-      "lambda_expected": [
-        0.41478998861280547
-      ],
-      "lambda_max_relerr": 1.5744067322845277e-07,
-      "lambda_ok": true
-    },
-    "description": "Higher-frequency 1D, k=20 cr",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_wiggly_n500_k20_cr.json",
     "name": "1d_gaussian_wiggly_n500_k20_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 37.39824500007671,
-        "median_ms": 27.93623099933029,
-        "min_ms": 24.250463000498712,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 5.121748999954434,
-        "median_ms": 4.56952700187685,
-        "min_ms": 4.202164000162156,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.16356991757357656
-    },
     "stage4": {
       "lambda_ratios": [
-        1.0000001574406732
+        1.00000008740994
       ],
-      "max_absdiff": 1.0870626343528755e-09,
+      "max_absdiff": 6.022163878682818e-10,
       "mgcv_lambda": [
         0.41478998861280547
       ],
       "rust_lambda": [
-        0.4147900539176205
+        0.4147900248695735
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": null,
-      "iter_diffs": [
-        {
-          "absdiff": 0.8300905490622483,
-          "iter": 1,
-          "mgcv_reml": -170.16608654906224,
-          "reldiff_score_scale": 0.01533086351644648,
-          "rust_reml": -169.335996
-        },
-        {
-          "absdiff": 0.9864859183967951,
-          "iter": 2,
-          "mgcv_reml": -174.56605691839678,
-          "reldiff_score_scale": 0.01821931473972667,
-          "rust_reml": -173.579571
-        },
-        {
-          "absdiff": 0.6737890460865401,
-          "iter": 3,
-          "mgcv_reml": -174.61600204608655,
-          "reldiff_score_scale": 0.012444145902033136,
-          "rust_reml": -173.942213
-        },
-        {
-          "absdiff": 0.6688719525392344,
-          "iter": 4,
-          "mgcv_reml": -174.61600695253924,
-          "reldiff_score_scale": 0.012353332568287191,
-          "rust_reml": -173.947135
-        },
-        {
-          "absdiff": 0.6688709525392369,
-          "iter": 5,
-          "mgcv_reml": -174.61600695253924,
-          "reldiff_score_scale": 0.012353314099382208,
-          "rust_reml": -173.947136
-        }
-      ],
-      "mgcv_final_reml": -174.61600695253924,
-      "n_mgcv_iters": 5,
-      "n_rust_iters": 5,
-      "rust_final_reml": -173.947136
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 0.33105223777248455,
-        "max_relerr": 1.3954549774197191,
-        "n": 20,
-        "ok": false,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 0.11284450689277387,
-        "max_relerr": 0.4939909581681162,
-        "n": 100,
-        "ok": false,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 0.12475221966983929,
-        "max_relerr": 0.6735535733593495,
-        "n": 1000,
-        "ok": false,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.9307802278360808,
-      "beta_maxrelerr": 7.116068853360116,
-      "beta_ok": false,
-      "deviance_actual": 165.26568879737513,
-      "deviance_expected": 1021.5848436445498,
-      "deviance_relerr": 0.8382261739438279,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        2.6537317387438817,
-        2.6935746280196966
-      ],
-      "lambda_expected": [
-        24.147382028685495,
-        4655.448040241013
-      ],
-      "lambda_max_relerr": 0.9994214145223539,
-      "lambda_ok": false
-    },
-    "description": "Binomial logit, 2D additive",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_binomial_logit_n1000_k10_cr.json",
-    "name": "2d_binomial_logit_n1000_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 161.042556999746,
-        "median_ms": 122.65203700007987,
-        "min_ms": 104.26616799668409,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 12.941402997967089,
-        "median_ms": 12.522880999313202,
-        "min_ms": 12.148823996540159,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.10210088071594806
-    }
-  },
-  {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 54.97255651160913,
-        "max_relerr": 9.741757690136408,
-        "n": 20,
-        "ok": false,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 2.1837191623618315,
-        "max_relerr": 0.4009084959639861,
-        "n": 100,
-        "ok": false,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.912660566538233,
-        "max_relerr": 0.3725220087767365,
-        "n": 1000,
-        "ok": false,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.852782543917898,
-      "beta_maxrelerr": 1.413214969580317,
-      "beta_ok": false,
-      "deviance_actual": 3629.770693737033,
-      "deviance_expected": 258.09431436783063,
-      "deviance_relerr": 13.063737524120581,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        23.184898366097958,
-        23.184898366097958
-      ],
-      "lambda_expected": [
-        76.72187681184113,
-        59615137.79702292
-      ],
-      "lambda_max_relerr": 0.9999996110904172,
-      "lambda_ok": false
-    },
-    "description": "Gamma log, 2D additive",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gamma_log_n1000_k10_cr.json",
-    "name": "2d_gamma_log_n1000_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 311.04637200041907,
-        "median_ms": 219.83082700171508,
-        "min_ms": 199.36087200039765,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 11.219718999200268,
-        "median_ms": 9.705080999992788,
-        "min_ms": 8.711270998901455,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.04414795291616253
-    }
-  },
-  {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 3.823688476956022e-09,
-        "max_relerr": 2.3953152668948667e-09,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 8.319254174438129e-10,
-        "max_relerr": 2.632966753459847e-08,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.130415677730312e-09,
-        "max_relerr": 1.5816132723088484e-06,
-        "n": 2000,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.947220445719429,
-      "beta_maxrelerr": 129.37895916185138,
-      "beta_ok": false,
-      "deviance_actual": 78.74961727658052,
-      "deviance_expected": 78.7496172844805,
-      "deviance_relerr": 1.0031757268158229e-10,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        26.266158267245537,
-        31.689493591065165
-      ],
-      "lambda_expected": [
-        26.26616184154031,
-        31.68949515134897
-      ],
-      "lambda_max_relerr": 1.3607982752138138e-07,
-      "lambda_ok": true
-    },
-    "description": "Larger n, finer basis",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n2000_k15_cr.json",
     "name": "2d_gaussian_additive_n2000_k15_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 43.0346319990349,
-        "median_ms": 34.48405100061791,
-        "min_ms": 34.258166000654455,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 25.12783099882654,
-        "median_ms": 24.468015999445925,
-        "min_ms": 22.78451500023948,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.7095458709015217
-    },
     "stage4": {
       "lambda_ratios": [
-        0.9999998639201725,
-        0.9999999507633744
+        0.9999998390920856,
+        0.9999999430063079
       ],
-      "max_absdiff": 1.130415677730312e-09,
+      "max_absdiff": 1.316022096853331e-09,
       "mgcv_lambda": [
         26.26616184154031,
         31.68949515134897
       ],
       "rust_lambda": [
-        26.266158267245537,
-        31.689493591065165
+        26.266157615106987,
+        31.68949334524764
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": 30.54018221573284,
-          "iter": 1,
-          "mgcv_reml": -332.40958821573287,
-          "reldiff_score_scale": 1.5238767466927596,
-          "rust_reml": -301.869406
-        },
-        {
-          "absdiff": 2.6841117325441815,
-          "iter": 2,
-          "mgcv_reml": -333.0472017325442,
-          "reldiff_score_scale": 0.13393028980168264,
-          "rust_reml": -330.36309
-        },
-        {
-          "absdiff": 1.4007314203747114,
-          "iter": 3,
-          "mgcv_reml": -333.0536794203747,
-          "reldiff_score_scale": 0.06989290452796741,
-          "rust_reml": -331.652948
-        },
-        {
-          "absdiff": 1.2762547552056844,
-          "iter": 4,
-          "mgcv_reml": -333.0536807552057,
-          "reldiff_score_scale": 0.06368183826068027,
-          "rust_reml": -331.777426
-        },
-        {
-          "absdiff": 1.2757387552056798,
-          "iter": 5,
-          "mgcv_reml": -333.0536807552057,
-          "reldiff_score_scale": 0.06365609118439415,
-          "rust_reml": -331.777942
-        }
-      ],
-      "mgcv_final_reml": -333.0536807552057,
-      "n_mgcv_iters": 5,
-      "n_rust_iters": 6,
-      "rust_final_reml": -331.777942
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 3.5519358931868084e-07,
-        "max_relerr": 5.60677903238742e-07,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 8.15350975277851e-08,
-        "max_relerr": 1.6569200476125502e-06,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.000133580397744e-07,
-        "max_relerr": 2.4336224231756066e-05,
-        "n": 500,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 1.0202326602116507,
-      "beta_maxrelerr": 17.470824478674142,
-      "beta_ok": false,
-      "deviance_actual": 19.481762941152258,
-      "deviance_expected": 19.48176270526785,
-      "deviance_relerr": 1.210796018239197e-08,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        5.212322929854692,
-        6.647214809876093
-      ],
-      "lambda_expected": [
-        5.212284131534652,
-        6.647201540453615
-      ],
-      "lambda_max_relerr": 7.4436310571686405e-06,
-      "lambda_ok": true
-    },
-    "description": "2D additive sin/cos, k=10 cr per smooth",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n500_k10_cr.json",
     "name": "2d_gaussian_additive_n500_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 31.85045699865441,
-        "median_ms": 27.14370400281041,
-        "min_ms": 26.199070998700336,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 7.132483002351364,
-        "median_ms": 5.821218001074158,
-        "min_ms": 5.640367002342828,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.2144592352050199
-    },
     "stage4": {
       "lambda_ratios": [
-        1.000007443631057,
-        1.0000019962419369
+        1.0000094478157682,
+        1.000000808280837
       ],
-      "max_absdiff": 1.000133580397744e-07,
+      "max_absdiff": 1.3406302401541836e-07,
       "mgcv_lambda": [
         5.212284131534652,
         6.647201540453615
       ],
       "rust_lambda": [
-        5.212322929854692,
-        6.647214809876093
+        5.2123333762348585,
+        6.6472069132592395
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": -29.748299335452963,
-          "iter": 1,
-          "mgcv_reml": -19.788461664547036,
-          "reldiff_score_scale": 0.1050814556506359,
-          "rust_reml": -49.536761
-        },
-        {
-          "absdiff": 0.13468881761583162,
-          "iter": 2,
-          "mgcv_reml": -56.43774981761583,
-          "reldiff_score_scale": 0.0004757682735183185,
-          "rust_reml": -56.303061
-        },
-        {
-          "absdiff": 1.2409364810212296,
-          "iter": 3,
-          "mgcv_reml": -57.99513748102123,
-          "reldiff_score_scale": 0.004383424085029397,
-          "rust_reml": -56.754201
-        },
-        {
-          "absdiff": 1.2224432579698359,
-          "iter": 4,
-          "mgcv_reml": -57.99945325796983,
-          "reldiff_score_scale": 0.004318099517194475,
-          "rust_reml": -56.77701
-        },
-        {
-          "absdiff": 1.2224072959471144,
-          "iter": 5,
-          "mgcv_reml": -57.99945329594711,
-          "reldiff_score_scale": 0.004317972486682475,
-          "rust_reml": -56.777046
-        }
-      ],
-      "mgcv_final_reml": -57.99945329594711,
-      "n_mgcv_iters": 6,
-      "n_rust_iters": 5,
-      "rust_final_reml": -56.777046
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 1.471884008280517,
-        "max_relerr": 0.16376349255866893,
-        "n": 20,
-        "ok": false,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 0.9904701469997175,
-        "max_relerr": 0.09821967371990367,
-        "n": 100,
-        "ok": false,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.104595687706544,
-        "max_relerr": 0.0921924946687248,
-        "n": 1000,
-        "ok": false,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.3005189196624206,
-      "beta_maxrelerr": 3.109779732177215,
-      "beta_ok": false,
-      "deviance_actual": 6792.133926066109,
-      "deviance_expected": 1061.6453163464632,
-      "deviance_relerr": 5.39774303289963,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        94.4101365709364,
-        94.4101365709364
-      ],
-      "lambda_expected": [
-        162.69975208731023,
-        159331753.20901957
-      ],
-      "lambda_max_relerr": 0.9999994074618858,
-      "lambda_ok": false
-    },
-    "description": "Poisson log, 2D additive",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_poisson_log_n1000_k10_cr.json",
-    "name": "2d_poisson_log_n1000_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 154.32951800175942,
-        "median_ms": 139.30224999785423,
-        "min_ms": 134.34069900176837,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 9.537559002637863,
-        "median_ms": 8.120192000205861,
-        "min_ms": 7.5767550006276,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.058291894067259806
-    }
-  },
-  {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 2.588806322556536e-05,
-        "max_relerr": 0.00018878498931103305,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.9604583355148364e-05,
-        "max_relerr": 0.0006926930882608464,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.7948489162089576e-05,
-        "max_relerr": 0.0024172582844270572,
-        "n": 800,
-        "ok": false,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.15393602444605842,
-      "beta_maxrelerr": 3.995500170623146,
-      "beta_ok": false,
-      "deviance_actual": 32.27525505223666,
-      "deviance_expected": 32.27515879701945,
-      "deviance_relerr": 2.9823313283664133e-06,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        5.216582429178322,
-        3161.525426324702,
-        76555.34905177983
-      ],
-      "lambda_expected": [
-        5.216578047024413,
-        3161.4816198995723,
-        76168.05827436983
-      ],
-      "lambda_max_relerr": 0.005084687547303849,
-      "lambda_ok": true
-    },
-    "description": "3D additive: sinusoidal + quadratic + near-linear",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/3d_gaussian_mixed_n800_k10_cr.json",
     "name": "3d_gaussian_mixed_n800_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 58.77281799985212,
-        "median_ms": 52.581587002350716,
-        "min_ms": 50.366855997708626,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 37.255355000525014,
-        "median_ms": 30.83122799944249,
-        "min_ms": 28.67438800240052,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 0.5863502750128889
-    },
     "stage4": {
       "lambda_ratios": [
-        1.0000008400437739,
-        1.000013856296002,
-        1.0050846875473038
+        0.9999967457973032,
+        1.0000086397089047,
+        1.0050543892277537
       ],
-      "max_absdiff": 1.7948489162089576e-05,
+      "max_absdiff": 1.785032882531401e-05,
       "mgcv_lambda": [
         5.216578047024413,
         3161.4816198995723,
         76168.05827436983
       ],
       "rust_lambda": [
-        5.216582429178322,
-        3161.525426324702,
-        76555.34905177983
+        5.216561071222064,
+        3161.508934180476,
+        76553.04128761071
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": -331.38799404800017,
-          "iter": 1,
-          "mgcv_reml": 257.1764680480002,
-          "reldiff_score_scale": 0.5634732657616134,
-          "rust_reml": -74.211526
-        },
-        {
-          "absdiff": -24.689583365118935,
-          "iter": 2,
-          "mgcv_reml": -69.91804963488107,
-          "reldiff_score_scale": 0.04198076097778632,
-          "rust_reml": -94.607633
-        },
-        {
-          "absdiff": 6.38217881452492,
-          "iter": 3,
-          "mgcv_reml": -114.58579981452492,
-          "reldiff_score_scale": 0.010851893260725814,
-          "rust_reml": -108.203621
-        },
-        {
-          "absdiff": 2.285186175828855,
-          "iter": 4,
-          "mgcv_reml": -115.53784717582886,
-          "reldiff_score_scale": 0.0038856003853328133,
-          "rust_reml": -113.252661
-        },
-        {
-          "absdiff": 1.8470085955619027,
-          "iter": 5,
-          "mgcv_reml": -115.5786645955619,
-          "reldiff_score_scale": 0.0031405481910134906,
-          "rust_reml": -113.731656
-        }
-      ],
-      "mgcv_final_reml": -115.58082471599012,
-      "n_mgcv_iters": 8,
-      "n_rust_iters": 9,
-      "rust_final_reml": -113.76745
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 7.412816953600299e-07,
-        "max_relerr": 2.368494913955248e-05,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 4.107985631662814e-07,
-        "max_relerr": 3.116672841977805e-05,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 4.133380251403196e-07,
-        "max_relerr": 1.3604790076239913e-05,
-        "n": 1000,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.503551912982132,
-      "beta_maxrelerr": 6.27293517292868,
-      "beta_ok": false,
-      "deviance_actual": 38.71160772410746,
-      "deviance_expected": 38.711606945811866,
-      "deviance_relerr": 2.010496733954022e-08,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        5.1560742671522135,
-        4.726230604543437,
-        2972.273438076307,
-        2175151381.155167
-      ],
-      "lambda_expected": [
-        5.155883544985488,
-        4.726408394795506,
-        2972.211930531614,
-        262171987.00555438
-      ],
-      "lambda_max_relerr": 7.296658258569343,
-      "lambda_ok": false
-    },
-    "description": "4D additive mixing wiggly, smooth, quadratic, near-linear",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_gaussian_mixed_n1000_k10_cr.json",
     "name": "4d_gaussian_mixed_n1000_k10_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 68.56416699883994,
-        "median_ms": 66.56508200103417,
-        "min_ms": 61.87568599852966,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 118.5644079996564,
-        "median_ms": 115.74227299934137,
-        "min_ms": 110.79207900183974,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 1.738783601251226
-    },
     "stage4": {
       "lambda_ratios": [
-        1.0000369911703904,
-        0.999962383645843,
-        1.0000206941988425,
-        8.296658258569343
+        1.0000027251370234,
+        0.9999977866166462,
+        1.0000003334427336,
+        1.4882355991824288
       ],
-      "max_absdiff": 4.133380251403196e-07,
+      "max_absdiff": 4.933366931636485e-08,
       "mgcv_lambda": [
         5.155883544985488,
         4.726408394795506,
@@ -1552,142 +163,24 @@
         262171987.00555438
       ],
       "rust_lambda": [
-        5.1560742671522135,
-        4.726230604543437,
-        2972.273438076307,
-        2175151381.155167
+        5.155897595474625,
+        4.726397933441842,
+        2972.212921594085,
+        390173684.17005914
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": -47.07917102415492,
-          "iter": 1,
-          "mgcv_reml": -51.16855797584509,
-          "reldiff_score_scale": 0.0795293200867208,
-          "rust_reml": -98.247729
-        },
-        {
-          "absdiff": 23.53776292027058,
-          "iter": 2,
-          "mgcv_reml": -143.68265292027058,
-          "reldiff_score_scale": 0.03976158119800175,
-          "rust_reml": -120.14489
-        },
-        {
-          "absdiff": 10.055663878571806,
-          "iter": 3,
-          "mgcv_reml": -148.3970948785718,
-          "reldiff_score_scale": 0.01698670757972992,
-          "rust_reml": -138.341431
-        },
-        {
-          "absdiff": 3.775542227477871,
-          "iter": 4,
-          "mgcv_reml": -148.43368422747787,
-          "reldiff_score_scale": 0.00637790130493081,
-          "rust_reml": -144.658142
-        },
-        {
-          "absdiff": 2.613978541716392,
-          "iter": 5,
-          "mgcv_reml": -148.4400165417164,
-          "reldiff_score_scale": 0.004415709359821172,
-          "rust_reml": -145.826038
-        }
-      ],
-      "mgcv_final_reml": -148.44357475785455,
-      "n_mgcv_iters": 10,
-      "n_rust_iters": 13,
-      "rust_final_reml": -146.001021
     }
   },
   {
-    "bar_a": {
-      "extrap": {
-        "atol": 0.001,
-        "max_absdiff": 1.4302535388255322e-06,
-        "max_relerr": 5.015085312263528e-05,
-        "n": 20,
-        "ok": true,
-        "rtol": 0.05
-      },
-      "test": {
-        "atol": 1e-06,
-        "max_absdiff": 1.1817808220349058e-06,
-        "max_relerr": 2.4709644906110143e-05,
-        "n": 100,
-        "ok": true,
-        "rtol": 0.001
-      },
-      "train": {
-        "atol": 1e-06,
-        "max_absdiff": 1.2190774481002364e-06,
-        "max_relerr": 0.001664990324079411,
-        "n": 1500,
-        "ok": true,
-        "rtol": 0.001
-      }
-    },
-    "bar_b": {
-      "beta_maxabsdiff": 0.8087225411839434,
-      "beta_maxrelerr": 78.27114348148756,
-      "beta_ok": false,
-      "deviance_actual": 61.35932330497717,
-      "deviance_expected": 61.35932994545796,
-      "deviance_relerr": 1.082228374547604e-07,
-      "edf_per_smooth": "not_implemented",
-      "edf_total": "not_implemented",
-      "n_iter": "not_implemented",
-      "scale": "not_implemented",
-      "vcov": "not_implemented"
-    },
-    "bar_c": {
-      "lambda_actual": [
-        2.423885905338595,
-        1.269661062572309,
-        1618.371650621514,
-        3147.393894174744,
-        26965.851842792814
-      ],
-      "lambda_expected": [
-        2.4238864617608233,
-        1.2696613722393635,
-        1618.3740450540977,
-        3147.3475693529194,
-        26973.581296001492
-      ],
-      "lambda_max_relerr": 0.0002865564317862316,
-      "lambda_ok": true
-    },
-    "description": "5D mixed with one null dimension \u2014 infinite-\u03bb stress",
-    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/5d_gaussian_mixed_n1500_k8_cr.json",
     "name": "5d_gaussian_mixed_n1500_k8_cr",
-    "perf": {
-      "mgcv": {
-        "max_ms": 92.51716799917631,
-        "median_ms": 81.198771000345,
-        "min_ms": 74.31412000005366,
-        "n_runs": 5
-      },
-      "rust": {
-        "max_ms": 123.64744899969082,
-        "median_ms": 114.52167500101496,
-        "min_ms": 111.57048600216513,
-        "n_runs": 5
-      },
-      "rust_over_mgcv": 1.4103868025358213
-    },
     "stage4": {
       "lambda_ratios": [
-        0.9999997704421238,
-        0.9999997561026418,
-        0.9999985204702269,
-        1.0000147186863872,
-        0.9997134435682138
+        0.9999944673951484,
+        0.9999942669251767,
+        0.9999944643672608,
+        0.9999857041990082,
+        0.9996777035615476
       ],
-      "max_absdiff": 1.2190774481002364e-06,
+      "max_absdiff": 1.3470889030919864e-06,
       "mgcv_lambda": [
         2.4238864617608233,
         1.2696613722393635,
@@ -1696,56 +189,12 @@
         26973.581296001492
       ],
       "rust_lambda": [
-        2.423885905338595,
-        1.269661062572309,
-        1618.371650621514,
-        3147.393894174744,
-        26965.851842792814
+        2.4238730513548252,
+        1.269654093175716,
+        1618.3650863297496,
+        3147.302575498416,
+        26964.887806817485
       ]
-    },
-    "trajectory": {
-      "first_diverged_iter": 1,
-      "iter_diffs": [
-        {
-          "absdiff": 44.42121715857135,
-          "iter": 1,
-          "mgcv_reml": -200.87183315857135,
-          "reldiff_score_scale": 0.8551242968533274,
-          "rust_reml": -156.450616
-        },
-        {
-          "absdiff": 29.303932474092306,
-          "iter": 2,
-          "mgcv_reml": -203.24221647409232,
-          "reldiff_score_scale": 0.5641111670239404,
-          "rust_reml": -173.938284
-        },
-        {
-          "absdiff": 13.240347306874497,
-          "iter": 3,
-          "mgcv_reml": -203.4678163068745,
-          "reldiff_score_scale": 0.2548814148983809,
-          "rust_reml": -190.227469
-        },
-        {
-          "absdiff": 5.585891256987679,
-          "iter": 4,
-          "mgcv_reml": -204.05505025698767,
-          "reldiff_score_scale": 0.10753040188834756,
-          "rust_reml": -198.469159
-        },
-        {
-          "absdiff": 3.5777252700830786,
-          "iter": 5,
-          "mgcv_reml": -204.06315127008307,
-          "reldiff_score_scale": 0.06887248935554759,
-          "rust_reml": -200.485426
-        }
-      ],
-      "mgcv_final_reml": -204.0631655935046,
-      "n_mgcv_iters": 7,
-      "n_rust_iters": 8,
-      "rust_final_reml": -201.043811
     }
   }
 ]
