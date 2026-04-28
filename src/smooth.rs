@@ -9,8 +9,8 @@ pub use crate::reml::ScaleParameterMethod;
 use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
     reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
-    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
-    reml_hessian_multi_cached,
+    reml_gradient_mgcv_exact_closed_form, reml_gradient_multi_qr_adaptive,
+    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_multi_cached,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -609,13 +609,14 @@ impl SmoothingParameter {
 
             // Compute gradient and Hessian.
             // - Default mode: closed-form QR-based formulas, fast.
-            // - mgcv_exact mode: finite differences of dispatch_reml_score
-            //   so the gradient/Hessian are SELF-CONSISTENT with the score
-            //   the line search uses. Slower (O(m²) score evals per iter)
-            //   but eliminates the inconsistency that bit us in 3g.
+            // - mgcv_exact mode: closed-form gradient (matches mgcv's
+            //   gam.fit3.r:625 D1/(2σ²) + trA1/2 - det1/2 simplified
+            //   for Gaussian + canonical link via envelope theorem).
+            //   Hessian still uses finite differences for now —
+            //   replacing it with closed-form is an open task.
             let t_grad = Instant::now();
             let gradient = if self.mgcv_exact_score {
-                reml_gradient_finite_diff(self, y, x, w, &lambdas, penalties, Some(&xtwx))?
+                reml_gradient_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx))?
             } else {
                 reml_gradient_multi_qr_adaptive_cached_edf(
                     y,
@@ -735,28 +736,33 @@ impl SmoothingParameter {
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
             // mgcv uses both criteria to handle different convergence scenarios
             //
-            // NOTE: mgcv's default tolerance is 0.05-0.1 for the gradient Linf norm
-            // Using 0.05 to match mgcv's convergence behavior
-            if grad_norm_linf < 0.05 {
+            // mgcv-exact mode uses a tighter threshold (matches mgcv's
+            // score-scale-relative tolerance) so the optimizer reaches
+            // the true minimum on cases where the default 0.05 stops
+            // early. Default mode keeps 0.05 for performance.
+            let grad_tol = if self.mgcv_exact_score { 1.0e-4 } else { 0.05 };
+            if grad_norm_linf < grad_tol {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!("[PROFILE] Converged after {} iterations (gradient criterion: {:.6} < 0.05)", iter + 1, grad_norm_linf);
+                    eprintln!("[PROFILE] Converged after {} iterations (gradient criterion: {:.6} < {:.0e})", iter + 1, grad_norm_linf, grad_tol);
                 }
                 return Ok(());
             }
 
-            // REML change convergence: Stop if making negligible progress
-            // After a few iterations, if REML barely changes, we're done
-            // Use relative change to be scale-invariant
-            // Threshold 5e-4 catches convergence 1-2 iterations before the gradient criterion,
-            // avoiding expensive line search failures when Newton is essentially converged
-            if iter >= 3 && reml_change < 5e-4 {
+            // REML change convergence: Stop if making negligible progress.
+            // Default mode uses 5e-4 (catches convergence 1-2 iterations
+            // early, avoids expensive line search at the optimum).
+            // mgcv-exact mode uses 1e-7 (mgcv's default conv.tol) so we
+            // don't quit before reaching mgcv's actual minimum.
+            let reml_change_tol = if self.mgcv_exact_score { 1.0e-7 } else { 5.0e-4 };
+            if iter >= 3 && reml_change < reml_change_tol {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {
                     eprintln!(
-                        "[PROFILE] Converged after {} iterations (REML change: {:.2e} < 5e-4)",
+                        "[PROFILE] Converged after {} iterations (REML change: {:.2e} < {:.0e})",
                         iter + 1,
-                        reml_change
+                        reml_change,
+                        reml_change_tol
                     );
                 }
                 return Ok(());

@@ -485,6 +485,97 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     Ok(reml)
 }
 
+/// Closed-form gradient of the mgcv-exact REML score w.r.t. log(λ_j).
+///
+/// For Gaussian + canonical link at PIRLS convergence the cross-coupling
+/// β-dependent gradient terms cancel via envelope theorem (see Wood 2011
+/// Appendix or mgcv's `gdi.c:get_bSb` lines 145-194 — mgcv computes them
+/// explicitly but for converged Gaussian they sum to zero).
+///
+/// The surviving terms (matching gdi.c:854-891 and 506-514 simplified for
+/// Gaussian / canonical / converged):
+///   ∂Dp/∂(log λ_j) = λ_j β'S_j β
+///   ∂log|H|/∂(log λ_j) = λ_j tr(A^-1 S_j)         where A = X'X + Σλ_iS_i
+///   ∂log|λS|+/∂(log λ_j) = rank_j                  (block-diagonal penalties)
+///
+/// REML gradient assembly (gam.fit3.r:625):
+///   REML1[j] = (∂Dp/∂ρ_j)/(2σ²) + (∂log|H|/∂ρ_j)/2 - (∂log|λS|+/∂ρ_j)/2
+///            = λ_j β'S_jβ / (2σ²) + λ_j tr(A^-1 S_j)/2 - rank_j/2
+///
+/// Cost: O(p³) for one A^-1 + O(m·p²) for the m traces (vs O(m·p³) for FD).
+/// Should be ~m× faster than the FD gradient.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_closed_form(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+) -> Result<Array1<f64>> {
+    let n = y.len();
+    let m = lambdas.len();
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+
+    // A = X'WX + Σλ_jS_j (no ridge — mgcv-exact)
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+
+    // β = A^-1 X'Wy
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+
+    // RSS, σ²
+    let fitted = x.dot(&beta);
+    let rss: f64 = y
+        .iter()
+        .zip(fitted.iter())
+        .zip(w.iter())
+        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+        .sum();
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
+
+    // Per-smooth gradient
+    let mut grad = Array1::<f64>::zeros(m);
+    for (j, (lambda, penalty)) in lambdas.iter().zip(penalties_blocks.iter()).enumerate() {
+        // β' S_j β = quadratic_form on the smooth's block
+        let bsb_j = penalty.quadratic_form(&beta);
+        // tr(A^-1 S_j) — only the smooth's block contributes
+        // S_j is sparse: nonzero in [offset, offset+k) × [offset, offset+k)
+        // tr(A^-1 S_j) = Σ_{p,q in block} A^-1[p,q] S_j[p-off, q-off]
+        let block = penalty.block_view();
+        let off = penalty.offset;
+        let k = block.nrows();
+        let mut tr_a_inv_s = 0.0;
+        for p in 0..k {
+            for q in 0..k {
+                tr_a_inv_s += a_inv[[off + p, off + q]] * block[[q, p]];
+            }
+        }
+
+        let rank_j = estimate_rank_eigen(penalty);
+        // REML1[j] = λ_j β'S_jβ / (2σ²) + λ_j tr(A^-1 S_j) / 2 - rank_j/2
+        grad[j] = lambda * bsb_j / (2.0 * scale_est)
+            + lambda * tr_a_inv_s / 2.0
+            - (rank_j as f64) / 2.0;
+    }
+    Ok(grad)
+}
+
 /// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation
 pub fn reml_criterion_multi_cached(
     y: &Array1<f64>,

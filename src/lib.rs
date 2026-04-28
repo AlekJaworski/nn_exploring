@@ -610,6 +610,55 @@ impl PyGAM {
         Ok(PyArray2::from_owned_array(py, design_matrix.clone()))
     }
 
+    /// Closed-form gradient of the mgcv-exact REML score at the
+    /// given λ vector. Diagnostic — used by Stage 5 unit tests to
+    /// verify against finite-difference gradient.
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_gradient_closed_form<'py>(
+        &self,
+        py: Python<'py>,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        // Build penalties at the same offsets as fit_optimized_full
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+        let y_array = y.as_array().to_owned();
+        let grad = crate::reml::reml_gradient_mgcv_exact_closed_form(
+            &y_array,
+            design_matrix,
+            weights,
+            &lambdas,
+            &penalties,
+            None,
+        )
+        .map_err(|e| PyValueError::new_err(format!("gradient failed: {}", e)))?;
+        Ok(numpy::PyArray1::from_owned_array(py, grad))
+    }
+
     /// Per-smooth centred penalty matrix as stored on SmoothTerm.
     /// Returns a list of ndarrays, one per smooth (each is the
     /// post-centring penalty Z'SZ, after any pre-Z normalisation if
