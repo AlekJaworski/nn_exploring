@@ -649,6 +649,67 @@ impl PyGAM {
     /// per-smooth (centred) penalty matrices. Returns the same score
     /// the Newton optimiser was minimising during fit().
     ///
+    /// Evaluate this fitted GAM's REML at λ using mgcv's exact formula
+    /// (gam.fit3.r:621). For Gaussian: requires the gam to have been
+    /// fitted in mgcv_exact=True mode so the design matrix and penalties
+    /// are in the matching parameterisation.
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_mgcv_formula(
+        &self,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+    ) -> PyResult<f64> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        if lambdas.len() != self.inner.smooth_terms.len() {
+            return Err(PyValueError::new_err("lambdas length mismatch"));
+        }
+        // Build raw penalties at intercept-aware offsets.
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        // Mp = 1 (intercept) + Σ (k_j_centred - rank(S_j)) — null space per smooth.
+        let mut mp: usize = 1;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            let rank_s = crate::reml::estimate_rank(&crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            let null_dim = nb.saturating_sub(rank_s);
+            mp += null_dim;
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+        let y_array = y.as_array().to_owned();
+        crate::reml::reml_criterion_multi_cached_mgcv_exact(
+            &y_array,
+            design_matrix,
+            weights,
+            &lambdas,
+            &penalties,
+            None,
+            mp,
+        )
+        .map_err(|e| PyValueError::new_err(format!("REML evaluation failed: {}", e)))
+    }
+
     /// `mgcv_coords` controls how the input lambdas are interpreted:
     ///   - `False` (default): lambdas are in our optimizer's coordinate
     ///     system (matching what get_all_lambdas returns). The

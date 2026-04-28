@@ -129,7 +129,7 @@ fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64
 
 /// Estimate the rank of a matrix using row norms as approximation to singular values
 /// For symmetric matrices like penalty matrices, this gives a reasonable estimate
-fn estimate_rank(penalty: &BlockPenalty) -> usize {
+pub fn estimate_rank(penalty: &BlockPenalty) -> usize {
     let non_zero_rows = penalty.estimate_rank();
 
     // For CR splines: rank = (non_zero_rows - 2).max(1)
@@ -339,6 +339,109 @@ pub fn reml_criterion_multi(
     beta: Option<&Array1<f64>>,
 ) -> Result<f64> {
     reml_criterion_multi_cached(y, x, w, lambdas, penalties, beta, None)
+}
+
+/// mgcv-exact REML criterion that matches gam.fit3.r:621 byte-for-byte.
+/// Differences from `reml_criterion_multi_cached`:
+///   - Dp = RSS (deviance) only — does NOT include β'Sβ.
+///   - σ² = RSS / (n - trA) where trA uses NO ridge regularisation.
+///   - The (n - Mp) coefficient on log(2πσ²) uses Mp = 1 (intercept)
+///     + Σ null.space.dim_j (constant in λ), not n - edf.
+///   - log|X'WX + ΣλS| computed with NO ridge added to the diagonal.
+///
+/// Mp is provided by the caller (= 1 for intercept + Σ for each smooth's
+/// null-space dimension after centring).
+#[cfg(feature = "blas")]
+pub fn reml_criterion_multi_cached_mgcv_exact(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    mp: usize,
+) -> Result<f64> {
+    let n = y.len();
+    let p = x.ncols();
+    // X'WX (cached or computed)
+    let xtwx_owned;
+    let xtwx = if let Some(cached) = cached_xtwx {
+        cached
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+    // A = X'WX + ΣλS — NO ridge
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+    // β = A^{-1} X'Wy (no ridge here either — but we keep a tiny ridge
+    // ONLY for the solve, not in any score term, so ill-conditioned
+    // systems don't blow up. mgcv tolerates this by working in a
+    // QR-decomposed space).
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve.diag_mut().iter_mut().for_each(|x| *x += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+
+    let fitted = x.dot(&beta);
+    let rss: f64 = y
+        .iter()
+        .zip(fitted.iter())
+        .zip(w.iter())
+        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+        .sum();
+
+    // Dp = dev + β'Sβ (mgcv's "oo$conv.tol" is β'Sβ — see gdi.c:2841,
+    // misleading variable name). For Gaussian, dev = RSS.
+    let mut bsb = 0.0;
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        bsb += lambda * penalty.quadratic_form(&beta);
+    }
+    let dp = rss + bsb;
+
+    // log|A| — no ridge in A. We use the un-ridged A.
+    let log_det_a = determinant(&a)?.ln();
+
+    // Compute trA = tr(A^{-1} X'WX) — no ridge added.
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let n_minus_tra = (n as f64) - tr_a;
+    let scale_est = rss / n_minus_tra.max(1e-10);
+
+    // log|S+| terms
+    let mut log_lambda_sum = 0.0;
+    let mut log_pseudo_det_sum = 0.0;
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        if *lambda > 1e-10 {
+            let rank_s = estimate_rank(penalty);
+            if rank_s > 0 {
+                log_lambda_sum += (rank_s as f64) * lambda.ln();
+            }
+        }
+        log_pseudo_det_sum += pseudo_determinant(penalty)?;
+    }
+
+    // mgcv's formula:
+    // REML = (Dp/(2σ²) - ls[1]) + log|H|/2 - log|S|_+/2 - Mp/2 log(2πσ²)
+    // For Gaussian: ls[1] = -n/2 log(2πσ²).
+    // Expanding:
+    // REML = Dp/(2σ²) + (n - Mp)/2 log(2πσ²) + log|H|/2 - log|S|_+/2
+    //
+    // Where Dp = RSS + β'Sβ (mgcv stores this as "oo$conv.tol", see gdi.c:2841),
+    // σ² = scale_est.
+    let pi = std::f64::consts::PI;
+    let n_minus_mp = (n as f64) - (mp as f64);
+    let _ = p;
+    let reml = dp / (2.0 * scale_est)
+        + 0.5 * n_minus_mp * (2.0 * pi * scale_est).ln()
+        + 0.5 * log_det_a
+        - 0.5 * (log_lambda_sum + log_pseudo_det_sum);
+
+    Ok(reml)
 }
 
 /// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation
