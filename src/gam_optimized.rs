@@ -37,7 +37,18 @@ impl FitCache {
     /// `[1 | Z_1' X_1 | Z_2' X_2 | ...]` matching mgcv's lpmatrix layout.
     /// The block penalties offset by 1 to account for the unpenalized
     /// intercept.
-    fn new(x: &Array2<f64>, smooth_terms: &mut [SmoothTerm]) -> Result<Self> {
+    ///
+    /// The `mgcv_exact` flag controls whether per-smooth penalty
+    /// normalisation (`ma_xx / inf_norm_s`) is applied. mgcv does NOT
+    /// rescale the penalty matrix; with mgcv_exact=true we skip that
+    /// step so our reported λ sits in raw-Z'SZ coordinates (closer to
+    /// mgcv's but still not identical because mgcv additionally
+    /// diagonalises the penalty via nat.param — that's a follow-up).
+    fn new(
+        x: &Array2<f64>,
+        smooth_terms: &mut [SmoothTerm],
+        mgcv_exact: bool,
+    ) -> Result<Self> {
         let cache_start = Instant::now();
         let n = x.nrows();
 
@@ -162,7 +173,12 @@ impl FitCache {
                 })
                 .fold(0.0f64, f64::max);
 
-            let scale_factor = if inf_norm_s > 1e-10 {
+            // mgcv_exact mode: no penalty rescaling — λ multiplies raw
+            // Z'SZ. Default mode: rescale per smooth (mgcv-style fast
+            // numerics; not the same as mgcv's actual penalty).
+            let scale_factor = if mgcv_exact {
+                1.0
+            } else if inf_norm_s > 1e-10 {
                 ma_xx / inf_norm_s
             } else {
                 1.0
@@ -369,7 +385,7 @@ impl GAM {
         }
 
         // Build cache (design matrix, penalties, normalizations)
-        let mut cache = FitCache::new(x, &mut self.smooth_terms)?;
+        let mut cache = FitCache::new(x, &mut self.smooth_terms, self.mgcv_exact)?;
 
         // Initialize smoothing parameters with chosen algorithm.
         //
