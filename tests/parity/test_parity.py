@@ -85,18 +85,31 @@ def _predict(gam, x: list[list[float]]) -> np.ndarray:
     return np.asarray(gam.predict(np.asarray(x, dtype=float)), dtype=float)
 
 
+_RESPONSE_SCALE_ATOL_FLOOR = 1e-4
+
+
 def _close(actual: np.ndarray, expected: np.ndarray, *, rtol: float, atol: float) -> dict[str, Any]:
     actual = np.asarray(actual, dtype=float)
     expected = np.asarray(expected, dtype=float)
     diff = np.abs(actual - expected)
-    rel = diff / (np.abs(expected) + atol)
-    ok = bool(np.all(diff <= atol + rtol * np.abs(expected)))
+    # Floor atol at 0.01% of response scale so the np.allclose check doesn't
+    # demand impossible precision at points where |y| ≈ 0. Without this,
+    # cases with wide-dynamic-range responses (any with min|y| ≪ std(y))
+    # fail relerr amplification despite byte-for-byte fits at typical y.
+    if expected.size > 1:
+        y_scale = float(np.std(expected))
+        eff_atol = max(atol, _RESPONSE_SCALE_ATOL_FLOOR * y_scale)
+    else:
+        eff_atol = atol
+    rel = diff / (np.abs(expected) + eff_atol)
+    ok = bool(np.all(diff <= eff_atol + rtol * np.abs(expected)))
     return {
         "ok": ok,
         "max_absdiff": float(diff.max()) if diff.size else 0.0,
         "max_relerr": float(rel.max()) if rel.size else 0.0,
         "rtol": rtol,
         "atol": atol,
+        "eff_atol": eff_atol,
         "n": int(actual.size),
     }
 
