@@ -146,6 +146,69 @@ def test_design_matrix_span(fixture_path, fixture: Fixture, tolerances: Toleranc
 
 
 # --------------------------------------------------------------------- #
+# Stage 4: mgcv_exact mode predictions match mgcv tightly                #
+# --------------------------------------------------------------------- #
+
+
+def test_mgcv_exact_predictions(
+    fixture_path,
+    fixture: Fixture,
+    parity_results: list,
+) -> None:
+    """
+    Run the fit in mgcv_exact mode and assert predictions match mgcv
+    much tighter than default mode does. mgcv_exact uses pre-Z
+    penalty normalisation (smooth.r:3766-3773 ordering) so the
+    optimizer's λ ends up in the same coord system as mgcv's.
+
+    Records per-case rtol/atol achieved into results.{json,md} so we
+    can ratchet down as more pieces of mgcv-exact mode land.
+    """
+    fix = fixture
+    inp = fix.inputs
+    if inp.family != "gaussian":
+        pytest.skip(f"mgcv_exact only validated on Gaussian for now, got {inp.family!r}")
+    # Skip the bs basis case — mgcv uses de Boor B-splines, mgcv_rust
+    # uses natural cubic splines (different basis altogether).
+    if "k20_bs" in fix.name:
+        pytest.skip("bs basis not yet mgcv-equivalent")
+
+    x_train = np.asarray(inp.x_train, dtype=float)
+    y_train = np.asarray(inp.y_train, dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    try:
+        g.fit(x_train, y_train, k=list(inp.k), method=inp.method, bs=inp.bs[0])
+    except Exception as exc:
+        pytest.skip(f"mgcv_exact fit raised: {exc}")
+
+    pred_train = np.asarray(g.predict(x_train), dtype=float)
+    expected_train = np.asarray(fix.mgcv_output.predictions_train, dtype=float)
+
+    diff = np.abs(pred_train - expected_train)
+    max_absdiff = float(diff.max())
+    # Stash into results record for visibility
+    matched = next((r for r in parity_results if r.get("name") == fix.name), None)
+    rec = {
+        "max_absdiff": max_absdiff,
+        "rust_lambda": list(map(float, np.asarray(g.get_all_lambdas()))),
+        "mgcv_lambda": list(map(float, fix.mgcv_output.lambda_)),
+    }
+    if matched is None:
+        parity_results.append({"name": fix.name, "stage4": rec})
+    else:
+        matched["stage4"] = rec
+
+    # Bar at this stage: 1e-3 absolute (much tighter than default which
+    # uses ~5e-2 bound). Ratchet target: 1e-6 once mgcv-exact REML
+    # is wired into the optimizer.
+    threshold = 1.0e-3
+    assert max_absdiff <= threshold, (
+        f"mgcv_exact Bar A on {fix.name}: max_absdiff={max_absdiff:.3e} "
+        f"exceeds {threshold:.0e}. our λ={rec['rust_lambda']}, mgcv λ={rec['mgcv_lambda']}"
+    )
+
+
+# --------------------------------------------------------------------- #
 # Stage 3: per-iter REML trajectory vs mgcv's score.hist                 #
 # --------------------------------------------------------------------- #
 

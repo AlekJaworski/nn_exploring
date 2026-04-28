@@ -129,6 +129,36 @@ def _render_markdown(records: list[dict[str, Any]]) -> str:
             )
         )
 
+    # ---- mgcv_exact stage 4 section --------------------------------------
+    s4_records = [r for r in records if "stage4" in r]
+    if s4_records:
+        lines.append("")
+        lines.append("## mgcv_exact mode (Stage 4)")
+        lines.append("")
+        lines.append(
+            "Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. "
+            "Bar at 1e-3 absolute. λ values shown for the first smooth only."
+        )
+        lines.append("")
+        lines.append(
+            "| case | max_absdiff | our λ_0 | mgcv λ_0 | λ ratio |"
+        )
+        lines.append("|---|---|---|---|---|")
+        for r in s4_records:
+            s4 = r["stage4"]
+            ours = s4.get("rust_lambda", [None])
+            mgcvl = s4.get("mgcv_lambda", [None])
+            ratio = (mgcvl[0] / ours[0]) if (ours and ours[0] and mgcvl and mgcvl[0]) else None
+            lines.append(
+                "| {name} | {abs} | {ol} | {ml} | {ra} |".format(
+                    name=r["name"],
+                    abs=_fmt_num(s4.get("max_absdiff")),
+                    ol=_fmt_num(ours[0] if ours else None),
+                    ml=_fmt_num(mgcvl[0] if mgcvl else None),
+                    ra=_fmt_num(ratio),
+                )
+            )
+
     # ---- trajectory section -----------------------------------------------
     traj_records = [r for r in records if "trajectory" in r]
     if traj_records:
