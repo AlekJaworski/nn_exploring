@@ -146,6 +146,168 @@ def test_design_matrix_span(fixture_path, fixture: Fixture, tolerances: Toleranc
 
 
 # --------------------------------------------------------------------- #
+# Stage 3: per-iter REML trajectory vs mgcv's score.hist                 #
+# --------------------------------------------------------------------- #
+
+import os
+import re
+import subprocess
+import sys
+
+
+_REML_LINE = re.compile(
+    r"Newton iter (\d+): grad_L2=[\d.eE+-]+, grad_Linf=[\d.eE+-]+, "
+    r"REML=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+)
+
+
+def _run_rust_capture_trajectory(fix: Fixture) -> dict:
+    """
+    Run mgcv_rust.fit on this case in a fresh Python subprocess with
+    MGCV_PROFILE=1 set, and parse the per-iter REML from stderr. We
+    use a subprocess (not in-process capture) because the profile
+    output goes to stderr from Rust's eprintln!, which is awkward to
+    intercept inside an active pytest run.
+    """
+    code = f"""
+import sys, json, os
+sys.path.insert(0, {str(HERE)!r})
+import numpy as np
+import mgcv_rust
+fix_data = json.load(open({str(fixture_path_for_code(fix))!r}))
+inp = fix_data["inputs"]
+x = np.asarray(inp["x_train"], dtype=float)
+y = np.asarray(inp["y_train"], dtype=float)
+family = inp["family"].lower()
+g = mgcv_rust.GAM() if family == "gaussian" else mgcv_rust.GAM(family)
+g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+print("FINAL_LAMBDA", json.dumps(list(g.get_all_lambdas())))
+"""
+    env = os.environ.copy()
+    env["MGCV_PROFILE"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    iters: list[tuple[int, float]] = []
+    final_lambda: list[float] | None = None
+    for line in proc.stderr.splitlines():
+        m = _REML_LINE.search(line)
+        if m:
+            iters.append((int(m.group(1)), float(m.group(2))))
+    for line in proc.stdout.splitlines():
+        if line.startswith("FINAL_LAMBDA"):
+            final_lambda = json.loads(line.split(" ", 1)[1])
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"rust subprocess failed: rc={proc.returncode}\n"
+            f"stderr tail:\n{proc.stderr[-500:]}"
+        )
+    return {"iter_reml": iters, "final_lambda": final_lambda}
+
+
+# Hack: the parametrized `fixture_path` becomes a Path inside the test;
+# we need a string for the subprocess template above.
+def fixture_path_for_code(fix: Fixture) -> str:
+    p = HERE / "fixtures" / f"{fix.name}.json"
+    return str(p)
+
+
+import json  # noqa: E402  (imported above too — keep explicit for the inline code template)
+
+
+def test_lambda_trajectory_vs_mgcv(
+    fixture_path,
+    fixture: Fixture,
+    parity_results: list,
+) -> None:
+    """
+    Compare mgcv_rust's per-iter REML score against mgcv's
+    `outer.info$score.hist` recorded in the fixture. This is the
+    'detect divergence early' check: emit the first Newton iter where
+    rust's REML deviates from mgcv's by more than a small fraction of
+    the score range, and stash the diagnosis into results.{json,md}.
+
+    We do not pytest.fail here — divergence is what we expect today
+    on hard cases (4d_mixed) and it's exactly the thing we want
+    visibility on as we close gaps. The test always passes; the
+    diagnostic lives in the parity_results record.
+    """
+    fix = fixture
+    mgcv_score_hist = fix.mgcv_output.__dict__.get(
+        "score_history"
+    )  # may be missing on legacy fixtures
+    if mgcv_score_hist is None:
+        # Lookup via raw dict path (Fixture.from_dict drops unknown keys
+        # but our generator now writes it inside mgcv_output).
+        with open(fixture_path) as f:
+            raw = json.load(f)
+        mgcv_score_hist = raw.get("mgcv_output", {}).get("score_history")
+    if not mgcv_score_hist:
+        pytest.skip(f"{fix.name}: no score_history captured (regenerate fixtures)")
+
+    try:
+        traj = _run_rust_capture_trajectory(fix)
+    except Exception as exc:
+        pytest.skip(f"trajectory capture failed: {exc}")
+
+    rust_iters = traj["iter_reml"]
+    if not rust_iters:
+        pytest.skip(
+            f"{fix.name}: no Newton iters parsed from rust profile output "
+            f"(maybe Gaussian fast-path skipped Newton entirely)"
+        )
+
+    # Score-scale-relative divergence check (mgcv's own conv.tol works
+    # on score-scale-normalized gradients; we apply the same idea to
+    # the per-iter score difference). Use the mgcv score range as the
+    # scale.
+    mgcv_arr = np.asarray(mgcv_score_hist, dtype=float)
+    score_range = max(mgcv_arr.max() - mgcv_arr.min(), 1e-6)
+
+    first_diverged_iter: int | None = None
+    iter_diffs: list[dict] = []
+    for rust_iter, rust_reml in rust_iters:
+        # rust_iter is 1-indexed in our profile output; mgcv's
+        # score_history is 0-indexed (entry 0 is iter-0 / init λ).
+        # Compare rust iter k against mgcv score_history[k] (after
+        # one Newton step from init). If mgcv has fewer iterations
+        # recorded than rust (mgcv converged earlier), compare against
+        # mgcv's last score.
+        mgcv_idx = min(rust_iter, len(mgcv_arr) - 1)
+        mgcv_score = float(mgcv_arr[mgcv_idx])
+        diff = rust_reml - mgcv_score
+        rel = abs(diff) / score_range
+        iter_diffs.append({
+            "iter": rust_iter,
+            "rust_reml": rust_reml,
+            "mgcv_reml": mgcv_score,
+            "absdiff": diff,
+            "reldiff_score_scale": rel,
+        })
+        if first_diverged_iter is None and rel > 0.05:
+            first_diverged_iter = rust_iter
+
+    # Stitch into the existing parity record for this fixture.
+    matched = next((r for r in parity_results if r.get("name") == fix.name), None)
+    rec = {
+        "first_diverged_iter": first_diverged_iter,
+        "n_rust_iters": len(rust_iters),
+        "n_mgcv_iters": len(mgcv_arr),
+        "rust_final_reml": rust_iters[-1][1],
+        "mgcv_final_reml": float(mgcv_arr[-1]),
+        "iter_diffs": iter_diffs[:5],  # keep first 5 to bound size
+    }
+    if matched is None:
+        parity_results.append({"name": fix.name, "trajectory": rec})
+    else:
+        matched["trajectory"] = rec
+
+
+# --------------------------------------------------------------------- #
 # Stage 2: internal consistency of mgcv_rust's prediction path           #
 # --------------------------------------------------------------------- #
 

@@ -129,6 +129,35 @@ def _render_markdown(records: list[dict[str, Any]]) -> str:
             )
         )
 
+    # ---- trajectory section -----------------------------------------------
+    traj_records = [r for r in records if "trajectory" in r]
+    if traj_records:
+        lines.append("")
+        lines.append("## Newton trajectory vs mgcv (Stage 3)")
+        lines.append("")
+        lines.append(
+            "First Newton iter where rust's REML score diverges from mgcv's by "
+            ">5% of mgcv's score range. `—` means mgcv_rust stayed within 5% "
+            "throughout the run."
+        )
+        lines.append("")
+        lines.append(
+            "| case | rust iters | mgcv iters | first diverged | rust final REML | mgcv final REML |"
+        )
+        lines.append("|---|---|---|---|---|---|")
+        for r in traj_records:
+            t = r["trajectory"]
+            lines.append(
+                "| {name} | {nri} | {nmi} | {fdi} | {rrf} | {mrf} |".format(
+                    name=r["name"],
+                    nri=t.get("n_rust_iters", "—"),
+                    nmi=t.get("n_mgcv_iters", "—"),
+                    fdi=t.get("first_diverged_iter") if t.get("first_diverged_iter") is not None else "—",
+                    rrf=_fmt_num(t.get("rust_final_reml")),
+                    mrf=_fmt_num(t.get("mgcv_final_reml")),
+                )
+            )
+
     # ---- perf section -----------------------------------------------------
     perf_records = [r for r in records if "perf" in r]
     if perf_records:
