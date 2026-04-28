@@ -282,32 +282,51 @@ impl CubicRegressionSpline {
         Self::new(knots)
     }
 
-    /// Create cubic regression spline with quantile-based knots (like mgcv)
+    /// Create cubic regression spline with quantile-based knots (like mgcv).
+    ///
+    /// Matches mgcv's `smooth.construct.cr.smooth.spec` (smooth.r:36-43):
+    /// quantiles are computed on the **unique** values of x_data, not
+    /// the raw sample. This avoids duplicate knots when the feature
+    /// has mass concentrated at one value (e.g. ~90% zeros in
+    /// real-estate concessions data). Returns evenly-spaced fallback
+    /// when fewer than `num_knots` unique values exist (mgcv would
+    /// error in that case; we degrade gracefully).
     pub fn with_quantile_knots(x_data: &Array1<f64>, num_knots: usize) -> Self {
-        // Sort data to compute quantiles
+        // Deduplicate (sorted) using a small epsilon for float-equality.
         let mut sorted_x = x_data.to_vec();
-        sorted_x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_x.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut unique: Vec<f64> = Vec::with_capacity(sorted_x.len());
+        for &v in &sorted_x {
+            if unique.last().is_none_or(|&last| (v - last).abs() > 1e-12) {
+                unique.push(v);
+            }
+        }
 
-        let n = sorted_x.len();
+        // Fallback: not enough unique values → evenly-spaced over the
+        // observed range. mgcv stops here; we keep the call valid by
+        // degrading. Penalty matrix will still be well-conditioned.
+        if unique.len() < num_knots {
+            let lo = *unique.first().unwrap_or(&0.0);
+            let hi = *unique.last().unwrap_or(&1.0);
+            let knots = Array1::linspace(lo, hi, num_knots);
+            return Self::new(knots);
+        }
+
+        // Quantiles of unique values.
+        let n = unique.len();
         let mut knots = Vec::with_capacity(num_knots);
-
         for i in 0..num_knots {
-            // Compute quantile position
             let q = i as f64 / (num_knots - 1) as f64;
             let pos = q * (n - 1) as f64;
             let idx = pos.floor() as usize;
-
-            // Linear interpolation between data points
             let knot = if idx >= n - 1 {
-                sorted_x[n - 1]
+                unique[n - 1]
             } else {
                 let frac = pos - idx as f64;
-                sorted_x[idx] * (1.0 - frac) + sorted_x[idx + 1] * frac
+                unique[idx] * (1.0 - frac) + unique[idx + 1] * frac
             };
-
             knots.push(knot);
         }
-
         Self::new(Array1::from_vec(knots))
     }
 

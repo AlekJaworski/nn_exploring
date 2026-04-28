@@ -175,12 +175,11 @@ def _gen_8d_neighbourhoods_like(
     x4 = rng.uniform(1.0, 6.0, n)               # beds
     x5 = rng.uniform(1.0, 5.0, n)               # baths
     x6 = rng.uniform(0.0, 1.0, n)               # year_built normalised
-    # Concessions: production has 90% zeros + 10% small positive, but
-    # that creates duplicate knots in our quantile-knot cr-spline impl
-    # (current bug — not the basis library's fault). Use a continuous
-    # small-positive distribution that preserves the "tight-range, small-
-    # magnitude" character of concessions without triggering knot dupes.
-    x7 = rng.uniform(0.0, 0.05, n)
+    # Concessions: production-realistic — 90% zero, 10% small positive.
+    # Our quantile-knot cr-spline handles this correctly after the 4f
+    # dedup fix (knots = quantiles of unique values, matching
+    # mgcv's smooth.construct.cr.smooth.spec).
+    x7 = np.where(rng.uniform(0, 1, n) < 0.9, 0.0, rng.uniform(0.0, 0.05, n))
 
     # Synthetic price-adjustment-like target
     days_decay = -0.0001 * x0                    # near-linear depreciation
@@ -395,10 +394,9 @@ CASES: list[Case] = [
         n=15000,
         d=8,
         # Order: days, quality, condition, sqft, beds, baths, year, concessions.
-        # Production uses k=3 for concessions; our cr-spline penalty
-        # construction crashes on k=3 (penalty.rs:25 — needs ≥4 knots).
-        # Use k=4 here and track the k=3 bug as a separate followup.
-        k=[25, 12, 12, 6, 6, 6, 6, 4],
+        # k mapping matches neighbourhoods/ml_service/gam_logic.py:21-50
+        # exactly (term_k_mapping plus k_default=6).
+        k=[25, 12, 12, 6, 6, 6, 6, 3],
         bs=["cr"] * 8,
         family="gaussian", link="identity", method="REML",
         generator=_gen_8d_neighbourhoods_like,

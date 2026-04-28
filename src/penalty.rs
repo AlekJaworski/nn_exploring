@@ -12,10 +12,25 @@ fn solve_tridiagonal_symmetric(a: &[f64], b: &[f64], d: &Array2<f64>) -> Result<
     let n = a.len();
     let m = d.ncols();
 
-    if b.len() != n - 1 || d.nrows() != n {
+    if n == 0 || d.nrows() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Tridiagonal system has zero rows".to_string(),
+        ));
+    }
+    if b.len() + 1 != n {
         return Err(GAMError::DimensionMismatch(
             "Tridiagonal system dimensions don't match".to_string(),
         ));
+    }
+
+    // Special case: 1×1 system (happens for cr-spline penalty at k=3,
+    // where n2 = k - 2 = 1). System is just a[0] x = d[0].
+    if n == 1 {
+        let mut x = Array2::<f64>::zeros((1, m));
+        for j in 0..m {
+            x[[0, j]] = d[[0, j]] / a[0];
+        }
+        return Ok(x);
     }
 
     // Forward elimination
