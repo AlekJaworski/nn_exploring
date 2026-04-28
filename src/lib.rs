@@ -163,7 +163,10 @@ impl PyGAM {
             }
         };
         let mut g = GAM::new(fam);
-        let exact = mgcv_exact.unwrap_or(false);
+        // Default flipped to mgcv_exact=True after Parity 3j: byte-for-
+        // byte mgcv reproduction is the documented intent. Pass
+        // `mgcv_exact=False` explicitly for the legacy fast path.
+        let exact = mgcv_exact.unwrap_or(true);
         g.mgcv_exact = exact;
         Ok(PyGAM { inner: g, mgcv_exact: exact })
     }
