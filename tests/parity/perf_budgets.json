@@ -18,5 +18,6 @@
   "1d_gaussian_sparse_edges_n400_k10_cr":  5.0,
   "1d_gaussian_sigmoid_n300_k10_cr":       8.0,
   "3d_gaussian_mixed_n800_k10_cr":        80.0,
-  "5d_gaussian_mixed_n1500_k8_cr":       250.0
+  "5d_gaussian_mixed_n1500_k8_cr":       250.0,
+  "8d_neighbourhoods_like_n15000":      1500.0
 }

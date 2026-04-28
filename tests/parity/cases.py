@@ -145,6 +145,68 @@ def _gen_5d_mixed(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndar
     return x, y
 
 
+def _gen_8d_neighbourhoods_like(
+    rng: np.random.Generator, n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Mirror the production GAM call from neighbourhoods/ml_service:
+    8 features, ~15k rows, mix of date / quality / condition / size /
+    binary-like / monotone / near-linear / mostly-zero. Targets are
+    real-estate-like sale-price proxies on the response (Gaussian)
+    scale.
+
+    Feature design (matches gam_logic.py:21-50):
+      x0  days_ago_for_adjustments    ~ U[0, 1825]   (5-year window)
+      x1  quality                     ~ U[1, 10]
+      x2  condition                   ~ U[1, 10]
+      x3  sqft (normalised)           ~ Beta(2,5)·1
+      x4  bedrooms (continuous proxy) ~ U[1, 6]
+      x5  bathrooms                   ~ U[1, 5]
+      x6  year_built (normalised)     ~ U[0, 1]
+      x7  concessions                 ~ 90% zero, 10% U[0, 0.05]
+
+    The target uses depreciation (date), bumpy quality non-linearity,
+    monotone size effect, etc. — patterns we know cause distinct λ
+    behaviour (some saturating, some not).
+    """
+    x0 = rng.uniform(0.0, 1825.0, n)            # days
+    x1 = rng.uniform(1.0, 10.0, n)              # quality
+    x2 = rng.uniform(1.0, 10.0, n)              # condition
+    x3 = rng.beta(2.0, 5.0, n)                  # sqft proxy
+    x4 = rng.uniform(1.0, 6.0, n)               # beds
+    x5 = rng.uniform(1.0, 5.0, n)               # baths
+    x6 = rng.uniform(0.0, 1.0, n)               # year_built normalised
+    # Concessions: production has 90% zeros + 10% small positive, but
+    # that creates duplicate knots in our quantile-knot cr-spline impl
+    # (current bug — not the basis library's fault). Use a continuous
+    # small-positive distribution that preserves the "tight-range, small-
+    # magnitude" character of concessions without triggering knot dupes.
+    x7 = rng.uniform(0.0, 0.05, n)
+
+    # Synthetic price-adjustment-like target
+    days_decay = -0.0001 * x0                    # near-linear depreciation
+    quality_eff = 0.04 * (x1 ** 2) - 0.08 * x1   # convex
+    condition_eff = 0.06 * np.tanh((x2 - 5.0))   # sigmoid-ish
+    sqft_eff = 0.4 * x3                          # monotone
+    beds_eff = 0.05 * x4                         # mostly linear
+    baths_eff = 0.04 * x5
+    year_eff = 0.3 * (x6 - 0.5) ** 2             # quadratic dip
+    concessions_eff = 2.0 * x7                   # linear, sparse
+
+    x = np.column_stack([x0, x1, x2, x3, x4, x5, x6, x7])
+    y = (
+        days_decay
+        + quality_eff
+        + condition_eff
+        + sqft_eff
+        + beds_eff
+        + baths_eff
+        + year_eff
+        + concessions_eff
+        + rng.normal(0, 0.1, n)
+    )
+    return x, y
+
+
 # --------------------------------------------------------------------- #
 # Case definition                                                        #
 # --------------------------------------------------------------------- #
@@ -321,6 +383,25 @@ CASES: list[Case] = [
         seed=54, n=1500, d=5, k=[8, 8, 8, 8, 8], bs=["cr"] * 5,
         family="gaussian", link="identity", method="REML",
         generator=_gen_5d_mixed,
+    ),
+
+    # Production-shape big case: mirrors neighbourhoods/ml_service feature
+    # adjuster (gam_logic.py:21-77) — 8 features, k mapping matches
+    # term_k_mapping for date-like / quality / condition / concessions.
+    Case(
+        name="8d_neighbourhoods_like_n15000",
+        description="Production GAM call: 8 features, 15k rows, mixed k",
+        seed=2025,
+        n=15000,
+        d=8,
+        # Order: days, quality, condition, sqft, beds, baths, year, concessions.
+        # Production uses k=3 for concessions; our cr-spline penalty
+        # construction crashes on k=3 (penalty.rs:25 — needs ≥4 knots).
+        # Use k=4 here and track the k=3 bug as a separate followup.
+        k=[25, 12, 12, 6, 6, 6, 6, 4],
+        bs=["cr"] * 8,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_8d_neighbourhoods_like,
     ),
 ]
 
