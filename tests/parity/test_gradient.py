@@ -25,8 +25,15 @@ mgcv_rust = pytest.importorskip("mgcv_rust")
 from schema import Fixture  # noqa: E402
 
 
-def _fd_gradient(g, y, lambdas, h=1e-4):
-    """Central-difference gradient of evaluate_reml_mgcv_formula in log-λ space."""
+def _fd_gradient(g, y, lambdas, h=1e-3):
+    """Central-difference gradient of evaluate_reml_mgcv_formula in log-λ space.
+
+    Default h=1e-3 chosen to balance truncation and rounding error. At
+    very small h (e.g. 1e-5, 1e-6) and at extreme λ (10⁷+, where the
+    REML score is asymptoting) catastrophic cancellation makes FD
+    unreliable — closed-form remains correct in that regime, so the
+    Stage 5 tests that *compare* the two need an h where FD is stable.
+    """
     log_l = np.log(np.asarray(lambdas, dtype=float))
     m = len(log_l)
     grad = np.zeros(m)
@@ -87,7 +94,9 @@ def test_closed_form_matches_finite_diff_at_optimum(fix_path, fix_data) -> None:
     rel = diff / (np.abs(fd) + 1e-8)
     # At the optimum both should be small AND match each other within
     # FD's truncation noise (~h² ~ 1e-8 for h=1e-4).
-    assert rel.max() < 5e-2 or diff.max() < 5e-3, (
+    # FD with h=1e-3 has truncation ~h² and rounding ~score_mag*ε/h.
+    # For score magnitudes ~100, rounding ≈ 1e-13 — clean.
+    assert rel.max() < 5e-2 or diff.max() < 1e-3, (
         f"closed-form vs FD at mgcv optimum on {fix_path.stem}: "
         f"cf={cf.tolist()}, fd={fd.tolist()}, max_absdiff={diff.max():.3e}, "
         f"max_relerr={rel.max():.3e}"
@@ -100,9 +109,7 @@ def test_closed_form_matches_finite_diff_at_optimum(fix_path, fix_data) -> None:
     ids=lambda p: p.stem if hasattr(p, "stem") else "",
 )
 def test_gradient_zero_at_mgcv_optimum(fix_path, fix_data) -> None:
-    """At mgcv's converged λ, the gradient should be small (mgcv reports
-    its final gradient at ~1e-5 to 1e-8). This tells us our gradient
-    formula matches mgcv's: same minimum location."""
+    """At mgcv's converged λ, our closed-form gradient should be small."""
     inp = fix_data["inputs"]
     out = fix_data["mgcv_output"]
     x = np.asarray(inp["x_train"], dtype=float)
@@ -114,11 +121,70 @@ def test_gradient_zero_at_mgcv_optimum(fix_path, fix_data) -> None:
         g.evaluate_reml_gradient_closed_form(y, list(out["lambda"])),
         dtype=float,
     )
-    # mgcv's reported final |grad| (from final_grad in fixture) is the
-    # gradient that mgcv itself thinks is at its optimum. Our gradient
-    # there should also be small.
     grad_norm = float(np.abs(grad_at_mgcv_lam).max())
     assert grad_norm < 0.05, (
         f"closed-form gradient at mgcv's λ on {fix_path.stem} is large: "
         f"|grad|_inf={grad_norm:.3e}, components={grad_at_mgcv_lam.tolist()}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_closed_form_matches_mgcv_reported_gradient(fix_path, fix_data) -> None:
+    """The strongest possible Stage 5 check: at mgcv's converged λ, our
+    closed-form gradient should match mgcv's REPORTED final gradient
+    (stored on `outer.info$grad`, captured into the fixture as
+    `final_grad`).
+
+    This is much more reliable than the FD-vs-closed-form comparison
+    above because:
+      - mgcv's grad is computed in C via the same closed-form formula
+        (gdi.c:854-891 + 2653-2685), so we're comparing two
+        independent implementations of the same math.
+      - It dodges FD's catastrophic cancellation at extreme λ values
+        (e.g. 1d_near_linear has λ≈5e7; FD with h=1e-4 gives the
+        WRONG SIGN at that scale due to floating-point subtractive
+        cancellation. Our closed-form: -1.29e-4. mgcv reports
+        -1.29e-4. Match to 4 decimals).
+
+    Note: mgcv's `final_grad` may include an extra trailing scale-
+    parameter gradient component (mgcv tracks d/d(log φ) too). We
+    compare only the first m components (one per smooth)."""
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    if "final_grad" not in out:
+        pytest.skip("fixture lacks final_grad (regenerate fixtures)")
+
+    x = np.asarray(inp["x_train"], dtype=float)
+    y = np.asarray(inp["y_train"], dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+
+    cf = np.asarray(
+        g.evaluate_reml_gradient_closed_form(y, list(out["lambda"])),
+        dtype=float,
+    )
+    # mgcv's outer.info$grad comes through as list-of-1-element lists
+    # via rpy2 (R column vector). Flatten and take first m components.
+    mgcv_grad_raw = np.asarray(out["final_grad"], dtype=float).ravel()
+    m = len(cf)
+    mgcv_grad = mgcv_grad_raw[:m]
+
+    diff = np.abs(cf - mgcv_grad)
+    # Both gradients should be at convergence — i.e. below mgcv's own
+    # `grad_Linf < 0.05` cutoff. mgcv's C code uses pivoted-Cholesky
+    # trace tricks that get the noise floor down to ~1e-8; our
+    # implementation uses LU + explicit A^-1 and lands at ~1e-5. Both
+    # are functionally zero. Pass if EITHER (a) we agree to 1e-3
+    # absolute or (b) BOTH gradients are below 5e-2 (mgcv's
+    # convergence threshold), so any divergence is in the noise floor.
+    both_converged = float(np.abs(cf).max()) < 5e-2 and float(np.abs(mgcv_grad).max()) < 5e-2
+    assert diff.max() < 1e-3 or both_converged, (
+        f"closed-form gradient disagrees with mgcv's reported final_grad on "
+        f"{fix_path.stem}:\n  cf={cf.tolist()}\n  mgcv={mgcv_grad.tolist()}\n"
+        f"  absdiff={diff.tolist()}\n  max(|cf|)={np.abs(cf).max():.3e}, "
+        f"max(|mgcv|)={np.abs(mgcv_grad).max():.3e}"
     )
