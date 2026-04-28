@@ -1,0 +1,648 @@
+[
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.06642158289870204,
+        "max_relerr": 0.12644106426782267,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.02324047881102237,
+        "max_relerr": 0.04574061967677314,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.023889989641501685,
+        "max_relerr": 0.04458476480733871,
+        "n": 500,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 1.9949127870900845,
+      "beta_maxrelerr": 11.880036355008592,
+      "beta_ok": false,
+      "deviance_actual": 4.681234939689643,
+      "deviance_expected": 4.781734200752369,
+      "deviance_relerr": 0.021017324854006432,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        1.3420678401021053
+      ],
+      "lambda_expected": [
+        49002768.779082626
+      ],
+      "lambda_max_relerr": 0.999999972612408,
+      "lambda_ok": false
+    },
+    "description": "Linear-with-noise; tests very-high-lambda regime",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_near_linear_n500_k10_cr.json",
+    "name": "1d_gaussian_near_linear_n500_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.0158580702199429,
+        "max_relerr": 1.0884295133979522,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.014148367127348793,
+        "max_relerr": 0.12368987331695572,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.01392661399229278,
+        "max_relerr": 0.05260918808829899,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.22343397666804565,
+      "beta_maxrelerr": 4.642751856073297,
+      "beta_ok": false,
+      "deviance_actual": 3.51795589638664,
+      "deviance_expected": 3.5378621445842695,
+      "deviance_relerr": 0.00562663195571417,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        3.5161925114632866
+      ],
+      "lambda_expected": [
+        5.553688642000233
+      ],
+      "lambda_max_relerr": 0.3668725889903535,
+      "lambda_ok": false
+    },
+    "description": "Small-n version of smooth 1D",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n100_k10_cr.json",
+    "name": "1d_gaussian_smooth_n100_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.02494663018840182,
+        "max_relerr": 1.8059600058947651,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.006708557331134735,
+        "max_relerr": 0.09688677174056551,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.007082326964864938,
+        "max_relerr": 0.12226737746506015,
+        "n": 500,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.7390565644739876,
+      "beta_maxrelerr": 4.698583704715355,
+      "beta_ok": false,
+      "deviance_actual": 20.59722139702278,
+      "deviance_expected": 20.58216302008782,
+      "deviance_relerr": 0.0007316226637726453,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        3.782435236641586
+      ],
+      "lambda_expected": [
+        5.096003490705175
+      ],
+      "lambda_max_relerr": 0.2577643944827479,
+      "lambda_ok": false
+    },
+    "description": "Smooth 1D sin curve, Gaussian noise, k=10 cr-spline",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n500_k10_cr.json",
+    "name": "1d_gaussian_smooth_n500_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.11005406590626221,
+        "max_relerr": 3.8570612654423577,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.032540735178459845,
+        "max_relerr": 0.8980799388817172,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.03284752484192366,
+        "max_relerr": 0.9892202248664894,
+        "n": 500,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.9352625899404539,
+      "beta_maxrelerr": 23.866911534462627,
+      "beta_ok": false,
+      "deviance_actual": 20.397699725796837,
+      "deviance_expected": 20.471427583044616,
+      "deviance_relerr": 0.0036015005279281666,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        0.2542625668995807
+      ],
+      "lambda_expected": [
+        13.581592411252654
+      ],
+      "lambda_max_relerr": 0.9812788840070832,
+      "lambda_ok": false
+    },
+    "description": "Same data, k=20 B-spline (overparameterized)",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n500_k20_bs.json",
+    "name": "1d_gaussian_smooth_n500_k20_bs"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.011694178209908035,
+        "max_relerr": 0.34089367221491906,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.028876038246360675,
+        "max_relerr": 0.8811433132671836,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.03228000373374923,
+        "max_relerr": 2.604125564073534,
+        "n": 500,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 1.6754486953763619,
+      "beta_maxrelerr": 7.49556763164835,
+      "beta_ok": false,
+      "deviance_actual": 11.150597762869996,
+      "deviance_expected": 11.143668788841321,
+      "deviance_relerr": 0.0006217857116870863,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        0.4291663967157422
+      ],
+      "lambda_expected": [
+        0.41478998861280547
+      ],
+      "lambda_max_relerr": 0.03465948672246447,
+      "lambda_ok": true
+    },
+    "description": "Higher-frequency 1D, k=20 cr",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_wiggly_n500_k20_cr.json",
+    "name": "1d_gaussian_wiggly_n500_k20_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.32925446841585077,
+        "max_relerr": 1.3678732071364652,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.11124483319749257,
+        "max_relerr": 0.4902557422257154,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.12338208061309941,
+        "max_relerr": 0.6769939276698407,
+        "n": 1000,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_ok": false,
+      "beta_shape_mismatch": {
+        "mgcv": [
+          19
+        ],
+        "rust": [
+          20
+        ]
+      },
+      "deviance_actual": 165.2849201561679,
+      "deviance_expected": 1021.5848436445498,
+      "deviance_relerr": 0.8382073489202262,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        2.662599491838286,
+        2.917099451823592
+      ],
+      "lambda_expected": [
+        24.147382028685495,
+        4655.448040241013
+      ],
+      "lambda_max_relerr": 0.9993734009215421,
+      "lambda_ok": false
+    },
+    "description": "Binomial logit, 2D additive",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_binomial_logit_n1000_k10_cr.json",
+    "name": "2d_binomial_logit_n1000_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 52.16064953732794,
+        "max_relerr": 9.243456026016656,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 2.1930928873749007,
+        "max_relerr": 0.40262941597116547,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 1.8827110658616037,
+        "max_relerr": 0.36668885241375926,
+        "n": 1000,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_ok": false,
+      "beta_shape_mismatch": {
+        "mgcv": [
+          19
+        ],
+        "rust": [
+          20
+        ]
+      },
+      "deviance_actual": 3628.1320510332785,
+      "deviance_expected": 258.09431436783063,
+      "deviance_relerr": 13.057388516751828,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        22.278792341284447,
+        22.278792341284447
+      ],
+      "lambda_expected": [
+        76.72187681184113,
+        59615137.79702292
+      ],
+      "lambda_max_relerr": 0.999999626289678,
+      "lambda_ok": false
+    },
+    "description": "Gamma log, 2D additive",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gamma_log_n1000_k10_cr.json",
+    "name": "2d_gamma_log_n1000_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.015525257666952674,
+        "max_relerr": 0.009725658074983401,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.00442445017240467,
+        "max_relerr": 0.17181946650413177,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.0056175973592661466,
+        "max_relerr": 15.72180974125679,
+        "n": 2000,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_ok": false,
+      "beta_shape_mismatch": {
+        "mgcv": [
+          29
+        ],
+        "rust": [
+          30
+        ]
+      },
+      "deviance_actual": 78.77153436693055,
+      "deviance_expected": 78.7496172844805,
+      "deviance_relerr": 0.000278313510666149,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        30.681209229169603,
+        37.621040484785475
+      ],
+      "lambda_expected": [
+        26.26616184154031,
+        31.68949515134897
+      ],
+      "lambda_max_relerr": 0.18717702207332282,
+      "lambda_ok": false
+    },
+    "description": "Larger n, finer basis",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n2000_k15_cr.json",
+    "name": "2d_gaussian_additive_n2000_k15_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.034564431661403994,
+        "max_relerr": 0.05456042466230273,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.017722327877015824,
+        "max_relerr": 0.2981406650217674,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.017266712628005942,
+        "max_relerr": 4.1760809122012335,
+        "n": 500,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_ok": false,
+      "beta_shape_mismatch": {
+        "mgcv": [
+          19
+        ],
+        "rust": [
+          20
+        ]
+      },
+      "deviance_actual": 19.51704602470069,
+      "deviance_expected": 19.48176270526785,
+      "deviance_relerr": 0.0018110948155270594,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        3.3959458307570283,
+        4.287479154832091
+      ],
+      "lambda_expected": [
+        5.212284131534652,
+        6.647201540453615
+      ],
+      "lambda_max_relerr": 0.3549948608088228,
+      "lambda_ok": false
+    },
+    "description": "2D additive sin/cos, k=10 cr per smooth",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n500_k10_cr.json",
+    "name": "2d_gaussian_additive_n500_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 1.4980071854254895,
+        "max_relerr": 0.16666998702557134,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 1.0423640795031908,
+        "max_relerr": 0.09753133190224107,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 1.1204421622622274,
+        "max_relerr": 0.09324567607293852,
+        "n": 1000,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_ok": false,
+      "beta_shape_mismatch": {
+        "mgcv": [
+          19
+        ],
+        "rust": [
+          20
+        ]
+      },
+      "deviance_actual": 6797.903908961242,
+      "deviance_expected": 1061.6453163464632,
+      "deviance_relerr": 5.403177976949485,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        90.72042475078547,
+        90.72042475078547
+      ],
+      "lambda_expected": [
+        162.69975208731023,
+        159331753.20901957
+      ],
+      "lambda_max_relerr": 0.9999994306193027,
+      "lambda_ok": false
+    },
+    "description": "Poisson log, 2D additive",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_poisson_log_n1000_k10_cr.json",
+    "name": "2d_poisson_log_n1000_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "max_absdiff": 0.11379921734596238,
+        "max_relerr": 2.4080989822183287,
+        "n": 20,
+        "ok": false,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "max_absdiff": 0.051161683859403256,
+        "max_relerr": 2.936890929304921,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "max_absdiff": 0.0649518727253493,
+        "max_relerr": 4.524215218933671,
+        "n": 1000,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_ok": false,
+      "beta_shape_mismatch": {
+        "mgcv": [
+          37
+        ],
+        "rust": [
+          40
+        ]
+      },
+      "deviance_actual": 38.45949535472152,
+      "deviance_expected": 38.711606945811866,
+      "deviance_relerr": 0.006512558144208555,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        4.113611655477834,
+        3.7533692179396656,
+        1.465182726540575,
+        1.465182726540575
+      ],
+      "lambda_expected": [
+        5.155883544985488,
+        4.726408394795506,
+        2972.211930531614,
+        262171987.00555438
+      ],
+      "lambda_max_relerr": 0.9999999944113681,
+      "lambda_ok": false
+    },
+    "description": "4D additive mixing wiggly, smooth, quadratic, near-linear",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_gaussian_mixed_n1000_k10_cr.json",
+    "name": "4d_gaussian_mixed_n1000_k10_cr"
+  }
+]

@@ -125,12 +125,20 @@ class Fixture:
 class Tolerances:
     """Per-bar tolerance profile. All comparisons use np.allclose semantics."""
 
-    # Bar A: predictions
+    # Bar A: predictions.
+    # These are the target tolerances. Failures here are diagnosed via
+    # the stage tests in test_stages.py — first see whether the gap is
+    # in the basis (test_design_matrix), the parameterization
+    # (test_pred_at_mgcv_beta), or the optimizer (test_lambda).
     pred_rtol: float = 1e-3
     pred_atol: float = 1e-6
     # Extrapolation tolerances are looser (compounded by lambda diff)
     pred_extrap_rtol: float = 5e-2
     pred_extrap_atol: float = 1e-3
+
+    # Stage tolerances (the no-optimizer-involved checks should be tight)
+    design_matrix_rtol: float = 1e-6
+    design_matrix_atol: float = 1e-9
 
     # Bar B: fitted model
     beta_rtol: float = 1e-3

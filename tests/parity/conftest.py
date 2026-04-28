@@ -91,34 +91,48 @@ def _write_results(records: list[dict[str, Any]]) -> None:
 
 
 def _render_markdown(records: list[dict[str, Any]]) -> str:
-    lines: list[str] = ["# Parity results", ""]
-    lines.append("| case | Bar A train | Bar A test | Bar A extrap | β maxabsdiff | dev rel | λ relerr |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines: list[str] = [
+        "# Parity results",
+        "",
+        "Bar A is `ok` flag from `predict()` agreement at the given tolerance "
+        "(rtol/atol from `schema.Tolerances`). The `max_absdiff` / `max_relerr` "
+        "columns give the actual numbers so ratchets are easy to see. Bar B "
+        "and C are tracked, not blocking.",
+        "",
+    ]
+    lines.append(
+        "| case | A train | A test | A extrap | train abs | train rel | "
+        "extrap abs | β maxabsdiff | dev rel | λ relerr |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for r in records:
         a = r["bar_a"]
         b = r["bar_b"]
         c = r["bar_c"]
         lines.append(
-            f"| {r['name']} "
-            f"| {_fmt_pass(a['train'])} "
-            f"| {_fmt_pass(a['test'])} "
-            f"| {_fmt_pass(a['extrap'])} "
-            f"| {_fmt_num(b.get('beta_maxabsdiff'))} "
-            f"| {_fmt_num(b.get('deviance_relerr'))} "
-            f"| {_fmt_num(c.get('lambda_max_relerr'))} "
-            f"|"
+            "| {name} | {atr} | {ate} | {aex} | {tabs} | {trel} | {eabs} "
+            "| {bma} | {dr} | {lr} |".format(
+                name=r["name"],
+                atr=_fmt_ok(a["train"].get("ok")),
+                ate=_fmt_ok(a["test"].get("ok")),
+                aex=_fmt_ok(a["extrap"].get("ok")),
+                tabs=_fmt_num(a["train"].get("max_absdiff")),
+                trel=_fmt_num(a["train"].get("max_relerr")),
+                eabs=_fmt_num(a["extrap"].get("max_absdiff")),
+                bma=_fmt_num(b.get("beta_maxabsdiff")),
+                dr=_fmt_num(b.get("deviance_relerr")),
+                lr=_fmt_num(c.get("lambda_max_relerr")),
+            )
         )
     return "\n".join(lines) + "\n"
 
 
-def _fmt_pass(v: Any) -> str:
-    if v is None:
-        return "—"
+def _fmt_ok(v: Any) -> str:
     if v is True:
         return "✓"
     if v is False:
         return "✗"
-    return str(v)
+    return "—"
 
 
 def _fmt_num(v: Any) -> str:
