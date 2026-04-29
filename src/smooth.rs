@@ -603,10 +603,13 @@ impl SmoothingParameter {
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter().map(|l| l.ln()).collect();
 
-        // Maximum step size in log space (following Wood 2011 and mgcv)
-        // This prevents overly aggressive Newton steps that require excessive backtracking
-        // max_step=4 means we clamp λ_new/λ_old to [e^-4, e^4] = [0.018, 54.6]
-        let max_step = 4.0; // Conservative step size to match mgcv
+        // Maximum step size in log space. mgcv's `newton` uses
+        // `maxNstep=5` (gam.fit3.r:1411) — slightly larger than our
+        // historical 4. For saturating-λ smooths the Newton direction is
+        // small in magnitude (huge Hessian eigenvalue) so the cap rarely
+        // bites, but at very high n the cap can prevent reaching mgcv's
+        // converged saturating λ in one step.
+        let max_step = 5.0;
 
         // OPTIMIZATION: Armijo constant for line search
         // Accepts steps with "sufficient decrease": f(x + αd) ≤ f(x) + c₁·α·∇f'·d
@@ -777,11 +780,17 @@ impl SmoothingParameter {
             }
 
             // REML change convergence: Stop if making negligible progress.
-            // Default mode uses 5e-4 (catches convergence 1-2 iterations
-            // early, avoids expensive line search at the optimum).
-            // mgcv-exact mode uses 1e-7 (mgcv's default conv.tol) so we
-            // don't quit before reaching mgcv's actual minimum.
-            let reml_change_tol = if self.mgcv_exact_score { 1.0e-7 } else { 5.0e-4 };
+            // mgcv-exact mode mirrors mgcv's score-relative test
+            // (gam.fit3.r:1645): `|Δscore| > score.scale·conv.tol`. With
+            // score.scale ≈ |REML|+1 and conv.tol = √ε the absolute
+            // threshold is ~|REML|*1.5e-8. The `reml_change` we compute
+            // is *relative* to |prev_reml|, so the equivalent test is
+            // `reml_change < conv.tol ≈ 1.5e-8`.
+            let reml_change_tol = if self.mgcv_exact_score {
+                (f64::EPSILON).sqrt()
+            } else {
+                5.0e-4
+            };
             if iter >= 3 && reml_change < reml_change_tol {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {

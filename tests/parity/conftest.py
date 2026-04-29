@@ -79,7 +79,6 @@ _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
-        "8d_neighbourhoods_like_n15000": _8D_15K_PARITY_REASON,
         "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
     },
     "test_design_matrix_span": {

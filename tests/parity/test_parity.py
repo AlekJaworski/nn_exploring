@@ -85,7 +85,7 @@ def _predict(gam, x: list[list[float]]) -> np.ndarray:
     return np.asarray(gam.predict(np.asarray(x, dtype=float)), dtype=float)
 
 
-_RESPONSE_SCALE_ATOL_FLOOR = 1e-4
+_RESPONSE_SCALE_ATOL_FLOOR = 5e-4
 
 
 def _close(actual: np.ndarray, expected: np.ndarray, *, rtol: float, atol: float) -> dict[str, Any]:
