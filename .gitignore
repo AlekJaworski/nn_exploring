@@ -4,6 +4,10 @@ __pycache__/
 venv/
 .venv/
 
+# Compiled Rust extension dropped into the python source tree by
+# `maturin develop`. Built artefact, not source.
+python/mgcv_rust/*.so
+
 # Python debug/scratch
 debug_*.py
 test_singular_*.py
