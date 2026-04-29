@@ -538,14 +538,14 @@ impl GAM {
         let xtx_ref = cached_xtx.as_ref();
 
         if is_newton {
-            // Newton converges fully in a single call — no outer loop needed.
-            // For Gaussian family the weights are constant, so PiRLS converges in 1 step
-            // and Newton finds optimal lambda internally. Running a second outer iteration
-            // would just re-derive the same lambda (wasting ~50% of REML time).
-            //
-            // Flow: PiRLS(init_lambda) → Newton(converge) → PiRLS(optimal_lambda) → done
-
-            // Step 1: PiRLS with initial lambda (uses discretized scatter-gather)
+            // Newton converges fully in a single call. For Gaussian this
+            // is exact (W=I, β̂(λ) recovered by `(X'X+λS)⁻¹X'y`). For
+            // non-Gaussian the score uses a one-step linearisation
+            // (`A β = X'Wy` with PiRLS-frozen w) rather than the true
+            // IRLS β̂(λ); λ lands within ~10% of mgcv's. Closing that
+            // last gap byte-for-byte requires mgcv's outer iteration
+            // (re-run PiRLS at each Newton iter using the *working*
+            // response z, not y) — a separate followup.
             let pirls_start = Instant::now();
             let pirls_result = cache.run_pirls(
                 y,
@@ -558,11 +558,33 @@ impl GAM {
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
 
-            // Step 2: Newton optimization to convergence
-            // Pass cached X'WX from discretized design to skip O(n*p^2) in REML
+            // For non-Gaussian, pass the *working response* z to the
+            // optimizer instead of y. mgcv's `pls_fit1` solves
+            // `β = (X'WX + λS)⁻¹ X'Wz` (gam.fit3.r:322-343, gdi.c:2911):
+            // with z and W from the converged inner PIRLS, this recovers
+            // the IRLS-converged β at λ_current. Our Newton score
+            // function does the same `solve(A, X'W·response)` so passing
+            // z (rather than y) gives β_IRLS at λ_current — required for
+            // the closed-form gradient/Hessian's β-cross-coupling
+            // simplifications to hold.
+            //
+            // For Gaussian, z = y (identity link, w = 1), so the path
+            // collapses to the existing behaviour.
+            let working_response: Array1<f64> = if is_gaussian {
+                y.clone()
+            } else {
+                let mut z = pirls_result.linear_predictor.clone();
+                for i in 0..z.len() {
+                    let dmu_deta = self.family.d_inverse_link(pirls_result.linear_predictor[i]);
+                    if dmu_deta.abs() > 1e-10 {
+                        z[i] += (y[i] - pirls_result.fitted_values[i]) / dmu_deta;
+                    }
+                }
+                z
+            };
+
             let reml_start = Instant::now();
             let reml_xtwx = if is_gaussian {
-                // For Gaussian, X'WX = X'X (w=1), already cached
                 cached_xtx.clone()
             } else if let Some(ref disc) = cache.discretized {
                 Some(disc.compute_xtwx(&weights))
@@ -570,7 +592,7 @@ impl GAM {
                 None
             };
             smoothing_params.optimize_with_beta_and_xtwx(
-                y,
+                &working_response,
                 &cache.design_matrix,
                 &weights,
                 &cache.penalties,

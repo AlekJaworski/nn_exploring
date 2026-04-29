@@ -54,15 +54,15 @@ _8D_15K_REASON = (
     "(4d_small_neighbourhood_n300, 6d_heatmap_pricing_n8000) pass."
 )
 _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
-    "Non-Gaussian (binomial / poisson) byte-for-byte parity needs the "
-    "outer Newton loop to re-run inner PiRLS at each λ step (mgcv's outer "
-    "iteration). Currently Newton uses the PiRLS-frozen IRLS weights and "
-    "re-solves β with `A β = X'Wy`, which is a one-step approximation "
-    "rather than the converged β̂(λ). Fit lands within ~10% of mgcv's λ "
-    "(was ~30× off under FS — switching to Newton + envelope-theorem "
-    "gradient is a big improvement) but residual prediction diff is "
-    "2.5e-3 (binomial) / 2.5e-2 (poisson) — just above Bar A. "
-    "Closing this gap is its own followup."
+    "Non-Gaussian byte-for-byte parity needs mgcv's full outer iteration: "
+    "re-run inner PiRLS at each Newton trial λ, then call `gdi1` on the "
+    "PiRLS-converged (β, z, w, μ) for IFT-based gradient/Hessian "
+    "(gam.fit3.r:1228-1710 + gdi.c:2320-2847). We currently do single-shot "
+    "Newton with the working response z passed to the score function — "
+    "this recovers IRLS-converged β at λ_current via `(X'WX+λS)⁻¹ X'Wz` "
+    "(matching pls_fit1) and gets us within 5% of mgcv's λ (poisson "
+    "absdiff 3.5e-3 ≤ Bar A; binomial absdiff 4e-3 ≈ 7× over Bar A). "
+    "Closing the binomial residual needs the outer iteration."
 )
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
@@ -70,7 +70,6 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
         "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
         "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
-        "2d_poisson_log_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
     },
     "test_design_matrix_span": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
