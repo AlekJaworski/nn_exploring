@@ -27,7 +27,34 @@ ndarray = "0.16"
 
 ## Quick Start
 
-### Python (Recommended)
+### Python — high-level wrapper (recommended)
+
+`GAMFitter` is a drop-in replacement for `mgcv::gam` / rpy2-based
+fitters. Accepts numpy / pandas / polars inputs, named predictors,
+per-term `k` overrides, posterior sampling, confidence intervals,
+and a `serialize()` method matching the schema consumed by
+downstream `GamPredictor`-style code.
+
+```python
+import numpy as np, pandas as pd
+from mgcv_rust import GAMFitter
+
+df = pd.DataFrame({"days_ago": ..., "quality": ...})
+y  = ...
+
+gam = GAMFitter(
+    predictors=("days_ago", "quality"),
+    k_default=6,
+    term_k_mapping={"days_ago": 25, "quality": 12},
+    family="gaussian", link="identity",
+)
+gam.fit(df, y)
+preds = gam.predict(df)
+lo, hi = gam.predict_ci(df, alpha=0.05, n_samples=1000)
+serialized = gam.serialize()
+```
+
+### Python — low-level Rust core
 
 ```python
 import numpy as np
