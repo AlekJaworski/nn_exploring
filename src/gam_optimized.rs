@@ -540,70 +540,93 @@ impl GAM {
         let xtx_ref = cached_xtx.as_ref();
 
         if is_newton {
-            // Newton converges fully in a single call. For Gaussian this
-            // is exact (W=I, β̂(λ) recovered by `(X'X+λS)⁻¹X'y`). For
-            // non-Gaussian the score uses a one-step linearisation
-            // (`A β = X'Wy` with PiRLS-frozen w) rather than the true
-            // IRLS β̂(λ); λ lands within ~10% of mgcv's. Closing that
-            // last gap byte-for-byte requires mgcv's outer iteration
-            // (re-run PiRLS at each Newton iter using the *working*
-            // response z, not y) — a separate followup.
-            let pirls_start = Instant::now();
-            let pirls_result = cache.run_pirls(
-                y,
-                &smoothing_params.lambda,
-                self.family,
-                max_inner_iter,
-                tolerance,
-                xtx_ref,
-            )?;
-            total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
-            weights = pirls_result.weights.clone();
-
-            // For non-Gaussian, pass the *working response* z to the
-            // optimizer instead of y. mgcv's `pls_fit1` solves
-            // `β = (X'WX + λS)⁻¹ X'Wz` (gam.fit3.r:322-343, gdi.c:2911):
-            // with z and W from the converged inner PIRLS, this recovers
-            // the IRLS-converged β at λ_current. Our Newton score
-            // function does the same `solve(A, X'W·response)` so passing
-            // z (rather than y) gives β_IRLS at λ_current — required for
-            // the closed-form gradient/Hessian's β-cross-coupling
-            // simplifications to hold.
+            // For Gaussian, Newton converges fully in one call (W=I, exact
+            // β̂(λ) per score eval). For non-Gaussian, mgcv's outer
+            // iteration runs Newton's score against the working response z
+            // from a *converged* inner IRLS at the current λ; whenever λ
+            // shifts the IRLS β/η/μ have to be re-run. Without that, the
+            // closed-form gradient's envelope-theorem premise (∂D/∂β=0 at
+            // β̂(λ)) is violated for trial λ ≠ λ_current.
             //
-            // For Gaussian, z = y (identity link, w = 1), so the path
-            // collapses to the existing behaviour.
-            let working_response: Array1<f64> = if is_gaussian {
-                y.clone()
-            } else {
-                let mut z = pirls_result.linear_predictor.clone();
-                for i in 0..z.len() {
-                    let dmu_deta = self.family.d_inverse_link(pirls_result.linear_predictor[i]);
-                    if dmu_deta.abs() > 1e-10 {
-                        z[i] += (y[i] - pirls_result.fitted_values[i]) / dmu_deta;
+            // We approximate mgcv's outer iteration with a small fixed
+            // number of "PIRLS → Newton(full)" passes for non-Gaussian.
+            // The line-search inside Newton still uses frozen z — so this
+            // is one step coarser than mgcv's per-trial-λ PIRLS — but
+            // each outer pass refreshes z/w around the current best λ,
+            // so the optimizer converges to mgcv's λ within a few passes.
+            let outer_passes = if is_gaussian { 1 } else { 5 };
+
+            for outer_pass in 0..outer_passes {
+                let pirls_start = Instant::now();
+                let pirls_result = cache.run_pirls(
+                    y,
+                    &smoothing_params.lambda,
+                    self.family,
+                    max_inner_iter,
+                    tolerance,
+                    xtx_ref,
+                )?;
+                total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
+                weights = pirls_result.weights.clone();
+
+                // Working response z = η + (y − μ)/(dμ/dη). For Gaussian,
+                // z = y. For non-Gaussian, this recovers IRLS-converged β
+                // when used as the response in `solve(X'WX + λS, X'Wz)`.
+                let working_response: Array1<f64> = if is_gaussian {
+                    y.clone()
+                } else {
+                    let mut z = pirls_result.linear_predictor.clone();
+                    for i in 0..z.len() {
+                        let dmu_deta =
+                            self.family.d_inverse_link(pirls_result.linear_predictor[i]);
+                        if dmu_deta.abs() > 1e-10 {
+                            z[i] += (y[i] - pirls_result.fitted_values[i]) / dmu_deta;
+                        }
+                    }
+                    z
+                };
+
+                let reml_start = Instant::now();
+                let reml_xtwx = if is_gaussian {
+                    cached_xtx.clone()
+                } else if let Some(ref disc) = cache.discretized {
+                    Some(disc.compute_xtwx(&weights))
+                } else {
+                    None
+                };
+                let prev_lambda = smoothing_params.lambda.clone();
+                smoothing_params.optimize_with_beta_and_xtwx(
+                    &working_response,
+                    &cache.design_matrix,
+                    &weights,
+                    &cache.penalties,
+                    newton_max_iter,
+                    tolerance,
+                    Some(&pirls_result.coefficients),
+                    reml_xtwx.as_ref(),
+                )?;
+                total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
+
+                // Outer-pass convergence: stop once λ stops moving across
+                // a full Newton-to-convergence pass.
+                if !is_gaussian && outer_pass > 0 {
+                    let max_log_change = prev_lambda
+                        .iter()
+                        .zip(smoothing_params.lambda.iter())
+                        .map(|(o, n)| (o.ln() - n.ln()).abs())
+                        .fold(0.0f64, f64::max);
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!(
+                            "[PROFILE] Outer Newton pass {}: max |Δlog λ| = {:.3e}",
+                            outer_pass + 1,
+                            max_log_change
+                        );
+                    }
+                    if max_log_change < 1e-5 {
+                        break;
                     }
                 }
-                z
-            };
-
-            let reml_start = Instant::now();
-            let reml_xtwx = if is_gaussian {
-                cached_xtx.clone()
-            } else if let Some(ref disc) = cache.discretized {
-                Some(disc.compute_xtwx(&weights))
-            } else {
-                None
-            };
-            smoothing_params.optimize_with_beta_and_xtwx(
-                &working_response,
-                &cache.design_matrix,
-                &weights,
-                &cache.penalties,
-                newton_max_iter,
-                tolerance,
-                Some(&pirls_result.coefficients),
-                reml_xtwx.as_ref(),
-            )?;
-            total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
+            }
 
             // Step 3: Final PiRLS with optimal lambda (uses discretized scatter-gather)
             let pirls_start = Instant::now();
