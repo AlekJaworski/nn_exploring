@@ -500,7 +500,9 @@ impl GAM {
         // (y - Xβ)² is wrong for non-Gaussian since Xβ=η not μ.
         smoothing_params.phi_fixed = match self.family {
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => Some(1.0),
-            crate::pirls::Family::Gaussian | crate::pirls::Family::Gamma => None,
+            crate::pirls::Family::Gaussian
+            | crate::pirls::Family::Gamma
+            | crate::pirls::Family::GammaLog => None,
         };
         smoothing_params.family = self.family;
 

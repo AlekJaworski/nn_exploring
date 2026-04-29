@@ -148,19 +148,34 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None))]
-    fn new(family: Option<&str>, mgcv_exact: Option<bool>) -> PyResult<Self> {
-        let fam = match family {
-            Some("gaussian") | None => Family::Gaussian,
-            Some("binomial") => Family::Binomial,
-            Some("poisson") => Family::Poisson,
-            Some("gamma") => Family::Gamma,
-            Some(f) => {
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None))]
+    fn new(
+        family: Option<&str>,
+        mgcv_exact: Option<bool>,
+        link: Option<&str>,
+    ) -> PyResult<Self> {
+        let fam = match (family, link) {
+            (Some("gaussian"), None) | (None, None) => Family::Gaussian,
+            (Some("gaussian"), Some("identity")) => Family::Gaussian,
+            (Some("binomial"), None) | (Some("binomial"), Some("logit")) => Family::Binomial,
+            (Some("poisson"), None) | (Some("poisson"), Some("log")) => Family::Poisson,
+            (Some("gamma"), None) | (Some("gamma"), Some("inverse")) => Family::Gamma,
+            (Some("gamma"), Some("log")) => Family::GammaLog,
+            (Some(f), Some(l)) => {
+                return Err(PyValueError::new_err(format!(
+                    "Unsupported family/link combination: {}({}). Supported: \
+                     gaussian(identity), binomial(logit), poisson(log), \
+                     gamma(inverse), gamma(log).",
+                    f, l
+                )))
+            }
+            (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
                     "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', or 'gamma'",
                     f
                 )))
             }
+            (None, Some(_)) => Family::Gaussian, // link without family — assume gaussian
         };
         let mut g = GAM::new(fam);
         // Default flipped to mgcv_exact=True after Parity 3j: byte-for-
@@ -580,6 +595,18 @@ impl PyGAM {
             Family::Binomial => "binomial",
             Family::Poisson => "poisson",
             Family::Gamma => "gamma",
+            Family::GammaLog => "gamma",
+        }
+    }
+
+    /// Get the link function name used by this GAM
+    fn get_link(&self) -> &str {
+        match self.inner.family {
+            Family::Gaussian => "identity",
+            Family::Binomial => "logit",
+            Family::Poisson => "log",
+            Family::Gamma => "inverse",
+            Family::GammaLog => "log",
         }
     }
 

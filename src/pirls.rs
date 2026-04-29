@@ -7,59 +7,64 @@ use crate::reml::compute_xtwx;
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
 
-/// Family and link function for GLM
+/// Family and link function for GLM. Each variant uses its canonical link
+/// EXCEPT `GammaLog`, which is the gamma family paired with log link
+/// (a common production choice for positive responses where multiplicative
+/// effects are wanted but the inverse link is awkward at small μ).
 #[derive(Debug, Clone, Copy)]
 pub enum Family {
     Gaussian,
     Binomial,
     Poisson,
+    /// Gamma with canonical inverse link.
     Gamma,
+    /// Gamma with log link — non-canonical, but the most common
+    /// production choice for positive multiplicative responses.
+    GammaLog,
 }
 
 impl Family {
-    /// Variance function V(μ)
+    /// Variance function V(μ). Same regardless of link choice (link
+    /// affects how η maps to μ, not V(μ) itself).
     pub fn variance(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian => 1.0,
             Family::Binomial => mu * (1.0 - mu),
             Family::Poisson => mu,
-            Family::Gamma => mu * mu,
+            Family::Gamma | Family::GammaLog => mu * mu,
         }
     }
 
-    /// Canonical link function g(μ)
+    /// Link function g(μ).
     pub fn link(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian => mu,
             Family::Binomial => (mu / (1.0 - mu)).ln(),
-            Family::Poisson => mu.ln(),
+            Family::Poisson | Family::GammaLog => mu.ln(),
             Family::Gamma => 1.0 / mu,
         }
     }
 
-    /// Inverse link function g^(-1)(η)
+    /// Inverse link function g^(-1)(η).
     pub fn inverse_link(&self, eta: f64) -> f64 {
         match self {
             Family::Gaussian => eta,
             Family::Binomial => {
-                // Clamp eta to avoid overflow in exp
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
             }
-            Family::Poisson => {
-                // Clamp to avoid overflow
+            Family::Poisson | Family::GammaLog => {
                 let eta_safe = eta.min(20.0);
                 eta_safe.exp()
             }
             Family::Gamma => {
-                // Ensure eta is not too close to zero
                 let eta_safe = if eta.abs() < 1e-10 { 1e-10 } else { eta };
                 1.0 / eta_safe
             }
         }
     }
 
-    /// Derivative of inverse link function
+    /// Derivative of inverse link function dμ/dη.
     pub fn d_inverse_link(&self, eta: f64) -> f64 {
         match self {
             Family::Gaussian => 1.0,
@@ -67,7 +72,7 @@ impl Family {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
             }
-            Family::Poisson => eta.exp(),
+            Family::Poisson | Family::GammaLog => eta.exp(),
             Family::Gamma => -1.0 / (eta * eta),
         }
     }
@@ -155,7 +160,7 @@ pub fn fit_pirls_cached(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::Gamma => y[i].max(0.1),
+            Family::Poisson | Family::Gamma | Family::GammaLog => y[i].max(0.1),
             Family::Gaussian => unreachable!(),
         };
         eta[i] = family.link(safe_y);
@@ -376,7 +381,7 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                     2.0 * mui
                 }
             }
-            Family::Gamma => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
+            Family::Gamma | Family::GammaLog => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
         };
 
         deviance += dev_i;
@@ -430,7 +435,7 @@ pub fn fit_pirls_discretized(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::Gamma => y[i].max(0.1),
+            Family::Poisson | Family::Gamma | Family::GammaLog => y[i].max(0.1),
             Family::Gaussian => unreachable!(),
         };
         eta[i] = family.link(safe_y);

@@ -64,10 +64,15 @@ def _fit(fix: Fixture):
     if family == "gaussian":
         gam = mgcv_rust.GAM()
     else:
+        # Pass non-canonical links through where supported (gamma(log) etc).
+        # Canonical-link cases are reached via family alone.
+        link_kw: dict = {}
+        if not _expects_canonical_link(fix):
+            link_kw["link"] = inp.link
         try:
-            gam = mgcv_rust.GAM(family)
+            gam = mgcv_rust.GAM(family, **link_kw)
         except Exception as exc:  # pragma: no cover - depends on Rust build
-            pytest.skip(f"GAM({family!r}) unavailable: {exc}")
+            pytest.skip(f"GAM({family!r}, {link_kw}) unavailable: {exc}")
 
     try:
         result = gam.fit(
