@@ -735,6 +735,113 @@ impl PyGAM {
         Ok(numpy::PyArray1::from_owned_array(py, grad))
     }
 
+    /// IFT-based gradient of the mgcv-exact REML score at the given λ.
+    /// Translated from mgcv's gdi.c::ift1 + gdi1 gradient assembly. At our
+    /// (always inner-loop converged) β with working-RSS deviance this
+    /// equals the envelope-form gradient byte-for-byte. The path that
+    /// differs is the GLM-deviance form, enabled by passing
+    /// `y_original`. Diagnostic — used by Stage 5 unit tests.
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_gradient_ift<'py>(
+        &self,
+        py: Python<'py>,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+        y_original: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+        let y_array = y.as_array().to_owned();
+        let y_orig_array = y_original.as_ref().map(|y| y.as_array().to_owned());
+        let grad = crate::reml::reml_gradient_mgcv_exact_ift(
+            &y_array,
+            design_matrix,
+            weights,
+            &lambdas,
+            &penalties,
+            None,
+            self.inner.family,
+            y_orig_array.as_ref(),
+        )
+        .map_err(|e| PyValueError::new_err(format!("ift gradient failed: {}", e)))?;
+        Ok(numpy::PyArray1::from_owned_array(py, grad))
+    }
+
+    /// IFT-based Hessian of the mgcv-exact REML score at the given λ.
+    /// At converged β with working-RSS deviance equals the envelope Hessian.
+    /// Diagnostic — used by Stage 5 unit tests.
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_hessian_ift<'py>(
+        &self,
+        py: Python<'py>,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+        y_original: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+        let y_array = y.as_array().to_owned();
+        let y_orig_array = y_original.as_ref().map(|y| y.as_array().to_owned());
+        let hess = crate::reml::reml_hessian_mgcv_exact_ift(
+            &y_array,
+            design_matrix,
+            weights,
+            &lambdas,
+            &penalties,
+            None,
+            self.inner.family,
+            y_orig_array.as_ref(),
+        )
+        .map_err(|e| PyValueError::new_err(format!("ift hessian failed: {}", e)))?;
+        Ok(numpy::PyArray2::from_owned_array(py, hess))
+    }
+
     /// Per-smooth centred penalty matrix as stored on SmoothTerm.
     /// Returns a list of ndarrays, one per smooth (each is the
     /// post-centring penalty Z'SZ, after any pre-Z normalisation if

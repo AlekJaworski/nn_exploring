@@ -777,6 +777,473 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     Ok(hess)
 }
 
+// ============================================================================
+// IFT-based gradient and Hessian (Option B per Parity 4t)
+// ============================================================================
+//
+// Translated from mgcv's gdi.c::ift1 (lines 1314-1363) and the gradient/
+// Hessian assembly in gdi1 (lines 2573-2664). Uses the Implicit Function
+// Theorem on the IRLS first-order condition `Aβ = X'Wz` (where
+// A = X'WX + ΣλS) to compute ∂β/∂ρ_k = b1[k] = -λ_k A⁻¹ S_k β, then plugs
+// into the full chain rule for D' (the deviance derivative).
+//
+// At converged β with the *working RSS* deviance D_w = Σw(y - Xβ)², the
+// IFT gradient is mathematically identical to the envelope-form gradient
+// (because ∂D_w/∂β = -2X'W(y - Xβ) = -2ΣλSβ at converged β, and the
+// (∂D_w/∂β)·b1 + 2(ΣλSβ)·b1 terms cancel exactly).
+//
+// Where the IFT path GENUINELY differs from envelope is when we use the
+// **GLM deviance** D_GLM gradient `-2X'(y_orig - μ)/(Vg')` with μ = g⁻¹(Xβ),
+// AND our β is not jointly self-consistent with W,z (e.g., during the outer
+// REML loop where z is held fixed at the prior PiRLS β). Pass
+// `y_original = Some(...)` to enable this path; pass `None` to fall back
+// to working-RSS deviance (which collapses to envelope at converged β).
+
+/// Compute b1[k] = ∂β/∂ρ_k = -λ_k · A⁻¹ S_k β  for k = 0..m.
+/// Returns a (p, m) matrix; column k is b1[k].
+#[cfg(feature = "blas")]
+fn compute_b1_ift(
+    a_inv: &Array2<f64>,
+    beta: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+) -> Array2<f64> {
+    let p = a_inv.nrows();
+    let m = lambdas.len();
+    let mut b1 = Array2::<f64>::zeros((p, m));
+    for k in 0..m {
+        // S_k β: only nonzero on the smooth's block.
+        let s_k_beta = penalties_blocks[k].dot_vec(beta);
+        // A⁻¹ S_k β
+        let ainv_sk_beta = a_inv.dot(&s_k_beta);
+        // b1[:,k] = -λ_k · A⁻¹ S_k β
+        let lam_k = lambdas[k];
+        for r in 0..p {
+            b1[[r, k]] = -lam_k * ainv_sk_beta[r];
+        }
+    }
+    b1
+}
+
+/// Compute the deviance gradient `∂D/∂β` evaluated at the current β.
+///
+/// - For Gaussian or `y_original = None`: uses the working-RSS form
+///   `-2 X'W(y_input - Xβ)`, which is what our score uses for Dp.
+///   This collapses the IFT correction to zero at our (always converged)
+///   β — recovering envelope.
+/// - For non-Gaussian + `y_original = Some(y)`: uses the GLM deviance form
+///   `-2 X'·(y - μ)/(V·g')` with μ = g⁻¹(Xβ), matching gdi.c:2574.
+///   The `(y_input, w)` carried by the score may have been computed at a
+///   prior PiRLS β; the IFT correction picks up the difference.
+#[cfg(feature = "blas")]
+fn compute_dev_grad_beta(
+    y_input: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    beta: &Array1<f64>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Array1<f64> {
+    let n = x.nrows();
+    let mut v1 = Array1::<f64>::zeros(n);
+    match (family, y_original) {
+        (crate::pirls::Family::Gaussian, _) | (_, None) => {
+            // Working-RSS form: v1[i] = -2 w[i] (y_input[i] - (Xβ)_i)
+            let fitted = x.dot(beta);
+            for i in 0..n {
+                v1[i] = -2.0 * w[i] * (y_input[i] - fitted[i]);
+            }
+        }
+        (fam, Some(y_orig)) => {
+            // GLM deviance form: v1[i] = -2 (y_orig - μ) / (V(μ) · g'(μ))
+            // For canonical link V·g' = 1 so v1 = -2(y_orig - μ).
+            // For non-canonical we'd need g' separately; use V·g' factor.
+            let eta = x.dot(beta);
+            for i in 0..n {
+                let mu_i = fam.inverse_link(eta[i]);
+                let v_mu = fam.variance(mu_i).max(1e-300);
+                // dμ/dη = inverse_link derivative = 1/g'(μ). So g' = 1/(dμ/dη).
+                let dmu_deta = fam.d_inverse_link(eta[i]).max(1e-300);
+                let g_prime = 1.0 / dmu_deta;
+                let denom = v_mu * g_prime;
+                v1[i] = -2.0 * (y_orig[i] - mu_i) / denom;
+            }
+        }
+    }
+    // ∂D/∂β = X' v1
+    x.t().dot(&v1)
+}
+
+/// IFT-based gradient of the mgcv-exact REML score w.r.t. log(λ_k).
+///
+/// Implements the full chain rule (matching mgcv's gdi.c assembly at
+/// lines 2653-2685):
+///
+///   D1[k] = (∂D/∂β)' b1[k] + λ_k β'S_kβ + 2 (ΣλSβ)' b1[k]
+///   det1[k] = λ_k · tr(A⁻¹ S_k)
+///   REML1[k] = D1[k] / (2σ²) + det1[k]/2 − rank_k/2
+///
+/// where b1[k] = -λ_k A⁻¹ S_k β. At converged β with working-RSS deviance,
+/// `(∂D/∂β)' b1 + 2(ΣλSβ)' b1 = 0` and this reduces to the envelope form.
+///
+/// `y_original = Some(y)` enables the GLM deviance gradient form for
+/// non-Gaussian families — the only path where the IFT correction is
+/// genuinely nonzero given that our β = A⁻¹X'Wy is always at the IRLS
+/// solution for the inputs we see.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_ift(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Result<Array1<f64>> {
+    let n = y.len();
+    let m = lambdas.len();
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+
+    // A = X'WX + Σλ_jS_j (no ridge — mgcv-exact)
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+
+    // β = A^{-1} X'Wy
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+
+    // Working-RSS-based scale estimate for Dp/(2σ²) — matches the score
+    // function's σ² (reml_criterion_multi_cached_mgcv_exact).
+    let _ = family;
+    let fitted = x.dot(&beta);
+    let rss: f64 = y
+        .iter()
+        .zip(fitted.iter())
+        .zip(w.iter())
+        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+        .sum();
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
+
+    // IFT first derivatives: b1[:,k] = -λ_k A⁻¹ S_k β
+    let b1 = compute_b1_ift(&a_inv, &beta, lambdas, penalties_blocks);
+
+    // ∂D/∂β at current (β,μ)
+    let dev_grad_beta = compute_dev_grad_beta(y, x, w, &beta, family, y_original);
+
+    // ΣλSβ = Σ_j λ_j S_j β  (gathered as a length-p vector)
+    let p = a.nrows();
+    let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        let s_j_beta = penalty.dot_vec(&beta);
+        for r in 0..p {
+            sum_lambda_s_beta[r] += lambda * s_j_beta[r];
+        }
+    }
+
+    let mut grad = Array1::<f64>::zeros(m);
+    for (k, (lambda, penalty)) in lambdas.iter().zip(penalties_blocks.iter()).enumerate() {
+        let bsb_k = penalty.quadratic_form(&beta);
+        let lam_k = *lambda;
+
+        // tr(A⁻¹ S_k) — block-sparse
+        let block = penalty.block_view();
+        let off = penalty.offset;
+        let kk = block.nrows();
+        let mut tr_a_inv_s = 0.0;
+        for p_idx in 0..kk {
+            for q_idx in 0..kk {
+                tr_a_inv_s += a_inv[[off + p_idx, off + q_idx]] * block[[q_idx, p_idx]];
+            }
+        }
+
+        // (∂D/∂β)' b1[:,k]
+        let mut dev_dot_b1 = 0.0;
+        for r in 0..p {
+            dev_dot_b1 += dev_grad_beta[r] * b1[[r, k]];
+        }
+        // 2 (ΣλSβ)' b1[:,k]
+        let mut sls_dot_b1 = 0.0;
+        for r in 0..p {
+            sls_dot_b1 += sum_lambda_s_beta[r] * b1[[r, k]];
+        }
+        let d1_k = dev_dot_b1 + lam_k * bsb_k + 2.0 * sls_dot_b1;
+
+        let rank_k = estimate_rank_eigen(penalty);
+        grad[k] = d1_k / (2.0 * scale_est) + lam_k * tr_a_inv_s / 2.0 - (rank_k as f64) / 2.0;
+    }
+    Ok(grad)
+}
+
+/// IFT-based Hessian of the mgcv-exact REML score w.r.t. log(λ_k, λ_j).
+///
+/// Differentiates the IFT gradient once more. The full Hessian assembly
+/// (treating σ² constant per the existing envelope convention) is:
+///
+///   D2[k,j] = b1[:,j]' (∂²D/∂β²) b1[:,k] + (∂D/∂β)' b2[k,j]
+///           + δ_{kj} λ_k β'S_kβ + 2 λ_k β'S_k b1[:,j]
+///           + 2 λ_j (S_jβ)' b1[:,k] + 2 b1[:,j]' (ΣλS) b1[:,k]
+///           + 2 (ΣλSβ)' b2[k,j]
+///   det2[k,j] = δ_{kj} λ_k tr(A⁻¹ S_k) − λ_k λ_j tr(A⁻¹ S_k A⁻¹ S_j)
+///   H[k,j] = D2[k,j]/(2σ²) + det2[k,j]/2
+///
+/// where ∂²D/∂β² = 2 X'WX (Fisher; exact for canonical link).
+///
+/// The b2[k,j] = ∂²β/∂ρ_kρ_j second derivatives come from differentiating
+/// IFT once more (mgcv's gdi.c::ift1 deriv2 branch):
+///   A · b2[k,j] = -λ_j S_j b1[:,k] - λ_k S_k b1[:,j] - δ_{kj} λ_k S_k β
+///
+/// At converged β with working-RSS deviance, both the b2 contribution
+/// `(∂D/∂β + 2ΣλSβ)' b2 = (∂Dp/∂β)' b2 = 0` and the deviance second-
+/// derivative contribution simplify, recovering the envelope-form Hessian.
+#[cfg(feature = "blas")]
+pub fn reml_hessian_mgcv_exact_ift(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Result<Array2<f64>> {
+    let n = y.len();
+    let m = lambdas.len();
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+
+    // A, β, σ², A⁻¹
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+    let fitted = x.dot(&beta);
+    let rss: f64 = y
+        .iter()
+        .zip(fitted.iter())
+        .zip(w.iter())
+        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+        .sum();
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
+
+    // IFT first derivatives
+    let b1 = compute_b1_ift(&a_inv, &beta, lambdas, penalties_blocks);
+    // S_jβ for each j
+    let p = a.nrows();
+    let mut s_beta_per_j: Vec<Array1<f64>> = Vec::with_capacity(m);
+    for penalty in penalties_blocks.iter() {
+        s_beta_per_j.push(penalty.dot_vec(&beta));
+    }
+    // ΣλSβ
+    let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
+    for j in 0..m {
+        for r in 0..p {
+            sum_lambda_s_beta[r] += lambdas[j] * s_beta_per_j[j][r];
+        }
+    }
+
+    // Pre-compute per-smooth tr(A⁻¹ S_k) and A⁻¹ S_k columns for cross terms
+    let mut tr_a_s_per_j: Vec<f64> = Vec::with_capacity(m);
+    // ainvs_per_j[k]: shape (p, k_k) — nonzero columns of A⁻¹ S_k
+    let mut ainvs_per_j: Vec<Array2<f64>> = Vec::with_capacity(m);
+    let mut block_offsets: Vec<usize> = Vec::with_capacity(m);
+    let mut block_sizes: Vec<usize> = Vec::with_capacity(m);
+    for penalty in penalties_blocks.iter() {
+        let block = penalty.block_view();
+        let off = penalty.offset;
+        let kk = block.nrows();
+        block_offsets.push(off);
+        block_sizes.push(kk);
+        let mut tr_as = 0.0;
+        for ii in 0..kk {
+            for jj in 0..kk {
+                tr_as += a_inv[[off + ii, off + jj]] * block[[jj, ii]];
+            }
+        }
+        tr_a_s_per_j.push(tr_as);
+        let mut ainvs = Array2::<f64>::zeros((p, kk));
+        for c in 0..kk {
+            for r in 0..p {
+                let mut s = 0.0;
+                for kkk in 0..kk {
+                    s += a_inv[[r, off + kkk]] * block[[kkk, c]];
+                }
+                ainvs[[r, c]] = s;
+            }
+        }
+        ainvs_per_j.push(ainvs);
+    }
+
+    // ∂D/∂β at current β
+    let dev_grad_beta = compute_dev_grad_beta(y, x, w, &beta, family, y_original);
+    // ∂²D/∂β² b1[:,k] = 2 X'WX b1[:,k]  (Fisher form, exact for canonical link)
+    // We compute (∂²D/∂β² b1)[:,k] = 2 X'WX b1[:,k] for each k.
+    let mut d2dev_b1 = Array2::<f64>::zeros((p, m));
+    for k in 0..m {
+        let b1_k = b1.column(k).to_owned();
+        let xtwx_b1_k = xtwx.dot(&b1_k);
+        for r in 0..p {
+            d2dev_b1[[r, k]] = 2.0 * xtwx_b1_k[r];
+        }
+    }
+
+    // b2[k,j] = -A⁻¹ (λ_j S_j b1[:,k] + λ_k S_k b1[:,j] + δ_{kj} λ_k S_k β)
+    // Stored as vector keyed (k,j) for k <= j.
+    // We compute on the fly per (k,j) for cache friendliness with O(m²) cost
+    // but each is a single A⁻¹ multiply.
+    let assemble_b2 = |k: usize, j: usize| -> Array1<f64> {
+        let lam_j = lambdas[j];
+        let lam_k = lambdas[k];
+        let b1_k = b1.column(k);
+        let b1_j = b1.column(j);
+        let s_j_b1k = penalties_blocks[j].dot_vec(&b1_k.to_owned());
+        let s_k_b1j = penalties_blocks[k].dot_vec(&b1_j.to_owned());
+        let mut rhs = Array1::<f64>::zeros(p);
+        for r in 0..p {
+            rhs[r] = -(lam_j * s_j_b1k[r] + lam_k * s_k_b1j[r]);
+        }
+        if k == j {
+            for r in 0..p {
+                rhs[r] -= lam_k * s_beta_per_j[k][r];
+            }
+        }
+        a_inv.dot(&rhs)
+    };
+
+    // Assemble the Hessian.
+    let mut hess = Array2::<f64>::zeros((m, m));
+    for k_out in 0..m {
+        for j_out in k_out..m {
+            let lam_k = lambdas[k_out];
+            let lam_j = lambdas[j_out];
+            let kron = if k_out == j_out { 1.0 } else { 0.0 };
+
+            // b1[:,j]' (∂²D/∂β²) b1[:,k]  =  b1[:,j]' · d2dev_b1[:,k]
+            let mut term_d2dev = 0.0;
+            for r in 0..p {
+                term_d2dev += b1[[r, j_out]] * d2dev_b1[[r, k_out]];
+            }
+
+            // b2[k,j] (length p)
+            let b2_kj = assemble_b2(k_out, j_out);
+
+            // (∂D/∂β)' b2[k,j]
+            let mut term_dev_b2 = 0.0;
+            for r in 0..p {
+                term_dev_b2 += dev_grad_beta[r] * b2_kj[r];
+            }
+
+            // δ_{kj} λ_k β'S_kβ
+            let term_kron_bsb = if k_out == j_out {
+                lam_k * penalties_blocks[k_out].quadratic_form(&beta)
+            } else {
+                0.0
+            };
+
+            // 2 λ_k β'S_k b1[:,j] = 2 λ_k (S_kβ)' b1[:,j]
+            let mut term_lk_skb_b1j = 0.0;
+            for r in 0..p {
+                term_lk_skb_b1j += s_beta_per_j[k_out][r] * b1[[r, j_out]];
+            }
+            term_lk_skb_b1j *= 2.0 * lam_k;
+
+            // 2 λ_j (S_jβ)' b1[:,k]
+            let mut term_lj_sjb_b1k = 0.0;
+            for r in 0..p {
+                term_lj_sjb_b1k += s_beta_per_j[j_out][r] * b1[[r, k_out]];
+            }
+            term_lj_sjb_b1k *= 2.0 * lam_j;
+
+            // 2 b1[:,j]' (ΣλS) b1[:,k]   = 2 Σ_l λ_l (S_l b1[:,j])' b1[:,k]
+            // Cheaper formulation: ΣλS = A - X'WX, so
+            //   b1[:,j]' (ΣλS) b1[:,k] = b1[:,j]' (A - X'WX) b1[:,k]
+            //                          = b1[:,j]' A b1[:,k] - b1[:,j]' X'WX b1[:,k]
+            // And b1[:,k] = -λ_k A⁻¹ S_k β, so A b1[:,k] = -λ_k S_k β.
+            // Therefore b1[:,j]' A b1[:,k] = -λ_k b1[:,j]' (S_kβ).
+            let mut b1j_a_b1k = 0.0;
+            for r in 0..p {
+                b1j_a_b1k += b1[[r, j_out]] * (-lam_k * s_beta_per_j[k_out][r]);
+            }
+            // b1[:,j]' X'WX b1[:,k] = (X'WX b1[:,k])' b1[:,j]
+            let b1_k_col = b1.column(k_out).to_owned();
+            let xtwx_b1k = xtwx.dot(&b1_k_col);
+            let mut b1j_xtwx_b1k = 0.0;
+            for r in 0..p {
+                b1j_xtwx_b1k += b1[[r, j_out]] * xtwx_b1k[r];
+            }
+            let term_b1_sls_b1 = 2.0 * (b1j_a_b1k - b1j_xtwx_b1k);
+
+            // 2 (ΣλSβ)' b2[k,j]
+            let mut term_sls_b2 = 0.0;
+            for r in 0..p {
+                term_sls_b2 += sum_lambda_s_beta[r] * b2_kj[r];
+            }
+            term_sls_b2 *= 2.0;
+
+            let d2_kj = term_d2dev
+                + term_dev_b2
+                + term_kron_bsb
+                + term_lk_skb_b1j
+                + term_lj_sjb_b1k
+                + term_b1_sls_b1
+                + term_sls_b2;
+
+            // det2[k,j] = δ_{kj} λ_k tr(A⁻¹ S_k) − λ_k λ_j tr(A⁻¹ S_k A⁻¹ S_j)
+            // tr(A⁻¹ S_k A⁻¹ S_j) using sparse structure (matches envelope).
+            let off_k = block_offsets[k_out];
+            let kn_k = block_sizes[k_out];
+            let off_j = block_offsets[j_out];
+            let kn_j = block_sizes[j_out];
+            let mut tr_cross = 0.0;
+            for r in 0..kn_k {
+                for pp in 0..kn_j {
+                    tr_cross +=
+                        ainvs_per_j[k_out][[off_j + pp, r]] * ainvs_per_j[j_out][[off_k + r, pp]];
+                }
+            }
+            let det2_kj = if k_out == j_out {
+                lam_k * tr_a_s_per_j[k_out] - lam_k * lam_j * tr_cross
+            } else {
+                -lam_k * lam_j * tr_cross
+            };
+
+            let h_kj = d2_kj / (2.0 * scale_est) + det2_kj / 2.0;
+            hess[[k_out, j_out]] = h_kj;
+            if k_out != j_out {
+                hess[[j_out, k_out]] = h_kj;
+            }
+        }
+    }
+    Ok(hess)
+}
+
 /// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation
 pub fn reml_criterion_multi_cached(
     y: &Array1<f64>,

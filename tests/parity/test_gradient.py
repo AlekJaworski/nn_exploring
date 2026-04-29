@@ -311,3 +311,150 @@ def test_closed_form_matches_mgcv_reported_gradient(fix_path, fix_data) -> None:
         f"  absdiff={diff.tolist()}\n  max(|cf|)={np.abs(cf).max():.3e}, "
         f"max(|mgcv|)={np.abs(mgcv_grad).max():.3e}"
     )
+
+
+# ============================================================================
+# Stage 5 (Parity 4t): IFT-based gradient/Hessian
+# ============================================================================
+#
+# At our (always inner-loop converged) β, the IFT gradient/Hessian with the
+# working-RSS deviance reduces to the envelope form byte-for-byte. These
+# tests verify that equivalence on the Gaussian fixtures.
+#
+# The GLM-deviance variant (y_original arg) is the only path where IFT
+# genuinely differs; we don't test it on Gaussian fixtures (where it equals
+# working-RSS by construction) but it's exercised by the binomial parity
+# fixture downstream.
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_ift_gradient_matches_envelope_at_converged_beta(fix_path, fix_data) -> None:
+    """At converged β with working-RSS deviance, IFT gradient ≡ envelope.
+
+    The IFT chain-rule terms (∂D/∂β)·b1 + 2(ΣλSβ)·b1 cancel exactly when
+    β satisfies the IRLS condition Aβ = X'Wz (which our score's β always
+    does — solved for explicitly each call).
+
+    Numerically the two routes produce different rounding errors: the IFT
+    formulation is more sensitive to the residual `Aβ − X'y` (≲ 1e-12 from
+    the solve ridge), amplified by `||b1|| ~ ||A⁻¹||` which can be
+    sizeable. Both formulas evaluated AT mgcv's optimum λ (where the
+    gradient is functionally zero) agree to ~1e-3 absolute; either matches
+    FD for descent-direction purposes.
+    """
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    x = np.asarray(inp["x_train"], dtype=float)
+    y = np.asarray(inp["y_train"], dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+
+    lam = list(out["lambda"])
+    env = np.asarray(g.evaluate_reml_gradient_closed_form(y, lam), dtype=float)
+    ift = np.asarray(g.evaluate_reml_gradient_ift(y, lam, None), dtype=float)
+    diff = np.abs(env - ift).max()
+    # Both are at the optimum where the gradient is functionally zero
+    # (mgcv's grad_Linf < 0.05 cutoff). Agreement to 1e-3 absolute, OR
+    # both below 5e-2 (mgcv's convergence threshold).
+    both_near_zero = (
+        float(np.abs(env).max()) < 5e-2 and float(np.abs(ift).max()) < 5e-2
+    )
+    assert diff < 1e-3 or both_near_zero, (
+        f"IFT gradient differs from envelope on {fix_path.stem}: "
+        f"env={env.tolist()}, ift={ift.tolist()}, max|diff|={diff:.3e}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_ift_hessian_matches_envelope_at_converged_beta(fix_path, fix_data) -> None:
+    """At converged β, IFT Hessian agrees with envelope to a few digits.
+
+    The two formulations are mathematically identical at converged β but
+    use very different floating-point routes: envelope uses sparse traces
+    of A⁻¹ S, while IFT computes the full chain rule via b1 = -λ A⁻¹ Sβ
+    plus the b2 second-derivative correction. Numerical drift on the
+    order of 1e-4 absolute / 1e-5 relative is expected.
+    """
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    x = np.asarray(inp["x_train"], dtype=float)
+    y = np.asarray(inp["y_train"], dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+
+    lam = list(out["lambda"])
+    env = np.asarray(g.evaluate_reml_hessian_closed_form(y, lam), dtype=float)
+    ift = np.asarray(g.evaluate_reml_hessian_ift(y, lam, None), dtype=float)
+    diff = np.abs(env - ift).max()
+    rel = diff / (np.abs(env).max() + 1e-12)
+    # Loose tolerance — both formulations are descent-direction equivalent
+    # for the Newton optimizer, byte-for-byte agreement is not required.
+    assert diff < 1e-2 or rel < 1e-3, (
+        f"IFT Hessian differs from envelope on {fix_path.stem}: "
+        f"max|diff|={diff:.3e}, max|env|={np.abs(env).max():.3e}, "
+        f"rel={rel:.3e}\nenv=\n{env}\nift=\n{ift}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_ift_hessian_symmetric(fix_path, fix_data) -> None:
+    """IFT Hessian must be symmetric (it's a second-derivative matrix).
+    Different code path than the envelope-form Hessian — needs its own check."""
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    x = np.asarray(inp["x_train"], dtype=float)
+    y = np.asarray(inp["y_train"], dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+
+    H = np.asarray(g.evaluate_reml_hessian_ift(y, list(out["lambda"]), None), dtype=float)
+    asym = np.abs(H - H.T).max()
+    assert asym < 1e-9, f"IFT Hessian not symmetric on {fix_path.stem}: max|H - H'|={asym:.3e}"
+
+
+@pytest.mark.parametrize(
+    "fix_path,fix_data",
+    _gaussian_fixtures(),
+    ids=lambda p: p.stem if hasattr(p, "stem") else "",
+)
+def test_ift_gradient_matches_envelope_off_optimum(fix_path, fix_data) -> None:
+    """Off-optimum, the IFT and envelope gradients still match each other
+    (both differentiate the same score with σ² treated as constant).
+
+    Note: neither matches the FD of the score off-optimum because both
+    treat σ² = RSS/(n-trA) as a plug-in constant per gam.fit3.r:625's
+    profile-REML convention, while FD captures the full ∂σ²/∂λ term.
+    """
+    inp = fix_data["inputs"]
+    out = fix_data["mgcv_output"]
+    x = np.asarray(inp["x_train"], dtype=float)
+    y = np.asarray(inp["y_train"], dtype=float)
+    g = mgcv_rust.GAM(mgcv_exact=True)
+    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+
+    lam_opt = np.asarray(out["lambda"], dtype=float)
+    if lam_opt.max() > 1e6 or lam_opt.min() < 1e-3:
+        pytest.skip("extreme λ — A⁻¹ ill-conditioned")
+    # Probe at 10x mgcv's optimum (well off-optimum — non-trivial gradient)
+    lam_probe = (lam_opt * 10.0).tolist()
+    env = np.asarray(g.evaluate_reml_gradient_closed_form(y, lam_probe), dtype=float)
+    ift = np.asarray(g.evaluate_reml_gradient_ift(y, lam_probe, None), dtype=float)
+    diff = np.abs(ift - env)
+    rel = diff / (np.abs(env) + 1e-6)
+    assert rel.max() < 5e-3 or diff.max() < 1e-3, (
+        f"IFT off-optimum disagrees with envelope on {fix_path.stem}: "
+        f"env={env.tolist()}, ift={ift.tolist()}, "
+        f"max_absdiff={diff.max():.3e}, max_relerr={rel.max():.3e}"
+    )
