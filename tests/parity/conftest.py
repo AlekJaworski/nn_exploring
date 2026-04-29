@@ -41,10 +41,13 @@ def _discover_fixture_paths() -> list[Path]:
 # expected to fail until the underlying gap is closed. Marked xfail so the
 # suite remains green while we track them as XFAILs.
 _BS_BASIS_REASON = (
-    'bs="bs" uses de Boor B-splines in mgcv vs natural cubic splines in '
-    "mgcv_rust — different basis library, column spans cannot match. "
-    "Tracked as a separate followup; remove this xfail when de Boor splines "
-    "land."
+    'bs="bs" de Boor B-splines now match mgcv on training data to machine '
+    "precision (train absdiff ~1e-10). Bar A test_parity still fails on "
+    "*extrapolation* points (4e-1 absdiff vs mgcv); the in-domain centering "
+    "Z spans the same constrained subspace as mgcv's `qr(t(colMeans(X)))`, "
+    "but the boundary B-spline polynomial extension at x outside training "
+    "range diverges. This is a closed-form basis computation issue, not a "
+    "fit issue — separate followup."
 )
 _8D_15K_PARITY_REASON = (
     "At n=15000 with 8 smooths and 2 saturating λ (one at ~1.96e9, one at "
@@ -81,9 +84,8 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
         "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
     },
-    "test_design_matrix_span": {
-        "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
-    },
+    # Stage 1 design_matrix_span now PASSES for bs basis after de Boor
+    # implementation in 4u; only test_parity extrap remains.
 }
 
 

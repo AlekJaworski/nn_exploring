@@ -45,23 +45,25 @@ impl SmoothTerm {
 
     /// Create a new smooth term with quantile-based knots (like mgcv)
     /// Uses B-spline basis
+    /// Cubic B-spline basis matching mgcv's `bs="bs"` (de Boor recursion,
+    /// order-4 basis with even-spaced knots over data range, 2nd-derivative
+    /// integrated penalty). Replaces the older natural-cubic placeholder
+    /// that previously sat under this name — with the de Boor basis the
+    /// span and predictions match mgcv to working precision.
     pub fn cubic_spline_quantile(
         name: String,
         num_basis: usize,
         x_data: &Array1<f64>,
     ) -> Result<Self> {
-        let basis =
-            CubicSpline::with_quantile_knots(x_data, num_basis - 2, BoundaryCondition::Natural);
-
-        let knots = basis.knots().unwrap();
-        let penalty = compute_penalty("cubic", num_basis, Some(knots), 1)?;
+        let basis = crate::basis::BSplineBasis::with_data_range(x_data, num_basis);
+        let penalty = basis.second_derivative_penalty();
 
         Ok(Self {
             name,
             basis: Box::new(basis),
             penalty,
             lambda: 1.0,
-            constraint_matrix: None, // No constraint for regular cubic splines
+            constraint_matrix: None,
         })
     }
 

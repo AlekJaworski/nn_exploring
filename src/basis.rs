@@ -546,6 +546,211 @@ impl BasisFunction for CubicRegressionSpline {
     }
 }
 
+/// B-spline basis (de Boor recursion). Mirrors mgcv's `bs="bs"` with
+/// default `m=c(3,2)`: order-(m[1]+1)=4 (cubic) basis with `nk = k -
+/// m[1] + 1` interior knots evenly spaced over the data range, plus
+/// `m[1]` boundary knots on each side at the same spacing. Total knot
+/// count is `k + m[1] + 1` (mgcv's `nk + 2*m[1]`).
+///
+/// Reference: mgcv smooth.r:1990-2030, splines::spline.des / de Boor.
+pub struct BSplineBasis {
+    /// Augmented knot vector (length k + order). `order = m[1]+1` (4 for cubic).
+    knots: Array1<f64>,
+    /// Number of basis functions = number of distinct B-splines of given order.
+    num_basis: usize,
+    /// B-spline order (= polynomial degree + 1). 4 for cubic.
+    order: usize,
+}
+
+impl BSplineBasis {
+    /// Construct mgcv-style `bs="bs"` knots. With `m[1]=3` (cubic order
+    /// 3 in mgcv's convention; basis order = 4), data range `[xl, xu]`,
+    /// `k` basis functions:
+    ///
+    /// * `nk = k - m[1] + 1` interior knots evenly spaced from
+    ///   `xl - 0.001*range` to `xu + 0.001*range`.
+    /// * `m[1]` boundary knots on each side at the same spacing.
+    ///
+    /// Matches `smooth.r:2020-2024` literally.
+    pub fn with_data_range(x_data: &Array1<f64>, num_basis: usize) -> Self {
+        let m1: usize = 3; // mgcv default (cubic)
+        let order = m1 + 1; // basis order = 4
+        let nk = num_basis - m1 + 1; // interior knots
+        if nk < 1 {
+            // mgcv would error here; fall back to a sane default.
+            let xl = x_data.iter().cloned().fold(f64::INFINITY, f64::min);
+            let xu = x_data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let knots = Array1::linspace(xl, xu, num_basis + order);
+            return Self { knots, num_basis, order };
+        }
+        let mut xl = x_data.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mut xu = x_data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let xr = xu - xl;
+        xl -= xr * 0.001;
+        xu += xr * 0.001;
+        let dx = (xu - xl) / ((nk - 1) as f64);
+        // smooth.r:2024: k <- seq(xl - dx*m[1], xu + dx*m[1], length=nk + 2*m[1])
+        let total = nk + 2 * m1;
+        let lo = xl - dx * (m1 as f64);
+        let hi = xu + dx * (m1 as f64);
+        let knots = Array1::linspace(lo, hi, total);
+        Self { knots, num_basis, order }
+    }
+
+    /// Evaluate the d-th derivative of every B-spline basis function at
+    /// every point in `x`. d=0 gives the basis matrix itself; d=2 gives
+    /// the 2nd-derivative basis used to assemble the standard penalty.
+    fn evaluate_derivative(&self, x: &Array1<f64>, deriv: usize) -> Array2<f64> {
+        let n = x.len();
+        let p = self.num_basis;
+        let order = self.order;
+        let mut out = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            let xi = x[i];
+            // Order-1 (constant): B_{j,1}(x) = 1 if t_j <= x < t_{j+1} else 0.
+            // For x slightly past the rightmost knot, allow `<= last_k` so
+            // boundary evaluations don't all collapse to zero. For x outside
+            // the augmented knot range entirely, recursion naturally
+            // returns 0 — matches mgcv's `splines::spline.des` semantics.
+            let mut b = vec![0.0_f64; p + order - 1];
+            let nk_total = self.knots.len();
+            let last_k = self.knots[nk_total - 1];
+            for j in 0..(p + order - 1) {
+                let lo = self.knots[j];
+                let hi = self.knots[j + 1];
+                let inside = (lo <= xi && xi < hi)
+                    || (j + 1 == p + order - 1 && (xi - last_k).abs() < 1e-15);
+                if inside {
+                    b[j] = 1.0;
+                }
+            }
+            // For points strictly outside the augmented knot range, all
+            // base entries stay 0 → final basis is all 0 (correct).
+            let xi_clamped = xi;
+            // Pure-spline recursion up to (order - deriv).
+            let recur_to = order - deriv;
+            for ord in 2..=recur_to {
+                let mut nb = vec![0.0_f64; p + order - ord];
+                for j in 0..(p + order - ord) {
+                    let denom1 = self.knots[j + ord - 1] - self.knots[j];
+                    let denom2 = self.knots[j + ord] - self.knots[j + 1];
+                    let term1 = if denom1.abs() > 1e-15 {
+                        (xi_clamped - self.knots[j]) / denom1 * b[j]
+                    } else {
+                        0.0
+                    };
+                    let term2 = if denom2.abs() > 1e-15 {
+                        (self.knots[j + ord] - xi_clamped) / denom2 * b[j + 1]
+                    } else {
+                        0.0
+                    };
+                    nb[j] = term1 + term2;
+                }
+                b = nb;
+            }
+            // Derivative recursion: ∂B_{j,m}/∂x = (m-1)·[ B_{j,m-1}/(t_{j+m-1}-t_j)
+            //                                          - B_{j+1,m-1}/(t_{j+m}-t_{j+1}) ]
+            // Apply `deriv` times.
+            let mut current_order = recur_to;
+            for _ in 0..deriv {
+                let next_order = current_order + 1;
+                let mut nb = vec![0.0_f64; p + order - next_order];
+                let mult = (next_order - 1) as f64;
+                for j in 0..(p + order - next_order) {
+                    let denom1 = self.knots[j + next_order - 1] - self.knots[j];
+                    let denom2 = self.knots[j + next_order] - self.knots[j + 1];
+                    let t1 = if denom1.abs() > 1e-15 { b[j] / denom1 } else { 0.0 };
+                    let t2 = if denom2.abs() > 1e-15 { b[j + 1] / denom2 } else { 0.0 };
+                    nb[j] = mult * (t1 - t2);
+                }
+                b = nb;
+                current_order = next_order;
+            }
+            for j in 0..p {
+                out[[i, j]] = b[j];
+            }
+        }
+        out
+    }
+}
+
+impl BasisFunction for BSplineBasis {
+    fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        Ok(self.evaluate_derivative(x, 0))
+    }
+
+    fn num_basis(&self) -> usize {
+        self.num_basis
+    }
+
+    fn knots(&self) -> Option<&Array1<f64>> {
+        Some(&self.knots)
+    }
+}
+
+impl BSplineBasis {
+    /// 2nd-derivative-squared penalty matrix.
+    /// `S[i,j] = ∫ B_i''(x) B_j''(x) dx` over the data range.
+    /// Approximated via Gauss-Legendre 5-point quadrature on each interior
+    /// knot interval — exact for polynomials up to order 9, more than
+    /// enough for the cubic 2nd-derivative-squared product (degree 2 each).
+    pub fn second_derivative_penalty(&self) -> Array2<f64> {
+        let p = self.num_basis;
+        let order = self.order;
+        let nk_total = self.knots.len();
+        let mut s = Array2::<f64>::zeros((p, p));
+        // 5-point Gauss-Legendre on [-1, 1]:
+        let gl_x = [
+            -0.906_179_845_938_664_0,
+            -0.538_469_310_105_683_1,
+            0.0,
+            0.538_469_310_105_683_1,
+            0.906_179_845_938_664_0,
+        ];
+        let gl_w = [
+            0.236_926_885_056_189_1,
+            0.478_628_670_499_366_5,
+            0.568_888_888_888_888_9,
+            0.478_628_670_499_366_5,
+            0.236_926_885_056_189_1,
+        ];
+        // Integrate over interior knot intervals only (boundary knots are
+        // outside the data range and contribute zero to the data-domain
+        // penalty in mgcv's convention).
+        let interior_lo = order - 1;
+        let interior_hi = nk_total - order;
+        for i in interior_lo..interior_hi {
+            let a = self.knots[i];
+            let b = self.knots[i + 1];
+            if (b - a).abs() < 1e-15 {
+                continue;
+            }
+            let half = 0.5 * (b - a);
+            let mid = 0.5 * (a + b);
+            for q in 0..5 {
+                let xq = mid + half * gl_x[q];
+                let wq = gl_w[q] * half;
+                let xq_arr = Array1::from_vec(vec![xq]);
+                let d2 = self.evaluate_derivative(&xq_arr, 2);
+                for r in 0..p {
+                    for c in 0..p {
+                        s[[r, c]] += wq * d2[[0, r]] * d2[[0, c]];
+                    }
+                }
+            }
+        }
+        // Symmetrise (cleans tiny floating-point asymmetry).
+        for r in 0..p {
+            for c in (r + 1)..p {
+                let avg = 0.5 * (s[[r, c]] + s[[c, r]]);
+                s[[r, c]] = avg;
+                s[[c, r]] = avg;
+            }
+        }
+        s
+    }
+}
+
 /// Thin plate regression spline basis
 pub struct ThinPlateSpline {
     /// Dimension of the covariate space
