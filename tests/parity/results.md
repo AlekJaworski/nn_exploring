@@ -6,94 +6,27 @@ Bar A is `ok` flag from `predict()` agreement at the given tolerance (rtol/atol 
 
 | case | A train | A test | A extrap | train abs | train rel | extrap abs | β maxabsdiff | dev rel | λ relerr |
 |---|---|---|---|---|---|---|---|---|---|
-| 1d_gaussian_near_linear_n500_k10_cr | ✓ | ✓ | ✓ | 3.33e-07 | 4.34e-07 | 5.13e-07 | 1.05e+00 | 2.21e-07 | 1.99e+01 |
-| 1d_gaussian_sigmoid_n300_k10_cr | ✓ | ✓ | ✓ | 4.16e-09 | 2.03e-06 | 1.20e-08 | 4.11e-01 | 1.92e-09 | 8.80e-07 |
-| 1d_gaussian_smooth_n100_k10_cr | ✓ | ✓ | ✓ | 8.38e-09 | 9.87e-08 | 1.47e-08 | 9.29e-02 | 3.07e-09 | 3.93e-07 |
-| 1d_gaussian_smooth_n500_k10_cr | ✓ | ✓ | ✓ | 1.29e-11 | 7.92e-11 | 1.45e-11 | 7.89e-01 | 4.00e-13 | 4.50e-10 |
-| 1d_gaussian_smooth_n500_k20_bs | ✓ | ✓ | ✓ | 1.45e-10 | 4.31e-09 | 5.12e-10 | 7.40e-01 | 1.32e-11 | 5.28e-09 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | ✓ | ✓ | ✓ | 6.65e-10 | 1.53e-07 | 1.30e-09 | 3.30e-02 | 1.16e-10 | 4.66e-08 |
-| 1d_gaussian_wiggly_n500_k20_cr | ✓ | ✓ | ✓ | 6.02e-10 | 1.28e-07 | 2.76e-09 | 1.51e+00 | 5.73e-11 | 8.74e-08 |
-| 2d_binomial_logit_n1000_k10_cr | ✗ | ✓ | ✓ | 6.11e-04 | 1.96e-03 | 5.69e-04 | 5.27e-01 | 8.37e-01 | 2.99e-02 |
-| 2d_gamma_log_n1000_k10_cr | ✓ | ✓ | ✓ | 4.98e-05 | 9.08e-06 | 8.78e-05 | 1.38e-01 | 1.32e+01 | 4.97e+01 |
-| 2d_gaussian_additive_n2000_k15_cr | ✓ | ✓ | ✓ | 8.47e-10 | 4.78e-07 | 2.61e-09 | 9.47e-01 | 7.68e-11 | 1.42e-07 |
-| 2d_gaussian_additive_n500_k10_cr | ✓ | ✓ | ✓ | 1.39e-10 | 1.77e-08 | 4.37e-10 | 1.02e+00 | 1.81e-11 | 8.38e-09 |
-| 2d_poisson_log_n1000_k10_cr | ✓ | ✓ | ✓ | 3.62e-03 | 5.53e-04 | 8.91e-03 | 2.02e-01 | 5.45e+00 | 8.94e+01 |
-| 3d_gaussian_mixed_n800_k10_cr | ✓ | ✓ | ✓ | 1.87e-05 | 1.86e-03 | 2.70e-05 | 1.54e-01 | 3.11e-06 | 5.30e-03 |
-| 4d_gaussian_mixed_n1000_k10_cr | ✓ | ✓ | ✓ | 2.23e-07 | 6.04e-06 | 4.24e-07 | 5.04e-01 | 5.07e-09 | 8.98e+00 |
-| 4d_small_neighbourhood_n300 | ✓ | ✓ | ✓ | 8.86e-05 | 3.75e-02 | 1.27e-04 | 2.09e+00 | 1.67e-05 | 6.46e+00 |
-| 5d_gaussian_mixed_n1500_k8_cr | ✓ | ✓ | ✓ | 4.21e-07 | 3.02e-04 | 5.13e-07 | 8.09e-01 | 4.32e-08 | 1.01e-04 |
-| 5d_skewed_features_n5000 | ✓ | ✓ | ✓ | 1.56e-05 | 3.36e-02 | 3.91e-05 | 8.23e-01 | 1.59e-06 | 1.27e+01 |
-| 6d_heatmap_pricing_n8000 | ✓ | ✓ | ✓ | 3.17e-06 | 2.58e-07 | 4.95e-06 | 1.54e+00 | 1.19e-07 | 3.60e+01 |
-| 8d_neighbourhoods_like_n15000 | ✓ | ✓ | ✓ | 3.85e-04 | 6.84e-02 | 5.23e-04 | 2.28e-04 | 1.95e-05 | 9.90e-01 |
-
-## mgcv_exact mode (Stage 4)
-
-Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. Bar at 1e-3 absolute. λ values shown for the first smooth only.
-
-| case | max_absdiff | our λ_0 | mgcv λ_0 | λ ratio |
-|---|---|---|---|---|
-| 1d_gaussian_near_linear_n500_k10_cr | 3.33e-07 | 1.02e+09 | 4.90e+07 | 4.80e-02 |
-| 1d_gaussian_sigmoid_n300_k10_cr | 4.16e-09 | 1.13e+01 | 1.13e+01 | 1.00e+00 |
-| 1d_gaussian_smooth_n100_k10_cr | 8.38e-09 | 5.55e+00 | 5.55e+00 | 1.00e+00 |
-| 1d_gaussian_smooth_n500_k10_cr | 1.29e-11 | 5.10e+00 | 5.10e+00 | 1.00e+00 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | 6.65e-10 | 9.95e+00 | 9.95e+00 | 1.00e+00 |
-| 1d_gaussian_wiggly_n500_k20_cr | 6.02e-10 | 4.15e-01 | 4.15e-01 | 1.00e+00 |
-| 2d_gaussian_additive_n2000_k15_cr | 8.47e-10 | 2.63e+01 | 2.63e+01 | 1.00e+00 |
-| 2d_gaussian_additive_n500_k10_cr | 1.39e-10 | 5.21e+00 | 5.21e+00 | 1.00e+00 |
-| 3d_gaussian_mixed_n800_k10_cr | 1.87e-05 | 5.22e+00 | 5.22e+00 | 1.00e+00 |
-| 4d_gaussian_mixed_n1000_k10_cr | 2.23e-07 | 5.16e+00 | 5.16e+00 | 1.00e+00 |
-| 4d_small_neighbourhood_n300 | 8.86e-05 | 1.36e+09 | 4.29e+08 | 3.16e-01 |
-| 5d_gaussian_mixed_n1500_k8_cr | 4.21e-07 | 2.42e+00 | 2.42e+00 | 1.00e+00 |
-| 5d_skewed_features_n5000 | 1.56e-05 | 1.36e+01 | 1.36e+01 | 1.00e+00 |
-| 6d_heatmap_pricing_n8000 | 3.17e-06 | 4.55e+00 | 4.55e+00 | 1.00e+00 |
-| 8d_neighbourhoods_like_n15000 | 3.85e-04 | 2.00e+07 | 1.96e+09 | 9.80e+01 |
-
-## Newton trajectory vs mgcv (Stage 3)
-
-First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's score range. `—` means mgcv_rust stayed within 5% throughout the run.
-
-| case | rust iters | mgcv iters | first diverged | rust final REML | mgcv final REML |
-|---|---|---|---|---|---|
-| 1d_gaussian_near_linear_n500_k10_cr | 14 | 10 | — | -4.45e+02 | -4.46e+02 |
-| 1d_gaussian_sigmoid_n300_k10_cr | 4 | 5 | 1 | -3.18e+02 | -3.18e+02 |
-| 1d_gaussian_smooth_n100_k10_cr | 5 | 3 | 1 | -7.72e+00 | -8.36e+00 |
-| 1d_gaussian_smooth_n500_k10_cr | 6 | 6 | 1 | -6.37e+01 | -6.43e+01 |
-| 1d_gaussian_smooth_n500_k20_bs | 5 | 5 | 1 | -6.33e+01 | -6.40e+01 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | 5 | 6 | 1 | -1.69e+02 | -1.70e+02 |
-| 1d_gaussian_wiggly_n500_k20_cr | 5 | 5 | — | -1.74e+02 | -1.75e+02 |
-| 2d_binomial_logit_n1000_k10_cr | 35 | 4 | 1 | 1.43e+03 | 1.43e+03 |
-| 2d_gamma_log_n1000_k10_cr | 150 | 10 | 1 | 7.47e+02 | 7.39e+02 |
-| 2d_gaussian_additive_n2000_k15_cr | 5 | 5 | 1 | -3.32e+02 | -3.33e+02 |
-| 2d_gaussian_additive_n500_k10_cr | 5 | 6 | 1 | -5.68e+01 | -5.80e+01 |
-| 2d_poisson_log_n1000_k10_cr | 140 | 7 | 1 | 1.45e+03 | 1.45e+03 |
-| 3d_gaussian_mixed_n800_k10_cr | 9 | 8 | 1 | -1.14e+02 | -1.16e+02 |
-| 4d_gaussian_mixed_n1000_k10_cr | 15 | 10 | 1 | -1.46e+02 | -1.48e+02 |
-| 4d_small_neighbourhood_n300 | 16 | 11 | 1 | -1.30e+02 | -1.32e+02 |
-| 5d_gaussian_mixed_n1500_k8_cr | 8 | 7 | 1 | -2.01e+02 | -2.04e+02 |
-| 5d_skewed_features_n5000 | 15 | 8 | 1 | -4.35e+03 | -4.36e+03 |
-| 6d_heatmap_pricing_n8000 | 13 | 8 | 1 | -6.79e+03 | -6.80e+03 |
-| 8d_neighbourhoods_like_n15000 | 15 | 9 | 1 | -1.32e+04 | -1.32e+04 |
 
 ## Perf (median over N=5 fits, lower is better)
 
 | case | rust median ms | rust min ms | mgcv median ms | rust/mgcv |
 |---|---|---|---|---|
-| 1d_gaussian_near_linear_n500_k10_cr | 2.60e+00 | 2.56e+00 | 3.38e+01 | 7.67e-02 |
-| 1d_gaussian_sigmoid_n300_k10_cr | 5.47e-01 | 5.40e-01 | 1.86e+01 | 2.94e-02 |
-| 1d_gaussian_smooth_n100_k10_cr | 4.90e-01 | 4.80e-01 | 1.83e+01 | 2.67e-02 |
-| 1d_gaussian_smooth_n500_k10_cr | 1.12e+00 | 1.07e+00 | 3.13e+01 | 3.56e-02 |
-| 1d_gaussian_smooth_n500_k20_bs | 3.43e+00 | 3.13e+00 | 3.19e+01 | 1.08e-01 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | 1.25e+00 | 1.21e+00 | 1.97e+01 | 6.36e-02 |
-| 1d_gaussian_wiggly_n500_k20_cr | 2.41e+00 | 2.32e+00 | 2.36e+01 | 1.02e-01 |
-| 2d_binomial_logit_n1000_k10_cr | 2.44e+01 | 2.13e+01 | 8.61e+01 | 2.83e-01 |
-| 2d_gamma_log_n1000_k10_cr | 7.72e+01 | 7.38e+01 | 1.54e+02 | 5.01e-01 |
-| 2d_gaussian_additive_n2000_k15_cr | 7.70e+00 | 7.35e+00 | 3.53e+01 | 2.18e-01 |
-| 2d_gaussian_additive_n500_k10_cr | 2.01e+00 | 1.94e+00 | 2.47e+01 | 8.12e-02 |
-| 2d_poisson_log_n1000_k10_cr | 1.16e+02 | 1.03e+02 | 1.54e+02 | 7.52e-01 |
-| 3d_gaussian_mixed_n800_k10_cr | 8.29e+00 | 8.07e+00 | 6.07e+01 | 1.37e-01 |
-| 4d_gaussian_mixed_n1000_k10_cr | 2.64e+01 | 2.35e+01 | 8.34e+01 | 3.17e-01 |
-| 4d_small_neighbourhood_n300 | 1.19e+01 | 1.07e+01 | 7.51e+01 | 1.58e-01 |
-| 5d_gaussian_mixed_n1500_k8_cr | 1.47e+01 | 1.37e+01 | 9.95e+01 | 1.48e-01 |
-| 5d_skewed_features_n5000 | 1.12e+02 | 1.06e+02 | 1.52e+02 | 7.34e-01 |
-| 6d_heatmap_pricing_n8000 | 2.85e+02 | 2.30e+02 | 3.31e+02 | 8.62e-01 |
-| 8d_neighbourhoods_like_n15000 | 9.63e+02 | 9.39e+02 | 7.44e+02 | 1.29e+00 |
+| 1d_gaussian_near_linear_n500_k10_cr | 2.24e+00 | 2.22e+00 | 3.05e+01 | 7.35e-02 |
+| 1d_gaussian_sigmoid_n300_k10_cr | 6.41e-01 | 6.15e-01 | 1.87e+01 | 3.43e-02 |
+| 1d_gaussian_smooth_n100_k10_cr | 5.83e-01 | 5.64e-01 | 1.63e+01 | 3.59e-02 |
+| 1d_gaussian_smooth_n500_k10_cr | 1.04e+00 | 1.01e+00 | 2.04e+01 | 5.11e-02 |
+| 1d_gaussian_smooth_n500_k20_bs | 3.03e+00 | 2.75e+00 | 2.81e+01 | 1.08e-01 |
+| 1d_gaussian_sparse_edges_n400_k10_cr | 8.93e-01 | 8.15e-01 | 1.98e+01 | 4.50e-02 |
+| 1d_gaussian_wiggly_n500_k20_cr | 2.34e+00 | 2.34e+00 | 2.18e+01 | 1.08e-01 |
+| 2d_binomial_logit_n1000_k10_cr | 2.43e+01 | 2.14e+01 | 8.89e+01 | 2.74e-01 |
+| 2d_gamma_log_n1000_k10_cr | 7.91e+01 | 7.60e+01 | 1.67e+02 | 4.74e-01 |
+| 2d_gaussian_additive_n2000_k15_cr | 8.76e+00 | 7.71e+00 | 4.32e+01 | 2.03e-01 |
+| 2d_gaussian_additive_n500_k10_cr | 2.14e+00 | 1.88e+00 | 3.48e+01 | 6.15e-02 |
+| 2d_poisson_log_n1000_k10_cr | 9.20e+01 | 8.19e+01 | 1.37e+02 | 6.72e-01 |
+| 3d_gaussian_mixed_n800_k10_cr | 6.77e+00 | 6.26e+00 | 4.91e+01 | 1.38e-01 |
+| 4d_gaussian_mixed_n1000_k10_cr | 2.64e+01 | 2.11e+01 | 8.28e+01 | 3.19e-01 |
+| 4d_small_neighbourhood_n300 | 1.11e+01 | 8.41e+00 | 6.95e+01 | 1.59e-01 |
+| 5d_gaussian_mixed_n1500_k8_cr | 1.80e+01 | 1.34e+01 | 1.01e+02 | 1.79e-01 |
+| 5d_skewed_features_n5000 | 1.35e+02 | 1.29e+02 | 1.54e+02 | 8.76e-01 |
+| 6d_heatmap_pricing_n8000 | 2.50e+02 | 2.26e+02 | 2.24e+02 | 1.12e+00 |
+| 8d_neighbourhoods_like_n15000 | 1.02e+03 | 9.68e+02 | 6.76e+02 | 1.51e+00 |
