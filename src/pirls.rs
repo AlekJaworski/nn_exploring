@@ -353,7 +353,7 @@ fn fit_pirls_gaussian_fast(
 }
 
 /// Compute deviance for a given family
-fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f64 {
+pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f64 {
     let mut deviance = 0.0;
 
     for i in 0..y.len() {

@@ -652,6 +652,7 @@ impl PyGAM {
             &lambdas,
             &penalties,
             None,
+            self.inner.family,
         )
         .map_err(|e| PyValueError::new_err(format!("hessian failed: {}", e)))?;
         Ok(numpy::PyArray2::from_owned_array(py, hess))
@@ -701,6 +702,7 @@ impl PyGAM {
             &lambdas,
             &penalties,
             None,
+            self.inner.family,
         )
         .map_err(|e| PyValueError::new_err(format!("gradient failed: {}", e)))?;
         Ok(numpy::PyArray1::from_owned_array(py, grad))
@@ -820,6 +822,7 @@ impl PyGAM {
             &penalties,
             None,
             mp,
+            self.inner.family,
         )
         .map_err(|e| PyValueError::new_err(format!("REML evaluation failed: {}", e)))
     }

@@ -442,7 +442,16 @@ impl GAM {
         let _ = n;
         let is_gaussian_family = matches!(self.family, crate::pirls::Family::Gaussian);
         let selected_algorithm = algorithm.unwrap_or_else(|| {
-            if is_gaussian_family {
+            // In mgcv_exact mode the closed-form gradient/Hessian
+            // (reml_gradient_mgcv_exact_closed_form) extends to canonical-link
+            // exponential families via the envelope theorem — Newton at
+            // PiRLS-converged β converges to mgcv's λ to ~10% relerr on
+            // binomial/poisson, vs FS landing ~30× off.
+            //
+            // The historical "Newton destabilizes IRLS for binomial" issue
+            // (commit 2c) was fixed by the eigenvalue-ABS Hessian (4d) and
+            // mgcv_exact's tighter convergence criteria (3i+).
+            if is_gaussian_family || self.mgcv_exact {
                 crate::smooth::REMLAlgorithm::Newton
             } else {
                 crate::smooth::REMLAlgorithm::FellnerSchall
@@ -484,6 +493,16 @@ impl GAM {
             smoothing_params.mgcv_exact_score = true;
             smoothing_params.mp = mp;
         }
+        // Family-specific scale parameter:
+        //   Binomial / Poisson: φ = 1 (known by construction)
+        //   Gaussian / Gamma:   φ profiled from Pearson chi-squared
+        // The Fellner-Schall update needs the right φ; estimating it from
+        // (y - Xβ)² is wrong for non-Gaussian since Xβ=η not μ.
+        smoothing_params.phi_fixed = match self.family {
+            crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => Some(1.0),
+            crate::pirls::Family::Gaussian | crate::pirls::Family::Gamma => None,
+        };
+        smoothing_params.family = self.family;
 
         // Smart initialization for lambda
         if !cache.penalties.is_empty() {

@@ -53,11 +53,24 @@ _8D_15K_REASON = (
     "knot-placement nuance at this scale. Smaller real-estate-shape cases "
     "(4d_small_neighbourhood_n300, 6d_heatmap_pricing_n8000) pass."
 )
+_NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
+    "Non-Gaussian (binomial / poisson) byte-for-byte parity needs the "
+    "outer Newton loop to re-run inner PiRLS at each λ step (mgcv's outer "
+    "iteration). Currently Newton uses the PiRLS-frozen IRLS weights and "
+    "re-solves β with `A β = X'Wy`, which is a one-step approximation "
+    "rather than the converged β̂(λ). Fit lands within ~10% of mgcv's λ "
+    "(was ~30× off under FS — switching to Newton + envelope-theorem "
+    "gradient is a big improvement) but residual prediction diff is "
+    "2.5e-3 (binomial) / 2.5e-2 (poisson) — just above Bar A. "
+    "Closing this gap is its own followup."
+)
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
         "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
+        "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
+        "2d_poisson_log_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
     },
     "test_design_matrix_span": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,

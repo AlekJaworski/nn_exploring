@@ -34,7 +34,7 @@ fn dispatch_reml_score(
     cached_xtwx: Option<&Array2<f64>>,
 ) -> Result<f64> {
     if sp.mgcv_exact_score {
-        reml_criterion_multi_cached_mgcv_exact(y, x, w, lambdas, penalties, cached_xtwx, sp.mp)
+        reml_criterion_multi_cached_mgcv_exact(y, x, w, lambdas, penalties, cached_xtwx, sp.mp, sp.family)
     } else {
         reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
     }
@@ -182,6 +182,16 @@ pub struct SmoothingParameter {
     /// Mp = nsdf + Σ null.space.dim_j (constant in λ). Required for
     /// the mgcv-exact REML score; pre-computed once per fit.
     pub mp: usize,
+    /// Fixed scale parameter φ. `Some(1.0)` for binomial/poisson where φ
+    /// is known; `None` for Gaussian/Gamma where φ is profiled from
+    /// Pearson residuals. The Fellner-Schall update needs the right φ:
+    /// estimating it from `(y - Xβ)²` is wrong for non-Gaussian since
+    /// `Xβ = η` not `μ`.
+    pub phi_fixed: Option<f64>,
+    /// GLM family for REML score / gradient / Hessian. Affects how the
+    /// deviance and scale parameter are computed in mgcv-exact mode.
+    /// Default is Gaussian; set by gam_optimized.rs from `self.family`.
+    pub family: crate::pirls::Family,
 }
 
 impl SmoothingParameter {
@@ -195,6 +205,8 @@ impl SmoothingParameter {
             scale_method: ScaleParameterMethod::EDF, // Default to EDF (matches mgcv)
             mgcv_exact_score: false,
             mp: 0,
+            phi_fixed: None,
+            family: crate::pirls::Family::Gaussian,
         }
     }
 
@@ -212,6 +224,8 @@ impl SmoothingParameter {
             scale_method: ScaleParameterMethod::Rank,
             mgcv_exact_score: false,
             mp: 0,
+            phi_fixed: None,
+            family: crate::pirls::Family::Gaussian,
         }
     }
 
@@ -229,6 +243,8 @@ impl SmoothingParameter {
             scale_method: ScaleParameterMethod::EDF,
             mgcv_exact_score: false,
             mp: 0,
+            phi_fixed: None,
+            family: crate::pirls::Family::Gaussian,
         }
     }
 
@@ -617,7 +633,7 @@ impl SmoothingParameter {
             //   replacing it with closed-form is an open task.
             let t_grad = Instant::now();
             let gradient = if self.mgcv_exact_score {
-                reml_gradient_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx))?
+                reml_gradient_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx), self.family)?
             } else {
                 reml_gradient_multi_qr_adaptive_cached_edf(
                     y,
@@ -636,7 +652,7 @@ impl SmoothingParameter {
 
             let t_hess = Instant::now();
             let mut hessian = if self.mgcv_exact_score {
-                reml_hessian_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx))?
+                reml_hessian_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx), self.family)?
             } else {
                 reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?
             };
@@ -1191,15 +1207,6 @@ impl SmoothingParameter {
 
         let a_inv = cholesky.inv_into().map_err(|_| GAMError::SingularMatrix)?;
 
-        // Compute scale parameter φ = RSS / (n - edf)
-        // Use Pearson residuals for scale estimation
-        let residuals = y - &x.dot(beta);
-        let rss: f64 = residuals
-            .iter()
-            .zip(w.iter())
-            .map(|(r, wi)| wi * r * r)
-            .sum();
-
         // Compute edf = tr(A^{-1} X'WX) = tr(hat matrix)
         let a_inv_xtwx = a_inv.dot(&xtwx);
         let mut edf = 0.0;
@@ -1209,8 +1216,37 @@ impl SmoothingParameter {
         // Clamp edf to [1, p] (values > p indicate numerical issues)
         edf = edf.max(1.0).min(p as f64);
 
-        let n_minus_edf = (n as f64 - edf).max(1.0);
-        let phi = rss / n_minus_edf;
+        // Compute scale parameter φ.
+        // - For binomial/poisson where φ is known (=1), use that exactly.
+        //   The `(y - Xβ)²` weighted RSS is wrong here: `Xβ = η`, not `μ`,
+        //   so the residual on the linear-predictor scale carries no
+        //   meaningful scale information.
+        // - For Gaussian/Gamma, profile φ from the working-response RSS
+        //   (Pearson chi-squared via the IRLS weights).
+        let phi = match self.phi_fixed {
+            Some(p) => p,
+            None => {
+                // Pearson chi-squared via IRLS weights: Σ w_i (z_i - X_i β)²
+                // For Gaussian z=y, w=1, this is Σ(y - Xβ)²; for Gamma
+                // with profiled scale this is the right quantity once z
+                // and w are the converged PiRLS values supplied by the
+                // outer loop.
+                let residuals = y - &x.dot(beta);
+                let rss: f64 = residuals
+                    .iter()
+                    .zip(w.iter())
+                    .map(|(r, wi)| wi * r * r)
+                    .sum();
+                let n_minus_edf = (n as f64 - edf).max(1.0);
+                rss / n_minus_edf
+            }
+        };
+        let rss = if std::env::var("MGCV_PROFILE").is_ok() {
+            let r = y - &x.dot(beta);
+            r.iter().zip(w.iter()).map(|(r, wi)| wi * r * r).sum::<f64>()
+        } else {
+            0.0
+        };
 
         if std::env::var("MGCV_PROFILE").is_ok() {
             eprintln!(
