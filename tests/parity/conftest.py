@@ -46,12 +46,23 @@ _BS_BASIS_REASON = (
     "Tracked as a separate followup; remove this xfail when de Boor splines "
     "land."
 )
-_8D_15K_REASON = (
-    "At production cardinality (n=15000, 8 cr smooths, k=[25,12,12,6,6,6,6,3]) "
-    "rust and mgcv cr-spline bases diverge by ~1.88% energy (combined rank "
-    "129 vs 69 each). Likely mgcv's nat.param reparameterization or "
-    "knot-placement nuance at this scale. Smaller real-estate-shape cases "
-    "(4d_small_neighbourhood_n300, 6d_heatmap_pricing_n8000) pass."
+_8D_15K_PARITY_REASON = (
+    "At n=15000 with 8 smooths and 2 saturating λ (one at ~1.96e9, one at "
+    "~8.4e6) our absdiff is 3.85e-4 — under threshold for typical points "
+    "but failing 36/15000 near-zero (|y_pred| ≲ 0.01) where the threshold "
+    "1e-4 + rtol*|y| collapses to ~atol. Same near-zero amplification as "
+    "the 4i fix at smaller scale, just with absdiff 20× bigger because "
+    "we're at production cardinality. Closing this needs either tighter "
+    "infinite-λ detection (mgcv drops a smooth from active set when λ→∞) "
+    "or a per-case atol bump."
+)
+_8D_15K_FD_GRAD_REASON = (
+    "FD-vs-closed-form gradient comparison: at saturating λ ≈ 1.96e9 the "
+    "FD gradient (h=1e-3) hits catastrophic cancellation, while the "
+    "closed-form gradient stays correct (it matches mgcv's reported "
+    "outer.info$grad — see test_closed_form_matches_mgcv_reported_gradient "
+    "which now passes). This test should be skipped when max(λ) > 1e6 "
+    "but currently isn't."
 )
 _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
     "Non-Gaussian byte-for-byte parity needs mgcv's full outer iteration: "
@@ -68,21 +79,14 @@ _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
-        "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
+        "8d_neighbourhoods_like_n15000": _8D_15K_PARITY_REASON,
         "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
     },
     "test_design_matrix_span": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
-        "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
     },
     "test_closed_form_matches_finite_diff_at_optimum": {
-        "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
-    },
-    "test_gradient_zero_at_mgcv_optimum": {
-        "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
-    },
-    "test_closed_form_matches_mgcv_reported_gradient": {
-        "8d_neighbourhoods_like_n15000": _8D_15K_REASON,
+        "8d_neighbourhoods_like_n15000": _8D_15K_FD_GRAD_REASON,
     },
 }
 

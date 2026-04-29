@@ -73,7 +73,11 @@ def _fit_mgcv_with_lpmatrix(fix: Fixture):
     with localconverter(pandas2ri.converter + default_converter):
         rdf = pandas2ri.py2rpy(df)
     family = ro.r(_FAMILY_R[inp.family].format(inp.link))
-    fit = _mgcv.bam(ro.Formula(f"y ~ {rhs}"), data=rdf, method=inp.method, family=family)
+    # Match the fixture generator: `bam` discretises knot placement once
+    # n > chunk.size=10000, producing a basis our `gam`-style cr-spline
+    # can't match. Use `gam` for large-n so the basis spec is identical.
+    fitter = _mgcv.gam if df.shape[0] > 10000 else _mgcv.bam
+    fit = fitter(ro.Formula(f"y ~ {rhs}"), data=rdf, method=inp.method, family=family)
     lpmatrix = np.asarray(_stats.predict(fit, newdata=rdf, type="lpmatrix"), dtype=float)
     return fit, lpmatrix, df
 
