@@ -303,24 +303,92 @@ class GAMFitter:
 
     # ------------------------- Followup stubs ------------------------- #
 
-    def predict_ci(
-        self, X: ArrayLike, predictor: Optional[str] = None, alpha: float = 0.05
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Confidence interval for predictions. 🚧 Requires `vcov` from
-        the Rust core (Ergo-3 followup)."""
-        raise NotImplementedError(
-            "predict_ci needs vcov access from the Rust core (Ergo-3 followup). "
-            "Track in `mgcv_rust - Next Steps.md`."
-        )
+    def get_vcov(self) -> np.ndarray:
+        """Posterior covariance matrix of β̂. Same shape as the design
+        matrix's column count (intercept + per-smooth blocks). For
+        Gaussian / Gamma this is `σ² · (X'WX + λS)⁻¹` with σ² profiled
+        from the deviance; for binomial / poisson `σ² = 1`."""
+        if self._native is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        return np.asarray(self._native.get_vcov(), dtype=float)
+
+    def evaluate_lpmatrix(self, X: ArrayLike) -> np.ndarray:
+        """Design matrix `[1 | smooth_1 | ...]` at the given X. mgcv's
+        `predict.gam(..., type="lpmatrix")`."""
+        if self._native is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        X_arr, _ = _to_numpy_with_columns(X, self._effective_predictors)
+        return np.asarray(self._native.evaluate_lpmatrix(X_arr), dtype=float)
 
     def get_posterior_samples(
-        self, X: ArrayLike, predictor: Optional[str] = None, n_samples: int = 1000
+        self,
+        X: ArrayLike,
+        predictor: Optional[str] = None,
+        n_samples: int = 1000,
+        seed: int = 42,
     ) -> np.ndarray:
-        """Posterior samples of the predicted curve. 🚧 Same blocker as
-        `predict_ci`."""
-        raise NotImplementedError(
-            "get_posterior_samples needs vcov + lpmatrix-at-x from the Rust core."
+        """Sample `n_samples` posterior curves of the linear predictor at
+        the given X. Returns an `(n_x, n_samples)` array.
+
+        Mirrors `r_fitting.GamFitter.get_posterior_samples` (which seeds
+        with 42 by default). The `predictor` argument is currently
+        unused — included for API compatibility; the lpmatrix is built
+        from the FULL set of smooths and the resulting samples are the
+        joint posterior over all of them.
+
+        Sampling is from a multivariate normal centered at `coef` with
+        covariance `vcov` — the standard Bayesian posterior for the
+        REML/Laplace approximation (Wood 2011)."""
+        if self._native is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        coef = self.get_coefficients()
+        vcov = self.get_vcov()
+        lp = self.evaluate_lpmatrix(X)
+        rng = np.random.default_rng(seed)
+        # Use `multivariate_normal` for parity with r_fitting.GamFitter
+        # which calls np.random.multivariate_normal seeded with 42.
+        coef_samples = rng.multivariate_normal(coef, vcov, n_samples)
+        # lp: (n_x, p), coef_samples: (n_samples, p) — return (n_x, n_samples)
+        return lp @ coef_samples.T
+
+    def predict_ci(
+        self,
+        X: ArrayLike,
+        alpha: float = 0.05,
+        n_samples: int = 1000,
+        predictor: Optional[str] = None,
+        seed: int = 42,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Pointwise confidence interval for predictions at the given X.
+
+        Returns `(lower, upper)` as 1-D arrays. Computed via posterior
+        sampling (matches `r_fitting.GamFitter.predict_ci`): draws
+        `n_samples` β-vectors from the multivariate normal posterior,
+        evaluates the linear predictor at X, takes the alpha/2 and
+        1-alpha/2 quantiles, then applies the inverse link.
+
+        For non-canonical / non-identity links, the returned interval is
+        on the response scale.
+        """
+        post = self.get_posterior_samples(
+            X, predictor=predictor, n_samples=n_samples, seed=seed
         )
+        lo, hi = np.quantile(post, [alpha / 2, 1 - alpha / 2], axis=1)
+        # Apply inverse link on the response scale.
+        link = (self.link or "identity").lower()
+        if link in ("identity", ""):
+            return lo, hi
+        if link == "log":
+            return np.exp(lo), np.exp(hi)
+        if link == "logit":
+            return 1.0 / (1.0 + np.exp(-lo)), 1.0 / (1.0 + np.exp(-hi))
+        if link == "inverse":
+            # Avoid division by zero — clamp to tiny epsilon (matches
+            # what the Rust inverse_link does for Gamma).
+            lo_safe = np.where(np.abs(lo) < 1e-10, np.sign(lo) * 1e-10 + 1e-15, lo)
+            hi_safe = np.where(np.abs(hi) < 1e-10, np.sign(hi) * 1e-10 + 1e-15, hi)
+            return 1.0 / lo_safe, 1.0 / hi_safe
+        raise NotImplementedError(f"predict_ci does not yet support link={link!r}")
 
     def get_edf_df(self) -> Any:
         """Per-smooth EDF table for auto-k tuning. 🚧 Needs Rust EDF
@@ -329,21 +397,94 @@ class GAMFitter:
             "get_edf_df needs per-smooth EDF from the Rust core."
         )
 
-    def serialize(self, prediction_range: Optional[dict] = None) -> dict[str, Any]:
+    def serialize(
+        self,
+        prediction_range: Optional[dict[str, dict[str, float]]] = None,
+        n_points: int = 1000,
+        range_multiplier: float = 1000.0,
+    ) -> dict[str, Any]:
         """Serialize to the schema consumed by `GamPredictor` in the
-        neighbourhoods repo. 🚧 Stub — returns coefficients only until
-        vcov + lpmatrix-at-x land."""
+        neighbourhoods repo. Mirrors `r_fitting.GamFitter.serialize`:
+        builds a dense prediction grid spanning each predictor's range
+        plus a far-extrapolation tail, evaluates the lpmatrix on that
+        grid, and packages it with the coefficients and covariance.
+
+        The downstream `GamPredictor` interpolates against this grid at
+        prediction time, so the serialized dict is the only thing the
+        consumer needs.
+        """
         if self._native is None:
             raise RuntimeError("Model has not been fitted yet.")
+        if prediction_range is None:
+            prediction_range = self.prediction_range or {}
+        if not prediction_range:
+            raise RuntimeError(
+                "No prediction_range available — was the model fitted? "
+                "Pass `prediction_range` explicitly to override."
+            )
+
+        # Build the prediction grid: per-predictor [low_extrap, ...n_points
+        # linspaced over data range..., high_extrap]. The two tails sit far
+        # outside the data range so downstream consumers can saturate
+        # extrapolation predictions to those endpoints.
+        predictors = self._effective_predictors or []
+        data_for_df: dict[str, np.ndarray] = {}
+        for p in predictors:
+            rng = prediction_range[p]
+            value_range = rng["max"] - rng["min"]
+            lowest_val = rng["min"] - range_multiplier * value_range
+            highest_val = rng["max"] + range_multiplier * value_range
+            data_for_df[p] = np.concatenate(
+                [
+                    np.array([lowest_val]),
+                    np.linspace(rng["min"], rng["max"], n_points),
+                    np.array([highest_val]),
+                ]
+            )
+        # Stack columns in predictor order.
+        X_grid = np.column_stack([data_for_df[p] for p in predictors])
+        lp_matrix = self.evaluate_lpmatrix(X_grid)
+
+        # Per-term column index ranges (matches mgcv's `extract_term_indices`).
+        # The native call returns a list of (name, first, last) tuples
+        # with INCLUSIVE ends and 0-based indices against the full
+        # design (intercept at column 0). The Rust core uses internal
+        # names `x0, x1, ...` — map them back to the user-supplied
+        # predictor names so consumers see the names they passed in.
+        term_indices_raw = self._native.get_term_indices()  # type: ignore[union-attr]
+        if len(term_indices_raw) != len(predictors):
+            raise RuntimeError(
+                f"Term count mismatch: native returned {len(term_indices_raw)} "
+                f"smooths but wrapper has {len(predictors)} predictors"
+            )
+        predictors_info: dict[str, dict[str, int]] = {
+            "constant": {"first_index": 0, "last_index": 0}
+        }
+        for user_name, (_native_name, first, last) in zip(
+            predictors, term_indices_raw, strict=False
+        ):
+            predictors_info[user_name] = {"first_index": first, "last_index": last}
+
+        coefficients = self.get_coefficients()
+        cov_matrix = self.get_vcov()
+
+        # `lp_feature_values`: prepend a constant 1 column to the grid so
+        # downstream code sees `[1 | predictor_1 | predictor_2 | ...]`,
+        # matching the lpmatrix's intercept layout.
+        lp_feature_values = np.concatenate(
+            [np.ones((X_grid.shape[0], 1)), X_grid], axis=1
+        )
+
         return {
-            "predictors": self._effective_predictors,
+            "predictors_info": predictors_info,
+            "lp_matrix": lp_matrix,
+            "coefficients": coefficients,
+            "cov_matrix": cov_matrix,
+            "lp_feature_values": lp_feature_values,
+            "predictors": list(predictors),
             "family": self.family,
             "link": self.link,
-            "pc_map": self.pc_map,
-            "coefficients": self.get_coefficients(),
-            # The full schema also needs lp_matrix, cov_matrix,
-            # predictors_info — Ergo-4 followup.
-            "_incomplete": True,
+            "pc_map": dict(self.pc_map),
         }
 
     def __getitem__(self, predictors: Iterable[str]) -> "GAMFitter":

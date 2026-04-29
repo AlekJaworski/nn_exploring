@@ -637,6 +637,154 @@ impl PyGAM {
         Ok(PyArray2::from_owned_array(py, design_matrix.clone()))
     }
 
+    /// Predictor (smooth-term) names in the order they were added to the
+    /// model. The ergonomics wrapper uses this to align user-supplied
+    /// predictor lists with the actual fitted smooth order.
+    fn get_predictor_names(&self) -> Vec<String> {
+        self.inner
+            .smooth_terms
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// Per-smooth column index range in the design matrix.
+    /// Returns a list of `(predictor_name, first_index, last_index)`
+    /// tuples, with indices INCLUSIVE on both ends and 0-based against
+    /// the full design `[1 | s_0 | s_1 | ...]` (so the intercept is at
+    /// index 0 and the first smooth starts at index 1).
+    ///
+    /// Mirrors the schema produced by `extract_term_indices` in
+    /// `r_fitting.r_model.py`, which indexes smooth contributions for
+    /// marginal predictions and serialization.
+    fn get_term_indices(&self) -> Vec<(String, usize, usize)> {
+        let mut out = Vec::with_capacity(self.inner.smooth_terms.len());
+        let mut col = 1usize; // skip the intercept column
+        for sm in &self.inner.smooth_terms {
+            let nb = sm.num_basis();
+            out.push((sm.name.clone(), col, col + nb - 1));
+            col += nb;
+        }
+        out
+    }
+
+    /// Evaluate the design matrix at the given `X` — same `[1 |
+    /// smooth_1 | smooth_2 | ...]` layout as `get_design_matrix()` but
+    /// at arbitrary x rather than the training set. This is mgcv's
+    /// `predict(fit, newdata=X, type="lpmatrix")` and is the building
+    /// block for posterior sampling and confidence intervals.
+    fn evaluate_lpmatrix<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+        use numpy::PyArray2;
+        let x_array = x.as_array().to_owned();
+        let lp = self
+            .inner
+            .build_lpmatrix(&x_array)
+            .map_err(|e| PyValueError::new_err(format!("lpmatrix evaluation failed: {}", e)))?;
+        Ok(PyArray2::from_owned_array(py, lp))
+    }
+
+    /// Posterior covariance of β̂. For Gaussian: `σ² · (X'WX + λS)⁻¹`
+    /// with σ² = RSS / (n − tr(A⁻¹X'WX)). For non-Gaussian (binomial,
+    /// poisson, gamma): `(X'WX + λS)⁻¹` with W from the converged
+    /// PIRLS step (no σ² scaling for known-scale families; profiled
+    /// scale for gamma/gaussian). Mirrors mgcv's `vcov(fit)`. Used by
+    /// the ergonomics wrapper for confidence intervals and posterior
+    /// sampling.
+    #[cfg(feature = "blas")]
+    fn get_vcov<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+        use numpy::PyArray2;
+        let design = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design.nrows());
+                &weights_arr
+            }
+        };
+        let smoothing = self
+            .inner
+            .smoothing_params
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Smoothing parameters not stored"))?;
+        let lambdas = &smoothing.lambda;
+        let coefficients = self
+            .inner
+            .coefficients
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+
+        // Build penalties at the same offsets used at fit time:
+        // intercept at column 0 (unpenalised), then per-smooth blocks.
+        let total_cols = design.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+
+        // A = X'WX + Σλ_j S_j   (no ridge — consistent with mgcv-exact)
+        let xtwx = crate::reml::compute_xtwx(design, weights);
+        let mut a = xtwx.clone();
+        for (lam, pen) in lambdas.iter().zip(penalties.iter()) {
+            pen.scaled_add_to(&mut a, *lam);
+        }
+        // Tiny ridge purely for numerical stability of the inverse;
+        // scaled to the matrix's own magnitude so it's invisible at
+        // typical β scale.
+        let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+        let ridge = 1e-12 * max_diag;
+        for i in 0..a.nrows() {
+            a[[i, i]] += ridge;
+        }
+        let a_inv = crate::linalg::inverse(&a)
+            .map_err(|e| PyValueError::new_err(format!("vcov inverse failed: {}", e)))?;
+
+        // Scale parameter σ²:
+        //   - Gaussian / Gamma: profiled  σ² = deviance / (n − tr(A⁻¹X'WX))
+        //     For Gaussian, deviance = RSS exactly.
+        //     For Gamma, deviance is the GLM deviance (Pearson would be
+        //     more standard for σ² estimation; we follow mgcv's choice).
+        //   - Binomial / Poisson: known   σ² = 1
+        let scale = match self.inner.family {
+            Family::Binomial | Family::Poisson => 1.0,
+            _ => {
+                let dev = self
+                    .inner
+                    .deviance
+                    .ok_or_else(|| PyValueError::new_err("Deviance not stored"))?;
+                let n = design.nrows() as f64;
+                let tr_a = crate::reml::compute_xtwx(design, weights)
+                    .dot(&a_inv)
+                    .diag()
+                    .sum();
+                let dof = (n - tr_a).max(1e-10);
+                dev / dof
+            }
+        };
+        let _ = coefficients; // explicit no-op marker if scale path didn't use it
+
+        let vcov: ndarray::Array2<f64> = a_inv * scale;
+        Ok(PyArray2::from_owned_array(py, vcov))
+    }
+
     /// Closed-form Hessian of the mgcv-exact REML score at the given
     /// λ. Diagnostic — used by Stage 5 unit tests.
     #[cfg(feature = "blas")]

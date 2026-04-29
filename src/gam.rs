@@ -688,16 +688,19 @@ impl GAM {
     }
 
     /// Predict response for new data
-    pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    /// Build the design matrix `[1 | smooth_1 | smooth_2 | ...]` at the
+    /// given `x`, using each smooth's predict-time basis (B-splines get
+    /// linear extrapolation past the inner-knot range; cr-splines pass
+    /// through unchanged). This is mgcv's `predict.gam(..., type =
+    /// "lpmatrix")` and is the shared building block for `predict`,
+    /// posterior sampling, and confidence-interval computation.
+    pub fn build_lpmatrix(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if !self.fitted {
             return Err(GAMError::InvalidParameter(
                 "Model has not been fitted yet".to_string(),
             ));
         }
-
-        let coefficients = self.coefficients.as_ref().unwrap();
         let n = x.nrows();
-
         if x.ncols() != self.smooth_terms.len() {
             return Err(GAMError::DimensionMismatch(format!(
                 "X has {} columns but model has {} smooth terms",
@@ -705,29 +708,18 @@ impl GAM {
                 self.smooth_terms.len()
             )));
         }
-
-        // Construct design matrix [1 | smooth_1 | smooth_2 | ...] —
-        // each smooth.evaluate applies its constraint matrix internally,
-        // so we just need to prepend the intercept column to match the
-        // layout used at fit time.
         let mut design_matrices: Vec<Array2<f64>> = Vec::new();
         let mut total_basis = 0;
-
         for (i, smooth) in self.smooth_terms.iter().enumerate() {
             let x_col = x.column(i).to_owned();
-            // Predict-time evaluation: turns on mgcv-style linear
-            // extrapolation for B-spline smooths past the inner-knot
-            // range. No-op for cr-splines etc.
             let basis_matrix = smooth.evaluate_for_predict(&x_col)?;
             total_basis += smooth.num_basis();
             design_matrices.push(basis_matrix);
         }
-
         let total_cols = total_basis + 1;
         let mut full_design = Array2::zeros((n, total_cols));
         full_design.column_mut(0).fill(1.0);
         let mut col_offset = 1;
-
         for design in &design_matrices {
             let num_cols = design.ncols();
             full_design
@@ -735,6 +727,12 @@ impl GAM {
                 .assign(design);
             col_offset += num_cols;
         }
+        Ok(full_design)
+    }
+
+    pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        let full_design = self.build_lpmatrix(x)?;
+        let coefficients = self.coefficients.as_ref().unwrap();
 
         // Compute linear predictor
         let eta = full_design.dot(coefficients);
