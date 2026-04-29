@@ -81,7 +81,6 @@ _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
-        "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
         "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
     },
     # Stage 1 design_matrix_span now PASSES for bs basis after de Boor

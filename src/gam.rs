@@ -108,12 +108,23 @@ impl SmoothTerm {
         })
     }
 
-    /// Evaluate the basis functions for this smooth term
-    /// If constraint matrix is present, applies it to get constrained basis
+    /// Evaluate the basis functions for this smooth term (fit-time path).
+    /// If constraint matrix is present, applies it to get constrained basis.
     pub fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
         let basis_unconstrained = self.basis.evaluate(x)?;
+        if let Some(ref q_matrix) = self.constraint_matrix {
+            Ok(basis_unconstrained.dot(q_matrix))
+        } else {
+            Ok(basis_unconstrained)
+        }
+    }
 
-        // If constraint matrix exists, apply it: X_constrained = X * Q
+    /// Predict-time evaluation. Uses the basis's `evaluate_for_predict`
+    /// which for most bases is identical to `evaluate`, but B-splines
+    /// extrapolate linearly past the inner-knot range to match mgcv's
+    /// `Predict.matrix.pspline.smooth`.
+    pub fn evaluate_for_predict(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        let basis_unconstrained = self.basis.evaluate_for_predict(x)?;
         if let Some(ref q_matrix) = self.constraint_matrix {
             Ok(basis_unconstrained.dot(q_matrix))
         } else {
@@ -704,7 +715,10 @@ impl GAM {
 
         for (i, smooth) in self.smooth_terms.iter().enumerate() {
             let x_col = x.column(i).to_owned();
-            let basis_matrix = smooth.evaluate(&x_col)?;
+            // Predict-time evaluation: turns on mgcv-style linear
+            // extrapolation for B-spline smooths past the inner-knot
+            // range. No-op for cr-splines etc.
+            let basis_matrix = smooth.evaluate_for_predict(&x_col)?;
             total_basis += smooth.num_basis();
             design_matrices.push(basis_matrix);
         }

@@ -6,8 +6,18 @@ use ndarray::{Array1, Array2};
 /// Trait for basis function implementations
 /// Note: Send + Sync is required for PyO3 thread safety with pyclass (PyO3 0.27+)
 pub trait BasisFunction: Send + Sync {
-    /// Evaluate the basis functions at given points
+    /// Evaluate the basis functions at given points (standard fit-time
+    /// evaluation, no extrapolation handling).
     fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>>;
+
+    /// Evaluate at given points for *prediction* — for most bases this
+    /// is identical to `evaluate`, but B-splines need linear
+    /// extrapolation outside the inner-knot range to match mgcv's
+    /// `Predict.matrix.pspline.smooth` (smooth.r:1952-1983). Default
+    /// impl just delegates to `evaluate`; override on B-spline.
+    fn evaluate_for_predict(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        self.evaluate(x)
+    }
 
     /// Get the number of basis functions
     fn num_basis(&self) -> usize;
@@ -677,6 +687,66 @@ impl BSplineBasis {
 impl BasisFunction for BSplineBasis {
     fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
         Ok(self.evaluate_derivative(x, 0))
+    }
+
+    /// Predict-time evaluation with mgcv-style linear extrapolation.
+    /// `Predict.matrix.pspline.smooth` (smooth.r:1952-1983): for x
+    /// outside the inner-knot range `[ll, ul]`, replace the standard
+    /// de Boor recursion (which gives zero past the augmented knot
+    /// range and an awkward boundary-region polynomial elsewhere) with
+    /// a 1st-order Taylor extension built from boundary basis values
+    /// and slopes:
+    ///   X[i] = D[ll] + (x - ll) · D'[ll]   when x < ll
+    ///   X[i] = D[ul] + (x - ul) · D'[ul]   when x > ul
+    /// In-range x uses the standard de Boor recursion unchanged.
+    ///
+    /// `ll` / `ul` are the first / last *interior* knots (knots[ord]
+    /// and knots[len-ord-1] in 0-indexed terms).
+    fn evaluate_for_predict(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        let nk = self.knots.len();
+        let ord = self.order;
+        // mgcv's `Predict.matrix.Bspline.smooth` does `object$m <-
+        // object$m - 1` BEFORE delegating to pspline.predict
+        // (smooth.r:2099). The effective `m` going into the ll/ul
+        // computation is `(order - 1)`, so:
+        //   ll = knots[m+1] in R 1-indexed = knots[ord-1] in 0-indexed
+        //   ul = knots[len-m]                = knots[len-ord]
+        // For our cubic basis (ord=4) with 24 knots this gives
+        // ll=knots[3]≈0.0044, ul=knots[20]≈1.001 — covers the data
+        // range, so training points never trip the extrap path.
+        let ll = self.knots[ord - 1];
+        let ul = self.knots[nk - ord];
+        let n = x.len();
+        let p = self.num_basis;
+
+        let any_below = x.iter().any(|&xi| xi < ll);
+        let any_above = x.iter().any(|&xi| xi > ul);
+        if !any_below && !any_above {
+            return Ok(self.evaluate_derivative(x, 0));
+        }
+
+        let bnds = Array1::from_vec(vec![ll, ul]);
+        let basis_at_bnds = self.evaluate_derivative(&bnds, 0);
+        let dbasis_at_bnds = self.evaluate_derivative(&bnds, 1);
+
+        let x_clamped: Array1<f64> = x.iter().map(|&xi| xi.max(ll).min(ul)).collect();
+        let mut out = self.evaluate_derivative(&x_clamped, 0);
+
+        for i in 0..n {
+            let xi = x[i];
+            if xi < ll {
+                let dx = xi - ll;
+                for j in 0..p {
+                    out[[i, j]] = basis_at_bnds[[0, j]] + dx * dbasis_at_bnds[[0, j]];
+                }
+            } else if xi > ul {
+                let dx = xi - ul;
+                for j in 0..p {
+                    out[[i, j]] = basis_at_bnds[[1, j]] + dx * dbasis_at_bnds[[1, j]];
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn num_basis(&self) -> usize {
