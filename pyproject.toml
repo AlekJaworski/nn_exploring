@@ -41,4 +41,9 @@ Issues = "https://github.com/AlekJaworski/nn_exploring/issues"
 # CI overrides with --features python,blas,blas-system (test) or python,blas,blas-static (release).
 # Only "python" here to avoid conflicts when CI appends BLAS features.
 features = ["python"]
-module-name = "mgcv_rust"
+# Mixed Rust/Python layout: the compiled Rust module is at
+# `mgcv_rust.mgcv_rust`, while user-facing Python helpers (like
+# `GAMFitter`, the ergonomics wrapper) live alongside it under
+# `python/mgcv_rust/`. The package __init__.py re-exports everything.
+module-name = "mgcv_rust.mgcv_rust"
+python-source = "python"
