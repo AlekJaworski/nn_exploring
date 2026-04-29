@@ -554,7 +554,7 @@ impl GAM {
             // is one step coarser than mgcv's per-trial-λ PIRLS — but
             // each outer pass refreshes z/w around the current best λ,
             // so the optimizer converges to mgcv's λ within a few passes.
-            let outer_passes = if is_gaussian { 1 } else { 5 };
+            let outer_passes = if is_gaussian { 1 } else { 10 };
 
             for outer_pass in 0..outer_passes {
                 let pirls_start = Instant::now();
