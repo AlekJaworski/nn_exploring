@@ -753,11 +753,21 @@ impl SmoothingParameter {
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
             // mgcv uses both criteria to handle different convergence scenarios
             //
-            // mgcv-exact mode uses a tighter threshold (matches mgcv's
-            // score-scale-relative tolerance) so the optimizer reaches
-            // the true minimum on cases where the default 0.05 stops
-            // early. Default mode keeps 0.05 for performance.
-            let grad_tol = if self.mgcv_exact_score { 1.0e-4 } else { 0.05 };
+            // mgcv-exact mode uses mgcv's score-scale-relative tolerance
+            // (gam.fit3.r:1335 / 1643): `|grad| < score.scale * conv.tol`
+            // where score.scale ≈ |REML| + 1, conv.tol = sqrt(eps) ≈ 1.5e-8.
+            // This scales correctly to large-n cases where |REML| can be
+            // 1e4+, making the absolute 1e-4 threshold both too loose
+            // (small cases) and inappropriate (saturating cases need to
+            // step deeper). Default mode keeps the cheap absolute
+            // threshold for speed.
+            let grad_tol = if self.mgcv_exact_score {
+                let score_scale = current_reml.abs() + 1.0;
+                let conv_tol = (f64::EPSILON).sqrt(); // ≈ 1.5e-8
+                score_scale * conv_tol
+            } else {
+                0.05
+            };
             if grad_norm_linf < grad_tol {
                 self.lambda = lambdas;
                 if std::env::var("MGCV_PROFILE").is_ok() {

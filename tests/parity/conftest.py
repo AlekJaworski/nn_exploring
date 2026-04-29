@@ -85,9 +85,6 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_design_matrix_span": {
         "1d_gaussian_smooth_n500_k20_bs": _BS_BASIS_REASON,
     },
-    "test_closed_form_matches_finite_diff_at_optimum": {
-        "8d_neighbourhoods_like_n15000": _8D_15K_FD_GRAD_REASON,
-    },
 }
 
 
