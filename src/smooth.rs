@@ -9,8 +9,9 @@ pub use crate::reml::ScaleParameterMethod;
 use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
     reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
-    reml_gradient_mgcv_exact_closed_form, reml_gradient_multi_qr_adaptive,
-    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_mgcv_exact_closed_form,
+    reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
+    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
+    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift,
     reml_hessian_multi_cached,
 };
 #[cfg(not(feature = "blas"))]
@@ -34,7 +35,17 @@ fn dispatch_reml_score(
     cached_xtwx: Option<&Array2<f64>>,
 ) -> Result<f64> {
     if sp.mgcv_exact_score {
-        reml_criterion_multi_cached_mgcv_exact(y, x, w, lambdas, penalties, cached_xtwx, sp.mp, sp.family)
+        reml_criterion_multi_cached_mgcv_exact(
+            y,
+            x,
+            w,
+            lambdas,
+            penalties,
+            cached_xtwx,
+            sp.mp,
+            sp.family,
+            sp.y_original.as_ref(),
+        )
     } else {
         reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
     }
@@ -144,6 +155,26 @@ fn reml_hessian_finite_diff(
     Ok(hess)
 }
 
+/// Compute X'Wy via element-wise sqrt-weighting. Used to refresh the
+/// gradient/Hessian's xtwy cache after a PIRLS refresh changes (w, z).
+#[cfg(feature = "blas")]
+fn compute_xtwy_helper(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
+    let n = x.nrows();
+    let p = x.ncols();
+    let mut x_w = x.clone();
+    for i in 0..n {
+        let sw = w[i].sqrt();
+        for j in 0..p {
+            x_w[[i, j]] *= sw;
+        }
+    }
+    let mut y_weighted = Array1::zeros(n);
+    for i in 0..n {
+        y_weighted[i] = y[i] * w[i].sqrt();
+    }
+    x_w.t().dot(&y_weighted)
+}
+
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OptimizationMethod {
@@ -192,7 +223,39 @@ pub struct SmoothingParameter {
     /// deviance and scale parameter are computed in mgcv-exact mode.
     /// Default is Gaussian; set by gam_optimized.rs from `self.family`.
     pub family: crate::pirls::Family,
+    /// Original response y (not the working response z). Used by the IFT
+    /// gradient/Hessian path to evaluate ∂D/∂β at the GLM deviance form
+    /// `-2 X'(y_orig - μ)/(Vg')` rather than the working-RSS form, which
+    /// is the only path where IFT genuinely differs from envelope at our
+    /// (always inner-loop converged) β. None ⟹ fall back to working-RSS
+    /// deviance (≡ envelope at converged β).
+    pub y_original: Option<Array1<f64>>,
 }
+
+/// Refresh produced by an inner PIRLS run at a candidate λ during the
+/// Newton line search. Carries everything `dispatch_reml_score` needs to
+/// evaluate the score at IRLS-converged β̂(λ') instead of the stale-
+/// β/w/z one-step approximation.
+///
+/// `working_response` is the IRLS working response z = η + (y - μ)/(dμ/dη)
+/// computed at the converged μ, η — passing this as the response into
+/// `solve(X'WX + λ'S, X'Wz)` recovers β̂(λ') exactly (mgcv pls_fit1
+/// equivalent). `xtwx` is the X'WX at the refreshed weights.
+#[cfg(feature = "blas")]
+pub struct PirlsRefresh {
+    pub beta: Array1<f64>,
+    pub weights: Array1<f64>,
+    pub working_response: Array1<f64>,
+    pub xtwx: Array2<f64>,
+}
+
+/// Callback type for refreshing PIRLS at trial λ during Newton line search.
+/// `Some(callback)` enables mgcv's per-trial-λ inner-IRLS refresh
+/// (gam.fit3.r:1444, 1500-1504, 1571-1576). `None` keeps the fast
+/// frozen-β/w/z path used for Gaussian (where W=I, z=y, no refresh
+/// needed).
+#[cfg(feature = "blas")]
+pub type PirlsCallback<'a> = &'a mut dyn FnMut(&[f64]) -> Result<PirlsRefresh>;
 
 impl SmoothingParameter {
     /// Create new smoothing parameters with initial values
@@ -207,6 +270,7 @@ impl SmoothingParameter {
             mp: 0,
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
+            y_original: None,
         }
     }
 
@@ -226,6 +290,7 @@ impl SmoothingParameter {
             mp: 0,
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
+            y_original: None,
         }
     }
 
@@ -245,6 +310,7 @@ impl SmoothingParameter {
             mp: 0,
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
+            y_original: None,
         }
     }
 
@@ -320,6 +386,36 @@ impl SmoothingParameter {
         beta: Option<&Array1<f64>>,
         cached_xtwx: Option<&Array2<f64>>,
     ) -> Result<()> {
+        self.optimize_with_beta_xtwx_and_pirls_callback(
+            y,
+            x,
+            w,
+            penalties,
+            max_iter,
+            tolerance,
+            beta,
+            cached_xtwx,
+            None,
+        )
+    }
+
+    /// Same as `optimize_with_beta_and_xtwx`, but accepts an optional
+    /// `pirls_callback` which is invoked at every Newton line-search trial
+    /// λ' to refresh (β, w, z, X'WX) via inner PIRLS-to-convergence.
+    /// `None` retains the fast frozen-β/w/z path (Gaussian).
+    #[cfg(feature = "blas")]
+    pub fn optimize_with_beta_xtwx_and_pirls_callback(
+        &mut self,
+        y: &Array1<f64>,
+        x: &Array2<f64>,
+        w: &Array1<f64>,
+        penalties: &[BlockPenalty],
+        max_iter: usize,
+        tolerance: f64,
+        beta: Option<&Array1<f64>>,
+        cached_xtwx: Option<&Array2<f64>>,
+        pirls_callback: Option<PirlsCallback<'_>>,
+    ) -> Result<()> {
         if penalties.len() != self.lambda.len() {
             return Err(GAMError::DimensionMismatch(
                 "Number of penalties must match number of lambdas".to_string(),
@@ -345,6 +441,7 @@ impl SmoothingParameter {
                 tolerance,
                 beta,
                 cached_xtwx,
+                pirls_callback,
             ),
             OptimizationMethod::GCV => self.optimize_gcv(y, x, w, penalties, max_iter, tolerance),
         }
@@ -431,6 +528,7 @@ impl SmoothingParameter {
         tolerance: f64,
         beta: Option<&Array1<f64>>,
         cached_xtwx: Option<&Array2<f64>>,
+        pirls_callback: Option<PirlsCallback<'_>>,
     ) -> Result<()> {
         // Dispatch based on selected algorithm
         match self.reml_algorithm {
@@ -442,6 +540,7 @@ impl SmoothingParameter {
                 max_iter,
                 tolerance,
                 cached_xtwx,
+                pirls_callback,
             ),
             REMLAlgorithm::FellnerSchall => self.optimize_reml_fellner_schall_with_xtwx(
                 y,
@@ -513,10 +612,13 @@ impl SmoothingParameter {
         max_iter: usize,
         tolerance: f64,
     ) -> Result<()> {
-        self.optimize_reml_newton_multi_with_xtwx(y, x, w, penalties, max_iter, tolerance, None)
+        self.optimize_reml_newton_multi_with_xtwx(
+            y, x, w, penalties, max_iter, tolerance, None, None,
+        )
     }
 
-    /// Newton optimization with optional pre-computed X'WX
+    /// Newton optimization with optional pre-computed X'WX and optional
+    /// per-trial-λ PIRLS refresh callback (mgcv-style outer iteration).
     #[cfg(feature = "blas")]
     fn optimize_reml_newton_multi_with_xtwx(
         &mut self,
@@ -527,6 +629,7 @@ impl SmoothingParameter {
         max_iter: usize,
         tolerance: f64,
         cached_xtwx: Option<&Array2<f64>>,
+        mut pirls_callback: Option<PirlsCallback<'_>>,
     ) -> Result<()> {
         let m = penalties.len();
 
@@ -549,33 +652,26 @@ impl SmoothingParameter {
             );
         }
 
-        // OPTIMIZATION: Pre-compute X'WX and X'Wy (don't change during optimization)
-        // This avoids O(np²) recomputation every iteration.
-        // When a pre-computed X'WX is available (from scatter-gather on discretized design),
-        // use it directly to skip the O(n*p²) computation.
+        // OPTIMIZATION: Pre-compute X'WX and X'Wy (constant during Gaussian
+        // optimization; refreshed per Newton iter when `pirls_callback` is
+        // supplied for non-Gaussian families — see "PIRLS refresh" below).
+        // When a pre-computed X'WX is available (from scatter-gather on
+        // discretized design), use it directly to skip the O(n*p²) computation.
         use crate::reml::compute_xtwx;
         let xtwx_start = Instant::now();
-        let xtwx = if let Some(cached) = cached_xtwx {
+
+        // Owned locals — refreshed each Newton iter when `pirls_callback`
+        // is Some. For Gaussian (callback=None) they stay constant.
+        let mut y_local: Array1<f64> = y.to_owned();
+        let mut w_local: Array1<f64> = w.to_owned();
+        let mut xtwx_local: Array2<f64> = if let Some(cached) = cached_xtwx {
             cached.clone()
         } else {
-            compute_xtwx(x, w)
+            compute_xtwx(x, &w_local)
         };
 
-        // Compute X'Wy (also constant)
-        let x_weighted = {
-            let mut x_w = x.clone();
-            for i in 0..x.nrows() {
-                for j in 0..x.ncols() {
-                    x_w[[i, j]] *= w[i].sqrt();
-                }
-            }
-            x_w
-        };
-        let mut y_weighted = Array1::zeros(y.len());
-        for i in 0..y.len() {
-            y_weighted[i] = y[i] * w[i].sqrt();
-        }
-        let xtwy = x_weighted.t().dot(&y_weighted);
+        // Compute X'Wy (refreshed when w/z change).
+        let mut xtwy_local: Array1<f64> = compute_xtwy_helper(x, &w_local, &y_local);
 
         if std::env::var("MGCV_PROFILE").is_ok() {
             let xtwx_time = xtwx_start.elapsed();
@@ -585,20 +681,22 @@ impl SmoothingParameter {
             );
         }
 
-        // Pre-compute Cholesky of X'WX for EDF computation (if using EDF method)
-        let xtwx_chol: Option<Array2<f64>> = if self.scale_method == ScaleParameterMethod::EDF {
-            let chol_start = Instant::now();
-            let chol = compute_xtwx_cholesky(&xtwx)?;
-            if std::env::var("MGCV_PROFILE").is_ok() {
-                eprintln!(
-                    "[PROFILE] Pre-computed X'WX Cholesky for EDF: {:.2}ms",
-                    chol_start.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-            Some(chol)
-        } else {
-            None
-        };
+        // Pre-compute Cholesky of X'WX for EDF computation (if using EDF method).
+        // Refreshed when xtwx_local changes (i.e., when w changes via PIRLS refresh).
+        let mut xtwx_chol_local: Option<Array2<f64>> =
+            if self.scale_method == ScaleParameterMethod::EDF {
+                let chol_start = Instant::now();
+                let chol = compute_xtwx_cholesky(&xtwx_local)?;
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!(
+                        "[PROFILE] Pre-computed X'WX Cholesky for EDF: {:.2}ms",
+                        chol_start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                Some(chol)
+            } else {
+                None
+            };
 
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter().map(|l| l.ln()).collect();
@@ -622,10 +720,26 @@ impl SmoothingParameter {
             // Current lambdas
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
+            // PIRLS refresh at iter start (mgcv-style): if a callback is
+            // supplied, run inner PIRLS to convergence at the current
+            // lambdas to get fresh (β, w, z, X'WX). This replaces the
+            // stale frozen-β/w/z values inherited from the caller. For
+            // Gaussian (callback=None) skip — W=I, z=y, no refresh needed.
+            if let Some(cb) = pirls_callback.as_mut() {
+                let refresh = cb(&lambdas)?;
+                y_local = refresh.working_response;
+                w_local = refresh.weights;
+                xtwx_local = refresh.xtwx;
+                xtwy_local = compute_xtwy_helper(x, &w_local, &y_local);
+                if self.scale_method == ScaleParameterMethod::EDF {
+                    xtwx_chol_local = Some(compute_xtwx_cholesky(&xtwx_local)?);
+                }
+            }
+
             // Compute current REML value for convergence check
             // (dispatches to mgcv-exact formula when mgcv_exact_score=true)
             let current_reml =
-                dispatch_reml_score(self, y, x, w, &lambdas, penalties, Some(&xtwx))?;
+                dispatch_reml_score(self, &y_local, x, &w_local, &lambdas, penalties, Some(&xtwx_local))?;
 
             // Compute gradient and Hessian.
             // - Default mode: closed-form QR-based formulas, fast.
@@ -634,20 +748,54 @@ impl SmoothingParameter {
             //   for Gaussian + canonical link via envelope theorem).
             //   Hessian still uses finite differences for now —
             //   replacing it with closed-form is an open task.
+            // IFT path selection. Opt-in via env var MGCV_USE_IFT=1
+            // (overrides everything). Otherwise: opt-out via
+            // MGCV_DISABLE_IFT=1, else default ON for non-Gaussian when
+            // y_original was supplied. For Gaussian we keep envelope (it
+            // is exact there anyway and matches the score byte-for-byte).
+            //
+            // Note (Parity 4t): at our (always inner-loop converged) β =
+            // A⁻¹X'Wy, IFT with working-RSS deviance collapses to envelope.
+            // The GLM-deviance form (y_original set) is a gradient of a
+            // DIFFERENT score (true GLM deviance) than what the line search
+            // optimises (working RSS). Empirically, the gradient/score
+            // inconsistency on binomial moved absdiff from 4e-3 to ~1.3e-2;
+            // a proper fix needs a working-deviance-based score too.
+            let use_ift_explicit = std::env::var("MGCV_USE_IFT").is_ok();
+            let use_ift_disable = std::env::var("MGCV_DISABLE_IFT").is_ok();
+            let use_ift = self.mgcv_exact_score
+                && (use_ift_explicit
+                    || (!use_ift_disable
+                        && !matches!(self.family, crate::pirls::Family::Gaussian)
+                        && self.y_original.is_some()));
+
             let t_grad = Instant::now();
             let gradient = if self.mgcv_exact_score {
-                reml_gradient_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx), self.family)?
+                if use_ift {
+                    reml_gradient_mgcv_exact_ift(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        self.family,
+                        self.y_original.as_ref(),
+                    )?
+                } else {
+                    reml_gradient_mgcv_exact_closed_form(&y_local, x, &w_local, &lambdas, penalties, Some(&xtwx_local), self.family)?
+                }
             } else {
                 reml_gradient_multi_qr_adaptive_cached_edf(
-                    y,
+                    &y_local,
                     x,
-                    w,
+                    &w_local,
                     &lambdas,
                     penalties,
                     Some(&sqrt_penalties),
-                    Some(&xtwx),
-                    Some(&xtwy),
-                    xtwx_chol.as_ref(),
+                    Some(&xtwx_local),
+                    Some(&xtwy_local),
+                    xtwx_chol_local.as_ref(),
                     self.scale_method,
                 )?
             };
@@ -655,9 +803,22 @@ impl SmoothingParameter {
 
             let t_hess = Instant::now();
             let mut hessian = if self.mgcv_exact_score {
-                reml_hessian_mgcv_exact_closed_form(y, x, w, &lambdas, penalties, Some(&xtwx), self.family)?
+                if use_ift {
+                    reml_hessian_mgcv_exact_ift(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        self.family,
+                        self.y_original.as_ref(),
+                    )?
+                } else {
+                    reml_hessian_mgcv_exact_closed_form(&y_local, x, &w_local, &lambdas, penalties, Some(&xtwx_local), self.family)?
+                }
             } else {
-                reml_hessian_multi_cached(y, x, w, &lambdas, penalties, &xtwx)?
+                reml_hessian_multi_cached(&y_local, x, &w_local, &lambdas, penalties, &xtwx_local)?
             };
             let hess_time = t_hess.elapsed().as_micros();
 
@@ -781,16 +942,9 @@ impl SmoothingParameter {
 
             // REML change convergence: stop if making negligible progress.
             // mgcv's documented outer-iteration default is `conv.tol = 1e-7`
-            // (gam.control). 4n briefly tightened this to `√ε ≈ 1.5e-8`
-            // on the assumption that mgcv's outer test was `score.scale · √ε`,
-            // but that's the *gradient* test (gam.fit3.r:1335) — the
-            // score-change test (line 1645) uses 1e-7 as the absolute
-            // floor. At 1.5e-8 the 8d×15k case wastes ~280 ms across
-            // iters 12-15 in line searches that each chew through 21
-            // halvings of `score=inf` before finally reducing the
-            // change below threshold; at 1e-7 it converges 4
-            // iterations earlier (iter 15 → iter 11) with no loss of
-            // λ accuracy.
+            // (gam.control). The score-change test (gam.fit3.r:1645) uses
+            // 1e-7 as the absolute floor; the gradient test (line 1335) is
+            // the one that scales with √ε. Keeping 1e-7 here (Perf-1).
             let reml_change_tol = if self.mgcv_exact_score {
                 1.0e-7
             } else {
@@ -924,8 +1078,41 @@ impl SmoothingParameter {
 
                 let new_lambdas: Vec<f64> = new_log_lambda.iter().map(|l| l.exp()).collect();
 
-                // Evaluate REML (mgcv-exact dispatch)
-                match dispatch_reml_score(self, y, x, w, &new_lambdas, penalties, Some(&xtwx)) {
+                // Evaluate REML (mgcv-exact dispatch). When `pirls_callback`
+                // is supplied (non-Gaussian), refresh inner PIRLS at the
+                // trial λ' first to get fresh (β, w, z, X'WX) — this gives
+                // the score at IRLS-converged β̂(λ') rather than the
+                // stale-β/w/z one-step approximation. mgcv equivalent:
+                // gam.fit3.r:1444, 1500-1504, 1571-1576.
+                let trial_eval = if let Some(cb) = pirls_callback.as_mut() {
+                    match cb(&new_lambdas) {
+                        Ok(refresh) => {
+                            let trial_xtwy_unused = (); // placeholder, gradient not needed in line search
+                            let _ = trial_xtwy_unused;
+                            dispatch_reml_score(
+                                self,
+                                &refresh.working_response,
+                                x,
+                                &refresh.weights,
+                                &new_lambdas,
+                                penalties,
+                                Some(&refresh.xtwx),
+                            )
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    dispatch_reml_score(
+                        self,
+                        &y_local,
+                        x,
+                        &w_local,
+                        &new_lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                    )
+                };
+                match trial_eval {
                     Ok(new_reml) => {
                         // OPTIMIZATION: Armijo condition for early stopping
                         // Accept if: new_reml ≤ current_reml + c₁ * step_scale * grad·step
@@ -1023,7 +1210,7 @@ impl SmoothingParameter {
 
                 // Steepest descent: step = -gradient (scaled very small)
                 // Recompute gradient since it was moved earlier
-                let gradient_sd = reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+                let gradient_sd = reml_gradient_multi_qr_adaptive(&y_local, x, &w_local, &lambdas, penalties)?;
 
                 // Try progressively smaller steepest descent steps
                 let mut sd_worked = false;
@@ -1039,9 +1226,34 @@ impl SmoothingParameter {
                     let new_lambdas_sd: Vec<f64> =
                         new_log_lambda_sd.iter().map(|l| l.exp()).collect();
 
-                    if let Ok(new_reml_sd) = dispatch_reml_score(
-                        self, y, x, w, &new_lambdas_sd, penalties, Some(&xtwx),
-                    ) {
+                    // Steepest-descent trial uses the line-search refresh
+                    // path too (mgcv parity): if a callback is supplied,
+                    // refresh PIRLS at the SD trial λ.
+                    let sd_eval = if let Some(cb) = pirls_callback.as_mut() {
+                        match cb(&new_lambdas_sd) {
+                            Ok(refresh) => dispatch_reml_score(
+                                self,
+                                &refresh.working_response,
+                                x,
+                                &refresh.weights,
+                                &new_lambdas_sd,
+                                penalties,
+                                Some(&refresh.xtwx),
+                            ),
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        dispatch_reml_score(
+                            self,
+                            &y_local,
+                            x,
+                            &w_local,
+                            &new_lambdas_sd,
+                            penalties,
+                            Some(&xtwx_local),
+                        )
+                    };
+                    if let Ok(new_reml_sd) = sd_eval {
                         if std::env::var("MGCV_PROFILE").is_ok() {
                             eprintln!("[PROFILE]     SD scale={}: REML={:.6} (current={:.6}, improvement={})",
                                      scale, new_reml_sd, current_reml, new_reml_sd < current_reml);
@@ -1071,7 +1283,7 @@ impl SmoothingParameter {
                     // Check if we're close enough to converged before giving up
                     // When at a minimum, no further progress is possible but gradient may still be small
                     let gradient_check =
-                        reml_gradient_multi_qr_adaptive(y, x, w, &lambdas, penalties)?;
+                        reml_gradient_multi_qr_adaptive(&y_local, x, &w_local, &lambdas, penalties)?;
                     let grad_norm_final = gradient_check
                         .iter()
                         .map(|g| g.abs())
