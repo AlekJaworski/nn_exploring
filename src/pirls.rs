@@ -322,18 +322,41 @@ pub fn fit_pirls_cached(
         // Compute fitted values μ = g^(-1)(η)
         let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
 
-        // Compute working response z and IRLS weights w in a single pass
+        // Compute working response z and IRLS weights w in a single pass.
+        // Canonical link → Fisher scoring (E[w] = wf). Non-canonical → full
+        // Newton (per gam.fit3.r:505-515): w = wf·α, z = η + (y−μ)/(dμ/dη·α),
+        // where α = 1 + (y−μ)·(V'/V + g''·dμ/dη). The `c·` factor in mgcv
+        // becomes 0 at convergence (y ≈ μ), giving α → 1 and Newton → Fisher.
+        let use_fisher = family.is_canonical_link();
         let mut z = Array1::zeros(n);
         let mut w = Array1::zeros(n);
         for i in 0..n {
             let dmu_deta = family.d_inverse_link(eta[i]);
             let variance = family.variance(mu[i]);
+            let var_safe = variance.max(1e-10);
             if dmu_deta.abs() < 1e-10 {
                 z[i] = eta[i];
-            } else {
-                z[i] = eta[i] + (y[i] - mu[i]) / dmu_deta;
+                w[i] = 1e-10;
+                continue;
             }
-            w[i] = ((dmu_deta * dmu_deta) / variance.max(1e-10)).max(1e-10);
+            let wf = (dmu_deta * dmu_deta) / var_safe;
+            if use_fisher {
+                z[i] = eta[i] + (y[i] - mu[i]) / dmu_deta;
+                w[i] = wf.max(1e-10);
+            } else {
+                let c_resid = y[i] - mu[i];
+                let dvar = family.dvar(mu[i]);
+                let d2link = family.d2link(mu[i]);
+                let mut alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
+                // mgcv: alpha[alpha==0] <- .Machine$double.eps. Negative alpha
+                // is allowed through (rare, indicates we're far from optimum;
+                // line search / damping handles it).
+                if alpha == 0.0 {
+                    alpha = f64::EPSILON;
+                }
+                z[i] = eta[i] + (y[i] - mu[i]) / (dmu_deta * alpha);
+                w[i] = wf * alpha;
+            }
         }
 
         // X'WX using BLAS (instead of manual triple-nested loop)
