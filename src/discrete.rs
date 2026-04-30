@@ -572,7 +572,7 @@ mod tests {
             max_unique_1d: 50,
             min_n_for_discretize: 100,
         };
-        let dd = DiscretizedDesign::new(&[basis1, basis2], &[cov1, cov2], &config);
+        let dd = DiscretizedDesign::new(&[basis1, basis2], &[cov1, cov2], &config, false);
         let sg_xtwx = dd.compute_xtwx(&w);
 
         // Check agreement (not exact due to binning, but should be close)
@@ -615,7 +615,7 @@ mod tests {
 
         // Discretized (n=20 < min_n_for_discretize=500, so no binning)
         let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config);
+        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
         let sg_xtwx = dd.compute_xtwx(&w);
 
         for i in 0..k {
@@ -639,7 +639,7 @@ mod tests {
         }
 
         let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config);
+        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
 
         let beta = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
 
@@ -671,7 +671,7 @@ mod tests {
         let y: Array1<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
 
         let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config);
+        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
 
         // Naive X'Wy = X' * (w .* y) -- with w=1, this is X'y
         let naive_xtwy = basis.t().dot(&y);
@@ -698,7 +698,7 @@ mod tests {
         }
 
         let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config);
+        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
 
         let full = dd.to_full_matrix();
 
@@ -741,7 +741,7 @@ mod tests {
         let naive = full_x.t().dot(&full_x);
 
         let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[b1, b2], &[cov1, cov2], &config);
+        let dd = DiscretizedDesign::new(&[b1, b2], &[cov1, cov2], &config, false);
         let disc = dd.compute_xtwx(&w);
 
         for i in 0..p {

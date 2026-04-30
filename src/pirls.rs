@@ -77,6 +77,66 @@ impl Family {
         }
     }
 
+    /// First derivative of variance function: dV/dμ.
+    /// Used by mgcv's full-Newton PIRLS (`gam.fit3.r:507`) for non-canonical
+    /// links to compute the α correction `α = 1 + (y−μ)·(V'/V + g''·dμ/dη)`.
+    pub fn dvar(&self, mu: f64) -> f64 {
+        match self {
+            Family::Gaussian => 0.0,
+            Family::Binomial => 1.0 - 2.0 * mu,
+            Family::Poisson => 1.0,
+            Family::Gamma | Family::GammaLog => 2.0 * mu,
+        }
+    }
+
+    /// Second derivative of variance function: d²V/dμ².
+    /// Used by mgcv's α₁ derivative (`gdi.c:2548`) needed for the Tk
+    /// weight-derivative term in the REML gradient.
+    pub fn d2var(&self, _mu: f64) -> f64 {
+        match self {
+            Family::Gaussian => 0.0,
+            Family::Binomial => -2.0,
+            Family::Poisson => 0.0,
+            Family::Gamma | Family::GammaLog => 2.0,
+        }
+    }
+
+    /// Second derivative of link function: d²g/dμ².
+    pub fn d2link(&self, mu: f64) -> f64 {
+        match self {
+            Family::Gaussian => 0.0,
+            Family::Binomial => {
+                let one_minus = 1.0 - mu;
+                -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
+            }
+            Family::Poisson | Family::GammaLog => -1.0 / (mu * mu),
+            Family::Gamma => 2.0 / (mu * mu * mu),
+        }
+    }
+
+    /// Third derivative of link function: d³g/dμ³.
+    pub fn d3link(&self, mu: f64) -> f64 {
+        match self {
+            Family::Gaussian => 0.0,
+            Family::Binomial => {
+                let one_minus = 1.0 - mu;
+                2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
+            }
+            Family::Poisson | Family::GammaLog => 2.0 / (mu * mu * mu),
+            Family::Gamma => -6.0 / (mu * mu * mu * mu),
+        }
+    }
+
+    /// True iff the link is canonical for this family. Determines whether
+    /// PIRLS uses Fisher scoring (canonical) or full Newton (non-canonical),
+    /// per `gam.fit3.r:118`.
+    pub fn is_canonical_link(&self) -> bool {
+        match self {
+            Family::Gaussian | Family::Binomial | Family::Poisson | Family::Gamma => true,
+            Family::GammaLog => false,
+        }
+    }
+
     /// Saturated log-likelihood `ls[1]` per `gam.fit3.r:2497-2548`
     /// (`fix.family.ls`). Used by mgcv's REML formula
     /// `REML = Dp/(2σ²) - ls[1] + log|H|/2 - log|S|+/2 - Mp/2·log(2π·σ²)`
@@ -694,6 +754,125 @@ mod tests {
         let family = Family::Poisson;
         assert!((family.variance(2.0) - 2.0).abs() < 1e-10);
         assert!((family.inverse_link(0.0) - 1.0).abs() < 1e-10);
+    }
+
+    /// Central-difference helper.
+    fn cd<F: Fn(f64) -> f64>(f: F, x: f64, h: f64) -> f64 {
+        (f(x + h) - f(x - h)) / (2.0 * h)
+    }
+
+    fn assert_close(a: f64, b: f64, tol: f64, msg: &str) {
+        let scale = a.abs().max(b.abs()).max(1.0);
+        assert!(
+            (a - b).abs() < tol * scale,
+            "{}: analytic={} numeric={} diff={} (relative tol {})",
+            msg,
+            a,
+            b,
+            (a - b).abs(),
+            tol
+        );
+    }
+
+    #[test]
+    fn test_dvar_against_finite_difference() {
+        let h = 1e-6;
+        let mus = [0.2, 0.5, 0.8, 1.5, 3.0];
+        for &mu in &mus {
+            for &fam in &[
+                Family::Gaussian,
+                Family::Binomial,
+                Family::Poisson,
+                Family::Gamma,
+                Family::GammaLog,
+            ] {
+                if matches!(fam, Family::Binomial) && (mu <= 0.0 || mu >= 1.0) {
+                    continue;
+                }
+                let analytic = fam.dvar(mu);
+                let numeric = cd(|m| fam.variance(m), mu, h);
+                assert_close(analytic, numeric, 1e-6, &format!("dvar {:?} mu={}", fam, mu));
+            }
+        }
+    }
+
+    #[test]
+    fn test_d2var_against_finite_difference() {
+        let h = 1e-4;
+        let mus = [0.2, 0.5, 0.8, 1.5, 3.0];
+        for &mu in &mus {
+            for &fam in &[
+                Family::Gaussian,
+                Family::Binomial,
+                Family::Poisson,
+                Family::Gamma,
+                Family::GammaLog,
+            ] {
+                if matches!(fam, Family::Binomial) && (mu <= 0.0 || mu >= 1.0) {
+                    continue;
+                }
+                let analytic = fam.d2var(mu);
+                let numeric = cd(|m| fam.dvar(m), mu, h);
+                assert_close(analytic, numeric, 1e-6, &format!("d2var {:?} mu={}", fam, mu));
+            }
+        }
+    }
+
+    #[test]
+    fn test_d2link_against_finite_difference() {
+        // Second-difference of the link function. h chosen as ~ε^(1/4) ≈ 1e-4
+        // for a 4-th-order accurate estimate; tolerance loose enough to absorb
+        // the truncation/roundoff trade-off (Gamma's 2/μ³ at μ=0.2 is large).
+        let h = 1e-4;
+        let mus = [0.3, 0.5, 0.7, 1.5, 3.0];
+        for &mu in &mus {
+            for &fam in &[
+                Family::Gaussian,
+                Family::Binomial,
+                Family::Poisson,
+                Family::Gamma,
+                Family::GammaLog,
+            ] {
+                if matches!(fam, Family::Binomial) && (mu <= 0.0 || mu >= 1.0) {
+                    continue;
+                }
+                let analytic = fam.d2link(mu);
+                let numeric =
+                    (fam.link(mu + h) - 2.0 * fam.link(mu) + fam.link(mu - h)) / (h * h);
+                assert_close(analytic, numeric, 1e-3, &format!("d2link {:?} mu={}", fam, mu));
+            }
+        }
+    }
+
+    #[test]
+    fn test_d3link_against_finite_difference() {
+        let h = 1e-3;
+        let mus = [0.3, 0.5, 0.7, 1.5, 3.0];
+        for &mu in &mus {
+            for &fam in &[
+                Family::Gaussian,
+                Family::Binomial,
+                Family::Poisson,
+                Family::Gamma,
+                Family::GammaLog,
+            ] {
+                if matches!(fam, Family::Binomial) && (mu <= 0.0 || mu >= 1.0) {
+                    continue;
+                }
+                let analytic = fam.d3link(mu);
+                let numeric = cd(|m| fam.d2link(m), mu, h);
+                assert_close(analytic, numeric, 1e-3, &format!("d3link {:?} mu={}", fam, mu));
+            }
+        }
+    }
+
+    #[test]
+    fn test_canonical_link_flags() {
+        assert!(Family::Gaussian.is_canonical_link());
+        assert!(Family::Binomial.is_canonical_link());
+        assert!(Family::Poisson.is_canonical_link());
+        assert!(Family::Gamma.is_canonical_link());
+        assert!(!Family::GammaLog.is_canonical_link());
     }
 
     #[test]
