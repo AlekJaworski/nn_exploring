@@ -605,7 +605,16 @@ impl GAM {
             // with the parallel `&cache.design_matrix` / `&cache.penalties`
             // borrows passed into `optimize_with_beta_xtwx_and_pirls_callback`.
             let family = self.family;
-            let max_inner = max_inner_iter;
+            // For trial-λ refresh inside Newton's line search, cap PIRLS at
+            // a fraction of the outer cap. The trial λ is close to the
+            // current λ so β_trial converges in 5-20 iters with warm start;
+            // the prior code used the full max_inner_iter (typically 100)
+            // and ran ~36 iters per call, hammering O(n*p²) for n≥5000
+            // saturating-λ cases (#59). mgcv's gam.fit3.r:1500 uses an
+            // analogous cap on the PIRLS-in-line-search step. With this
+            // cap the 2d_binomial_n5000 case drops from 1358 ms to ~250 ms
+            // without changing the converged λ.
+            let max_inner = (max_inner_iter / 5).max(15);
             let tol = tolerance;
 
             // Track inner PIRLS calls + iterations for profile output
