@@ -530,29 +530,41 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         log_pseudo_det_sum += pseudo_determinant(penalty)?;
     }
 
-    // mgcv's formula:
-    // REML = (Dp/(2σ²) - ls[1]) + log|H|/2 - log|S|_+/2 - Mp/2 log(2πσ²)
-    // For Gaussian: ls[1] = -n/2 log(2πσ²).
-    // Expanding:
-    // REML = Dp/(2σ²) + (n - Mp)/2 log(2πσ²) + log|H|/2 - log|S|_+/2
+    // mgcv's formula (gam.fit3.r:616-617):
+    // REML = (Dp/(2σ²) - ls[1]) + log|H|/2 - log|S|_+/2 - Mp/2·log(2π·σ²)
     //
-    // For non-Gaussian (φ known): same formula with σ² = 1, so the
-    // log(2π σ²) = log(2π) is a constant offset (drops from the
-    // gradient).
+    // `ls[1]` is the family-specific saturated log-likelihood
+    // (gam.fit3.r:2497-2548 / `fix.family.ls`). For Gaussian
+    // ls[1] = -n/2·log(2π·σ²), so the expression collapses to
+    //   REML = Dp/(2σ²) + (n - Mp)/2·log(2π·σ²) + log|H|/2 - log|S|_+/2
+    // — which is the form we used historically before this fix.
+    //
+    // For Gamma the saturated likelihood involves digamma terms in σ²,
+    // and σ² is profiled (depends on λ), so the Gaussian short-cut
+    // gives the wrong λ-derivative and an incorrect score-formula
+    // optimum location. For Poisson/Binomial σ² = 1 (known) and ls[1]
+    // is purely a constant in λ — including it is a no-op for the
+    // optimiser but makes the reported score commensurable with mgcv.
+    //
+    // Source for ls[1]: `Family::saturated_log_likelihood` in
+    // `pirls.rs`. For non-Gaussian we evaluate at `y_original` (the
+    // true response) since the working response `z` is not what mgcv's
+    // ls function takes.
     let pi = std::f64::consts::PI;
-    let n_minus_mp = (n as f64) - (mp as f64);
     let _ = p;
+    let y_for_ls = y_original.unwrap_or(y);
+    let ls1 = family.saturated_log_likelihood(y_for_ls, scale_est);
     let term_dp = dp / (2.0 * scale_est);
-    let term_const = 0.5 * n_minus_mp * (2.0 * pi * scale_est).ln();
+    let term_const = -ls1 - 0.5 * (mp as f64) * (2.0 * pi * scale_est).ln();
     let term_log_h = 0.5 * log_det_a;
     let term_log_s = 0.5 * (log_lambda_sum + log_pseudo_det_sum);
     let reml = term_dp + term_const + term_log_h - term_log_s;
 
     if std::env::var("MGCV_EXACT_DEBUG").is_ok() {
         eprintln!(
-            "[MGCV_EXACT] λ={:?}\n  dev={:.6} bSb={:.6} dp={:.6} sigma2={:.8}\n  trA={:.6} n-trA={:.6} n-Mp={:.0} (Mp={})\n  log|H|={:.6} log|λS|+={:.6} (lambda_sum={:.6} pseudo_det={:.6})\n  TERMS: dp/2σ²={:.6} +const={:.6} +log|H|/2={:.6} -log|S|+/2={:.6} = REML {:.6}",
+            "[MGCV_EXACT] λ={:?}\n  dev={:.6} bSb={:.6} dp={:.6} sigma2={:.8}\n  trA={:.6} n-trA={:.6} Mp={} ls[1]={:.6}\n  log|H|={:.6} log|λS|+={:.6} (lambda_sum={:.6} pseudo_det={:.6})\n  TERMS: dp/2σ²={:.6} +(-ls[1]-Mp/2·log(2πσ²))={:.6} +log|H|/2={:.6} -log|S|+/2={:.6} = REML {:.6}",
             lambdas, dev_numerator, bsb, dp, scale_est,
-            tr_a, n_minus_tra, n_minus_mp, mp,
+            tr_a, n_minus_tra, mp, ls1,
             log_det_a, log_lambda_sum + log_pseudo_det_sum,
             log_lambda_sum, log_pseudo_det_sum,
             term_dp, term_const, term_log_h, term_log_s, reml

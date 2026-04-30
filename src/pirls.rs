@@ -76,6 +76,81 @@ impl Family {
             Family::Gamma => -1.0 / (eta * eta),
         }
     }
+
+    /// Saturated log-likelihood `ls[1]` per `gam.fit3.r:2497-2548`
+    /// (`fix.family.ls`). Used by mgcv's REML formula
+    /// `REML = Dp/(2σ²) - ls[1] + log|H|/2 - log|S|+/2 - Mp/2·log(2π·σ²)`
+    /// (`gam.fit3.r:616`). For Gaussian this term collapses with the
+    /// `Mp/2 log(2πσ²)` term into `(n-Mp)/2 log(2πσ²)`; for the other
+    /// families the saturated likelihood is family-specific and must be
+    /// included explicitly. `weights` defaults to 1 for every observation.
+    pub fn saturated_log_likelihood(&self, y: &Array1<f64>, scale: f64) -> f64 {
+        let n = y.len() as f64;
+        match self {
+            Family::Gaussian => -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln(),
+            Family::Poisson => y
+                .iter()
+                .map(|&yi| {
+                    if yi <= 0.0 {
+                        0.0
+                    } else {
+                        // dpois(y, y, log=T) = y·log(y) - y - lgamma(y+1)
+                        yi * yi.ln() - yi - log_gamma(yi + 1.0)
+                    }
+                })
+                .sum(),
+            Family::Binomial => {
+                // mgcv: -aic(y, n, y, w, 0)/2 with weights=1, n_trials=1.
+                // Saturated dbinom(y, 1, y) = y·log(y) + (1-y)·log(1-y),
+                // which is 0 for y ∈ {0, 1} and the entropy term otherwise.
+                y.iter()
+                    .map(|&yi| {
+                        if yi <= 0.0 || yi >= 1.0 {
+                            0.0
+                        } else {
+                            yi * yi.ln() + (1.0 - yi) * (1.0 - yi).ln()
+                        }
+                    })
+                    .sum()
+            }
+            Family::Gamma | Family::GammaLog => {
+                let inv_phi = 1.0 / scale;
+                let k = -log_gamma(inv_phi) - scale.ln() * inv_phi - inv_phi;
+                let sum_log_y: f64 = y.iter().map(|&yi| yi.max(1e-300).ln()).sum();
+                n * k - sum_log_y
+            }
+        }
+    }
+}
+
+/// Lanczos approximation of the log-Gamma function. Accurate to ~14 digits
+/// for x > 0. Pulled in directly to avoid a dependency on `statrs` for this
+/// single use.
+fn log_gamma(x: f64) -> f64 {
+    if x < 0.5 {
+        // Reflection formula: Γ(x)Γ(1-x) = π/sin(πx)
+        let pi = std::f64::consts::PI;
+        return (pi / (pi * x).sin()).ln() - log_gamma(1.0 - x);
+    }
+    let g = 7.0;
+    let coef = [
+        0.99999999999980993,
+        676.5203681218851,
+        -1259.1392167224028,
+        771.32342877765313,
+        -176.61502916214059,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.9843695780195716e-6,
+        1.5056327351493116e-7,
+    ];
+    let x = x - 1.0;
+    let mut a = coef[0];
+    for (i, &c) in coef.iter().enumerate().skip(1) {
+        a += c / (x + i as f64);
+    }
+    let t = x + g + 0.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
 }
 
 /// PiRLS fitting result
