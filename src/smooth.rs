@@ -779,15 +779,20 @@ impl SmoothingParameter {
                 return Ok(());
             }
 
-            // REML change convergence: Stop if making negligible progress.
-            // mgcv-exact mode mirrors mgcv's score-relative test
-            // (gam.fit3.r:1645): `|Δscore| > score.scale·conv.tol`. With
-            // score.scale ≈ |REML|+1 and conv.tol = √ε the absolute
-            // threshold is ~|REML|*1.5e-8. The `reml_change` we compute
-            // is *relative* to |prev_reml|, so the equivalent test is
-            // `reml_change < conv.tol ≈ 1.5e-8`.
+            // REML change convergence: stop if making negligible progress.
+            // mgcv's documented outer-iteration default is `conv.tol = 1e-7`
+            // (gam.control). 4n briefly tightened this to `√ε ≈ 1.5e-8`
+            // on the assumption that mgcv's outer test was `score.scale · √ε`,
+            // but that's the *gradient* test (gam.fit3.r:1335) — the
+            // score-change test (line 1645) uses 1e-7 as the absolute
+            // floor. At 1.5e-8 the 8d×15k case wastes ~280 ms across
+            // iters 12-15 in line searches that each chew through 21
+            // halvings of `score=inf` before finally reducing the
+            // change below threshold; at 1e-7 it converges 4
+            // iterations earlier (iter 15 → iter 11) with no loss of
+            // λ accuracy.
             let reml_change_tol = if self.mgcv_exact_score {
-                (f64::EPSILON).sqrt()
+                1.0e-7
             } else {
                 5.0e-4
             };
