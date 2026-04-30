@@ -1126,12 +1126,26 @@ pub fn reml_gradient_mgcv_exact_ift(
         let d1_k = dev_dot_b1 + lam_k * bsb_k + 2.0 * sls_dot_b1;
 
         let rank_k = estimate_rank_eigen(penalty);
-        grad[k] = d1_k / (2.0 * scale_est) + lam_k * tr_a_inv_s / 2.0 - (rank_k as f64) / 2.0;
+        // Note: mgcv's full ∂log|H|/∂ρ_k = tk_kkt + λ_k·tr_a_inv_s (gdi.c:857),
+        // where tk_kkt = Σᵢ a1[i]·η₁[i,k]·sign(w[i])·lev_uw[i]. The
+        // infrastructure for tk_kkt is computed above (a1, eta1, lev_uw)
+        // and verified correct by `tests/test_tk_kkt_reference.rs` and
+        // `tests/test_binomial_gradient_reference.rs`. Wiring it into the
+        // gradient is gated behind MGCV_TK_GRAD because doing so unmasks
+        // the saturating-λ trap (one smooth's λ runs away to ~10²× mgcv's
+        // saturation point, since we lack edge.correct/saturation-freeze).
+        // Safe to enable once #44 (edge.correct) lands.
+        let tk_kkt = if std::env::var("MGCV_TK_GRAD").is_ok() {
+            (0..n)
+                .map(|i| a1[i] * eta1[[i, k]] * w[i].signum() * lev_uw[i])
+                .sum::<f64>()
+        } else {
+            0.0
+        };
+        grad[k] = d1_k / (2.0 * scale_est)
+            + (tk_kkt + lam_k * tr_a_inv_s) / 2.0
+            - (rank_k as f64) / 2.0;
     }
-    // Suppress unused-warning from infrastructure not yet wired in (eta1, lev_uw, a1
-    // are used by an upcoming Tk·KK' term; keeping them keeps the diff narrow
-    // for the next checkpoint). Validate via test before re-enabling in grad.
-    let _ = (&eta1, &lev_uw, &a1);
     Ok(grad)
 }
 

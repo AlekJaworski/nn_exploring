@@ -1056,8 +1056,8 @@
       "extrap": {
         "atol": 0.001,
         "eff_atol": 0.001,
-        "max_absdiff": 0.006950156982521882,
-        "max_relerr": 0.002900611602644132,
+        "max_absdiff": 0.00695018119988422,
+        "max_relerr": 0.0029005956581398466,
         "n": 20,
         "ok": true,
         "rtol": 0.05
@@ -1065,8 +1065,8 @@
       "test": {
         "atol": 1e-06,
         "eff_atol": 0.0006461179700740625,
-        "max_absdiff": 0.0035900970486713035,
-        "max_relerr": 0.000993038529660175,
+        "max_absdiff": 0.0035900549234120227,
+        "max_relerr": 0.0009930268776059351,
         "n": 100,
         "ok": true,
         "rtol": 0.001
@@ -1074,20 +1074,20 @@
       "train": {
         "atol": 1e-06,
         "eff_atol": 0.0006310622250573592,
-        "max_absdiff": 0.003613441394675121,
-        "max_relerr": 0.0010852642940589617,
+        "max_absdiff": 0.0036134008114530047,
+        "max_relerr": 0.0010852549061625939,
         "n": 1000,
         "ok": true,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.13787626951387683,
-      "beta_maxrelerr": 2.652479077614776,
+      "beta_maxabsdiff": 0.13787627280572465,
+      "beta_maxrelerr": 2.652479046153362,
       "beta_ok": false,
-      "deviance_actual": 3661.5074004397625,
+      "deviance_actual": 3661.507400507194,
       "deviance_expected": 258.09431436783063,
-      "deviance_relerr": 13.186703063987139,
+      "deviance_relerr": 13.186703064248405,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -1096,14 +1096,14 @@
     },
     "bar_c": {
       "lambda_actual": [
-        79.71691092023396,
-        151045081.15504292
+        79.71691091962803,
+        151045093.39214838
       ],
       "lambda_expected": [
         76.72187681184113,
         59615137.79702292
       ],
-      "lambda_max_relerr": 1.5336699156734293,
+      "lambda_max_relerr": 1.5336701209418546,
       "lambda_ok": false
     },
     "description": "Gamma log, 2D additive",
@@ -1115,8 +1115,8 @@
       "extrap": {
         "atol": 0.001,
         "eff_atol": 0.001,
-        "max_absdiff": 0.08261612912469163,
-        "max_relerr": 0.046733713117677725,
+        "max_absdiff": 0.08261625160624031,
+        "max_relerr": 0.04673378106139625,
         "n": 20,
         "ok": true,
         "rtol": 0.05
@@ -1124,8 +1124,8 @@
       "test": {
         "atol": 1e-06,
         "eff_atol": 0.0005947207002660451,
-        "max_absdiff": 0.06585036125817822,
-        "max_relerr": 0.02227572925667021,
+        "max_absdiff": 0.06585014689891988,
+        "max_relerr": 0.022275792201257763,
         "n": 100,
         "ok": false,
         "rtol": 0.001
@@ -1133,20 +1133,20 @@
       "train": {
         "atol": 1e-06,
         "eff_atol": 0.0006025927307385829,
-        "max_absdiff": 0.06949077940842141,
-        "max_relerr": 0.023041485680595494,
+        "max_absdiff": 0.06949050054951122,
+        "max_relerr": 0.02304153681522904,
         "n": 200,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.257619460481492,
-      "beta_maxrelerr": 1.1766272581895172,
+      "beta_maxabsdiff": 0.25761950909005543,
+      "beta_maxrelerr": 1.1766271004208049,
       "beta_ok": false,
-      "deviance_actual": 531.2379888581974,
+      "deviance_actual": 531.2379807633315,
       "deviance_expected": 48.68775708264421,
-      "deviance_relerr": 9.91112059149606,
+      "deviance_relerr": 9.91112042523525,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -1155,14 +1155,14 @@
     },
     "bar_c": {
       "lambda_actual": [
-        79.23424414069854,
-        947.0627188946866
+        79.23424411513288,
+        947.0627170455446
       ],
       "lambda_expected": [
         68.53980893770957,
         709.7603928578528
       ],
-      "lambda_max_relerr": 0.3343414600543361,
+      "lambda_max_relerr": 0.3343414574490316,
       "lambda_ok": false
     },
     "description": "Small gamma(log)",
@@ -1772,8 +1772,8 @@
       "extrap": {
         "atol": 0.001,
         "eff_atol": 0.001,
-        "max_absdiff": 0.026097111269301365,
-        "max_relerr": 0.0047728715961028656,
+        "max_absdiff": 0.02609797271935399,
+        "max_relerr": 0.004773029145742946,
         "n": 20,
         "ok": true,
         "rtol": 0.05
@@ -1781,8 +1781,8 @@
       "test": {
         "atol": 1e-06,
         "eff_atol": 0.00038462699111995553,
-        "max_absdiff": 0.00881294349942685,
-        "max_relerr": 0.0024453729268200473,
+        "max_absdiff": 0.008813017821570845,
+        "max_relerr": 0.0024454571424952407,
         "n": 100,
         "ok": false,
         "rtol": 0.001
@@ -1790,20 +1790,20 @@
       "train": {
         "atol": 1e-06,
         "eff_atol": 0.0004234901652120919,
-        "max_absdiff": 0.012546135976381656,
-        "max_relerr": 0.002667259376597012,
+        "max_absdiff": 0.012546339739596846,
+        "max_relerr": 0.002667273049476866,
         "n": 2000,
         "ok": false,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.4846389112072377,
-      "beta_maxrelerr": 4.125176358484053,
+      "beta_maxabsdiff": 0.4846388616543821,
+      "beta_maxrelerr": 4.125174898637836,
       "beta_ok": false,
-      "deviance_actual": 4356.541136964789,
+      "deviance_actual": 4356.541150249342,
       "deviance_expected": 528.6632052864995,
-      "deviance_relerr": 7.240674012112947,
+      "deviance_relerr": 7.240674037241521,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -1812,10 +1812,10 @@
     },
     "bar_c": {
       "lambda_actual": [
-        43.4400146282101,
-        12618.41199671444,
-        53831.570591147625,
-        44099.775975487566
+        43.440014664408324,
+        12618.412096969574,
+        53831.57091808502,
+        44099.775649331095
       ],
       "lambda_expected": [
         40.33579849666284,
@@ -1823,7 +1823,7 @@
         44798.32809525836,
         40133.53172325163
       ],
-      "lambda_max_relerr": 0.20164240229414682,
+      "lambda_max_relerr": 0.2016424095921288,
       "lambda_ok": false
     },
     "description": "Gamma(log) in 4d",
