@@ -67,24 +67,9 @@ _8D_15K_FD_GRAD_REASON = (
     "which now passes). This test should be skipped when max(λ) > 1e6 "
     "but currently isn't."
 )
-_NON_GAUSSIAN_BYTE_FOR_BYTE_REASON = (
-    "Non-Gaussian byte-for-byte parity needs mgcv's full outer iteration: "
-    "re-run inner PiRLS at each Newton trial λ, then call `gdi1` on the "
-    "PiRLS-converged (β, z, w, μ) for IFT-based gradient/Hessian "
-    "(gam.fit3.r:1228-1710 + gdi.c:2320-2847). We currently do single-shot "
-    "Newton with the working response z passed to the score function — "
-    "this recovers IRLS-converged β at λ_current via `(X'WX+λS)⁻¹ X'Wz` "
-    "(matching pls_fit1) and gets us within 5% of mgcv's λ (poisson "
-    "absdiff 3.5e-3 ≤ Bar A; binomial absdiff 4e-3 ≈ 7× over Bar A). "
-    "Closing the binomial residual needs the outer iteration."
-)
-
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
-    "test_parity": {
-        "2d_binomial_logit_n1000_k10_cr": _NON_GAUSSIAN_BYTE_FOR_BYTE_REASON,
-    },
-    # Stage 1 design_matrix_span now PASSES for bs basis after de Boor
-    # implementation in 4u; only test_parity extrap remains.
+    # All known parity gaps closed — binomial closed by #47 (full mgcv
+    # replication: GLM deviance score + IFT grad/Hess + PIRLS-in-line-search).
 }
 
 
