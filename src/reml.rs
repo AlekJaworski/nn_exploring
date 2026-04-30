@@ -1024,14 +1024,71 @@ pub fn reml_gradient_mgcv_exact_ift(
         _ => dev_numerator / ((n as f64) - tr_a).max(1e-10),
     };
 
+    let p = a.nrows();
+
     // IFT first derivatives: b1[:,k] = -λ_k A⁻¹ S_k β
     let b1 = compute_b1_ift(&a_inv, &beta, lambdas, penalties_blocks);
+
+    // η₁[i,k] = (X·b1)[i,k] = ∂η_i/∂ρ_k
+    let eta1 = x.dot(&b1);
+
+    // Leverage vector h[i] = w[i]·x_i'·A⁻¹·x_i = diag(K·K')[i] (gdi.c:828),
+    // and the unweighted form lev_uw[i] = x_i'·A⁻¹·x_i = h[i]/|w[i]| with
+    // sign correction. We compute lev_uw directly to avoid divide-by-tiny-w.
+    let xa = x.dot(&a_inv); // (n × p)
+    let mut lev_uw = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let mut s = 0.0;
+        for j in 0..p {
+            s += xa[[i, j]] * x[[i, j]];
+        }
+        lev_uw[i] = s;
+    }
+
+    // dw/dη at convergence (gdi.c:2535 for Fisher / gdi.c:2556 for Newton).
+    // Tk[i,k]·diag(KK')[i] = a1[i]·η₁[i,k]·sign(w[i])·lev_uw[i] (since
+    // diag(KK')[i] = w[i]·lev_uw[i] and Tk divides by |w[i]|). For
+    // canonical links, mgcv uses Fisher's compact form. Gaussian: a1≡0.
+    let mut a1 = Array1::<f64>::zeros(n);
+    if !matches!(family, crate::pirls::Family::Gaussian) {
+        let eta = x.dot(&beta);
+        let use_fisher = family.is_canonical_link();
+        for i in 0..n {
+            let mu_i = family.inverse_link(eta[i]);
+            let dmu_deta = family.d_inverse_link(eta[i]);
+            if dmu_deta.abs() < 1e-12 {
+                continue;
+            }
+            let g1 = 1.0 / dmu_deta;
+            let v = family.variance(mu_i).max(1e-300);
+            // mgcv normalised derivatives (gam.fit3.r:534-538):
+            //   V₁ → V'/V, V₂ → V''/V, g₂ → g''/g', g₃ → g'''/g'
+            let v1n = family.dvar(mu_i) / v;
+            let v2n = family.d2var(mu_i) / v;
+            let g2n = family.d2link(mu_i) * dmu_deta;
+            let g3n = family.d3link(mu_i) * dmu_deta;
+            if use_fisher {
+                // gdi.c:2535: a1 = -w·(V₁ + 2·g₂)/g₁
+                a1[i] = -w[i] * (v1n + 2.0 * g2n) / g1;
+            } else {
+                let y_for_resid = y_original.unwrap_or(y);
+                let c_resid = y_for_resid[i] - mu_i;
+                let mut alpha = 1.0 + c_resid * (v1n + g2n);
+                if alpha == 0.0 {
+                    alpha = f64::EPSILON;
+                }
+                let xx = v2n - v1n * v1n + g3n - g2n * g2n;
+                let alpha1 = (-(v1n + g2n) + c_resid * xx) / alpha;
+                // gdi.c:2556: a1 = w·(α₁ - V₁ - 2·g₂)/g₁
+                a1[i] = w[i] * (alpha1 - v1n - 2.0 * g2n) / g1;
+            }
+        }
+    }
 
     // ∂D/∂β at current (β,μ)
     let dev_grad_beta = compute_dev_grad_beta(y, x, w, &beta, family, y_original);
 
     // ΣλSβ = Σ_j λ_j S_j β  (gathered as a length-p vector)
-    let p = a.nrows();
     let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
         let s_j_beta = penalty.dot_vec(&beta);
@@ -1071,6 +1128,10 @@ pub fn reml_gradient_mgcv_exact_ift(
         let rank_k = estimate_rank_eigen(penalty);
         grad[k] = d1_k / (2.0 * scale_est) + lam_k * tr_a_inv_s / 2.0 - (rank_k as f64) / 2.0;
     }
+    // Suppress unused-warning from infrastructure not yet wired in (eta1, lev_uw, a1
+    // are used by an upcoming Tk·KK' term; keeping them keeps the diff narrow
+    // for the next checkpoint). Validate via test before re-enabling in grad.
+    let _ = (&eta1, &lev_uw, &a1);
     Ok(grad)
 }
 
