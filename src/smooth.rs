@@ -918,17 +918,16 @@ impl SmoothingParameter {
             // mgcv uses both criteria to handle different convergence scenarios
             //
             // mgcv-exact mode uses mgcv's score-scale-relative tolerance
-            // (gam.fit3.r:1335 / 1643): `|grad| < score.scale * conv.tol`
-            // where score.scale ≈ |REML| + 1, conv.tol = sqrt(eps) ≈ 1.5e-8.
-            // This scales correctly to large-n cases where |REML| can be
-            // 1e4+, making the absolute 1e-4 threshold both too loose
-            // (small cases) and inappropriate (saturating cases need to
-            // step deeper). Default mode keeps the cheap absolute
-            // threshold for speed.
+            // (gam.fit3.r:1383): `|grad| < score.scale * conv.tol` where
+            // score.scale ≈ |REML| + 1 and conv.tol = 1e-6 (newton()
+            // default at gam.fit3.r:1260). Previously we used sqrt(eps) ≈
+            // 1.5e-8, which is 67× tighter — that pushed us past mgcv's
+            // stopping point on saturating-λ cases. Matching mgcv's 1e-6
+            // makes the parity battery's λ values track mgcv's stopping
+            // point (and unblocks MGCV_TK_GRAD without saturation runaway).
             let grad_tol = if self.mgcv_exact_score {
                 let score_scale = current_reml.abs() + 1.0;
-                let conv_tol = (f64::EPSILON).sqrt(); // ≈ 1.5e-8
-                score_scale * conv_tol
+                score_scale * 1.0e-6
             } else {
                 0.05
             };
@@ -987,7 +986,75 @@ impl SmoothingParameter {
             }
 
             use ndarray_linalg::{Eigh, UPLO};
-            let (eigvals, eigvecs) = hessian.eigh(UPLO::Upper).map_err(|e| {
+
+            // Subset Newton: identify "unconverged" dimensions per
+            // gam.fit3.r:1383 + 1430. mgcv excludes from the step:
+            //   uconv.ind  = |grad_i| > score_scale·conv.tol  (per-dim converged)
+            //   uconv.ind1 = uconv.ind & |grad_i| > max|grad|·0.001
+            // and computes the Newton step ONLY on the remaining dims; the
+            // others get step_i = 0. This is mgcv's saturation-freeze:
+            // smooths whose gradient is already tiny don't get pushed further.
+            // Without it, adding the (correct) Tk·KK' term to the gradient
+            // pushes saturating-λ smooths past mgcv's stopping point, since
+            // the step from a tiny |grad|/tiny |H_ii| is non-negligible.
+            //
+            // mgcv's score_scale = |log(scale.est)| + |REML|; conv.tol = 1e-6
+            // (newton() default at gam.fit3.r:1260). For our REML score
+            // |REML| dominates so we approximate score_scale = |REML| + 1.
+            let max_abs_grad = gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
+            let inner_conv_tol: f64 = 1.0e-6;
+            let score_scale = current_reml.abs() + 1.0;
+            let dim_grad_tol = score_scale * inner_conv_tol;
+            let active: Vec<usize> = (0..m)
+                .filter(|&i| {
+                    let gi = gradient[i].abs();
+                    gi > dim_grad_tol && gi > max_abs_grad * 0.001
+                })
+                .collect();
+
+            // mgcv safeguard (line 1432): ensure at least one dim is active.
+            let active = if active.is_empty() {
+                let argmax = (0..m)
+                    .max_by(|&a, &b| gradient[a].abs().partial_cmp(&gradient[b].abs()).unwrap())
+                    .unwrap_or(0);
+                vec![argmax]
+            } else {
+                active
+            };
+            let n_active = active.len();
+
+            if std::env::var("MGCV_PROFILE").is_ok() && n_active < m {
+                eprintln!(
+                    "[PROFILE]   Subset Newton: {}/{} dims active (frozen: {:?})",
+                    n_active,
+                    m,
+                    (0..m).filter(|i| !active.contains(i)).collect::<Vec<_>>()
+                );
+            }
+
+            // Build subset Hessian and gradient (preconditioned forms).
+            let h_sub = if n_active == m {
+                hessian.clone()
+            } else {
+                let mut hs = Array2::<f64>::zeros((n_active, n_active));
+                for (ri, &ai) in active.iter().enumerate() {
+                    for (ci, &aj) in active.iter().enumerate() {
+                        hs[[ri, ci]] = hessian[[ai, aj]];
+                    }
+                }
+                hs
+            };
+            let g_sub: Array1<f64> = if n_active == m {
+                gradient_precond.clone()
+            } else {
+                let mut gs = Array1::<f64>::zeros(n_active);
+                for (i, &ai) in active.iter().enumerate() {
+                    gs[i] = gradient_precond[ai];
+                }
+                gs
+            };
+
+            let (eigvals, eigvecs) = h_sub.eigh(UPLO::Upper).map_err(|e| {
                 GAMError::LinAlgError(format!("Hessian eigh failed: {:?}", e))
             })?;
 
@@ -1007,19 +1074,19 @@ impl SmoothingParameter {
                 }
             }
 
-            // step_precond = -U diag(1/d) U^T g_precond
-            // (Note: ndarray_linalg returns eigvecs with columns as eigenvectors.)
-            let utg = eigvecs.t().dot(&gradient_precond);
-            let mut scaled = Array1::<f64>::zeros(m);
-            for i in 0..m {
+            // step_sub_precond = -U diag(1/d) U^T g_sub
+            let utg = eigvecs.t().dot(&g_sub);
+            let mut scaled = Array1::<f64>::zeros(n_active);
+            for i in 0..n_active {
                 scaled[i] = -utg[i] / d[i];
             }
-            let step_precond = eigvecs.dot(&scaled);
+            let step_sub_precond = eigvecs.dot(&scaled);
 
-            // Back-transform: step = D^-1 * step_precond
+            // Back-transform: step = D^-1 * step_precond, padded to full size
+            // with zeros on frozen dims.
             let mut step = Array1::<f64>::zeros(m);
-            for i in 0..m {
-                step[i] = step_precond[i] / diag_precond[i];
+            for (ki, &ai) in active.iter().enumerate() {
+                step[ai] = step_sub_precond[ki] / diag_precond[ai];
             }
 
             // Limit step size (Wood 2011: max step = 4-5 in log space)
