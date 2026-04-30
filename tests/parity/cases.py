@@ -324,6 +324,130 @@ def _gen_8d_neighbourhoods_like(
 
 
 # --------------------------------------------------------------------- #
+# Coverage-extension generators (Parity 5 expansion battery)             #
+# --------------------------------------------------------------------- #
+
+
+def _gen_10d_gaussian(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """High-dimensional additive: 4 wiggly + 3 quadratic + 2 near-linear + 1 null."""
+    x = rng.uniform(0.0, 1.0, (n, 10))
+    y = (
+        np.sin(2 * np.pi * x[:, 0])
+        + 0.6 * np.cos(3 * np.pi * x[:, 1])
+        + 0.5 * np.sin(2 * np.pi * x[:, 2])
+        + 0.4 * np.cos(2 * np.pi * x[:, 3])
+        + 0.3 * (x[:, 4] ** 2)
+        + 0.25 * (x[:, 5] ** 2)
+        + 0.2 * (x[:, 6] ** 2)
+        + 0.15 * x[:, 7]
+        + 0.1 * x[:, 8]
+        + 0.0 * x[:, 9]
+        + rng.normal(0, 0.2, n)
+    )
+    return x, y
+
+
+def _gen_2d_gamma_inverse(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Gamma family with canonical inverse link: μ = 1/η. Need η > 0
+    everywhere → keep η bounded above 0 by construction."""
+    x = rng.uniform(0.0, 1.0, (n, 2))
+    eta = 0.5 + 0.3 * np.sin(2 * np.pi * x[:, 0]) + 0.2 * x[:, 1]  # ∈ ~[0.0, 1.0]
+    eta = np.clip(eta, 0.05, None)
+    mu = 1.0 / eta
+    shape = 4.0
+    y = rng.gamma(shape, mu / shape, n)
+    return x, y
+
+
+def _gen_4d_binomial_logit(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    x = rng.uniform(0.0, 1.0, (n, 4))
+    eta = (
+        1.5 * np.sin(2 * np.pi * x[:, 0])
+        + 0.8 * (x[:, 1] - 0.5)
+        + 0.6 * (x[:, 2] ** 2 - 0.5)
+        + 0.4 * x[:, 3]
+    )
+    p = 1.0 / (1.0 + np.exp(-eta))
+    y = rng.binomial(1, p).astype(float)
+    return x, y
+
+
+def _gen_3d_poisson_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    x = rng.uniform(0.0, 1.0, (n, 3))
+    eta = 1.2 + 0.6 * np.sin(2 * np.pi * x[:, 0]) + 0.4 * x[:, 1] + 0.3 * (x[:, 2] ** 2)
+    mu = np.exp(eta)
+    y = rng.poisson(mu).astype(float)
+    return x, y
+
+
+def _gen_4d_gamma_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    x = rng.uniform(0.0, 1.0, (n, 4))
+    eta = (
+        0.8
+        + 0.4 * np.sin(2 * np.pi * x[:, 0])
+        + 0.2 * x[:, 1]
+        + 0.15 * (x[:, 2] ** 2)
+        + 0.1 * x[:, 3]
+    )
+    mu = np.exp(eta)
+    shape = 4.0
+    y = rng.gamma(shape, mu / shape, n)
+    return x, y
+
+
+def _gen_1d_step(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Discontinuity at x=0.5 — pathological for splines (which assume
+    smoothness). Tests how mgcv_rust handles a hard non-smooth target."""
+    x = rng.uniform(0.0, 1.0, n).reshape(-1, 1)
+    y = np.where(x.ravel() < 0.5, -0.5, 0.5) + rng.normal(0, 0.1, n)
+    return x, y
+
+
+def _gen_1d_low_signal(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """SNR ≈ 0.1 — signal much smaller than noise. Should drive λ → ∞
+    (penalty wins; smooth collapses to a near-constant)."""
+    x = rng.uniform(0.0, 1.0, n).reshape(-1, 1)
+    y = 0.05 * np.sin(2 * np.pi * x.ravel()) + rng.normal(0, 0.5, n)
+    return x, y
+
+
+def _gen_1d_poisson_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    x = rng.uniform(0.0, 1.0, n).reshape(-1, 1)
+    eta = 1.5 + 0.8 * np.sin(2 * np.pi * x.ravel())
+    y = rng.poisson(np.exp(eta)).astype(float)
+    return x, y
+
+
+def _gen_7d_compact(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Compact production-shape: 7 features, smaller n than 8d battery
+    case. Drops `concessions` (the mostly-zero feature) and uses uniform
+    k=8 across all smooths."""
+    x0 = rng.uniform(0.0, 1825.0, n)
+    x1 = rng.uniform(1.0, 10.0, n)
+    x2 = rng.uniform(1.0, 10.0, n)
+    x3 = rng.beta(2.0, 5.0, n)
+    x4 = rng.uniform(1.0, 6.0, n)
+    x5 = rng.uniform(1.0, 5.0, n)
+    x6 = rng.uniform(0.0, 1.0, n)
+
+    days_decay = -0.0001 * x0
+    quality_eff = 0.04 * (x1 ** 2) - 0.08 * x1
+    condition_eff = 0.06 * np.tanh(x2 - 5.0)
+    sqft_eff = 0.4 * x3
+    beds_eff = 0.05 * x4
+    baths_eff = 0.04 * x5
+    year_eff = 0.3 * (x6 - 0.5) ** 2
+
+    x = np.column_stack([x0, x1, x2, x3, x4, x5, x6])
+    y = (
+        days_decay + quality_eff + condition_eff + sqft_eff
+        + beds_eff + baths_eff + year_eff
+        + rng.normal(0, 0.1, n)
+    )
+    return x, y
+
+
+# --------------------------------------------------------------------- #
 # Case definition                                                        #
 # --------------------------------------------------------------------- #
 
@@ -555,6 +679,164 @@ CASES: list[Case] = [
         bs=["cr"] * 5,
         family="gaussian", link="identity", method="REML",
         generator=_gen_5d_skewed_features,
+    ),
+
+    # ================================================================== #
+    # Parity 5: expanded coverage battery (20 new cases)                 #
+    # Scale axis, family×n matrix, GCV method, gamma(inverse), high-d,   #
+    # multi-d non-Gaussian, pathological data shapes.                    #
+    # ================================================================== #
+
+    # --- A. Scale axis (5 cases) -------------------------------------- #
+    Case(
+        name="1d_gaussian_smooth_n50_k10_cr",
+        description="Minimal data: n=50, tests degenerate small-n behavior",
+        seed=101, n=50, d=1, k=[10], bs=["cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_1d_smooth,
+    ),
+    Case(
+        name="1d_gaussian_smooth_n2000_k30_cr",
+        description="Large 1d with k=30 (over-parameterised 1D)",
+        seed=102, n=2000, d=1, k=[30], bs=["cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_1d_smooth,
+    ),
+    Case(
+        name="2d_gaussian_additive_n50000_k15_cr",
+        description="Large-n stress: n=50k with k=15 per smooth",
+        seed=103, n=50000, d=2, k=[15, 15], bs=["cr", "cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_2d_additive,
+    ),
+    Case(
+        name="10d_gaussian_n3000_k8_cr",
+        description="High-d additive: 10 smooths in one model",
+        seed=104, n=3000, d=10, k=[8] * 10, bs=["cr"] * 10,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_10d_gaussian,
+    ),
+    Case(
+        name="1d_gaussian_smooth_n1000_k50_cr",
+        description="Extreme over-parameterisation: k=50 with n=1000",
+        seed=105, n=1000, d=1, k=[50], bs=["cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_1d_smooth,
+    ),
+
+    # --- B. Family × scale matrix (6 cases) --------------------------- #
+    Case(
+        name="2d_binomial_logit_n200_k10_cr",
+        description="Small binomial: tests behaviour near the n=p boundary",
+        seed=110, n=200, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="binomial", link="logit", method="REML",
+        generator=_gen_binomial_logit,
+    ),
+    Case(
+        name="2d_binomial_logit_n5000_k10_cr",
+        description="Large binomial: tests perf scaling of PIRLS-in-line-search",
+        seed=111, n=5000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="binomial", link="logit", method="REML",
+        generator=_gen_binomial_logit,
+    ),
+    Case(
+        name="2d_poisson_log_n200_k10_cr",
+        description="Small poisson",
+        seed=112, n=200, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="poisson", link="log", method="REML",
+        generator=_gen_poisson_log,
+    ),
+    Case(
+        name="2d_poisson_log_n5000_k10_cr",
+        description="Large poisson",
+        seed=113, n=5000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="poisson", link="log", method="REML",
+        generator=_gen_poisson_log,
+    ),
+    Case(
+        name="2d_gamma_log_n200_k10_cr",
+        description="Small gamma(log)",
+        seed=114, n=200, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="Gamma", link="log", method="REML",
+        generator=_gen_gamma_log,
+    ),
+    Case(
+        name="2d_gamma_inverse_n1000_k10_cr",
+        description="Gamma with canonical inverse link (NEW link coverage)",
+        seed=115, n=1000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="Gamma", link="inverse", method="REML",
+        generator=_gen_2d_gamma_inverse,
+    ),
+
+    # --- C. 1d non-Gaussian (1 case, fills a gap) --------------------- #
+    Case(
+        name="1d_poisson_log_n500_k10_cr",
+        description="1d poisson (existing battery had no 1d non-Gaussian)",
+        seed=160, n=500, d=1, k=[10], bs=["cr"],
+        family="poisson", link="log", method="REML",
+        generator=_gen_1d_poisson_log,
+    ),
+
+    # --- D. Higher-d non-Gaussian (3 cases) --------------------------- #
+    Case(
+        name="4d_binomial_logit_n2000_k8_cr",
+        description="Binomial in 4d — tests PIRLS-in-line-search at higher d",
+        seed=130, n=2000, d=4, k=[8, 8, 8, 8], bs=["cr"] * 4,
+        family="binomial", link="logit", method="REML",
+        generator=_gen_4d_binomial_logit,
+    ),
+    Case(
+        name="3d_poisson_log_n2000_k10_cr",
+        description="Poisson in 3d",
+        seed=131, n=2000, d=3, k=[10, 10, 10], bs=["cr", "cr", "cr"],
+        family="poisson", link="log", method="REML",
+        generator=_gen_3d_poisson_log,
+    ),
+    Case(
+        name="4d_gamma_log_n2000_k8_cr",
+        description="Gamma(log) in 4d",
+        seed=132, n=2000, d=4, k=[8, 8, 8, 8], bs=["cr"] * 4,
+        family="Gamma", link="log", method="REML",
+        generator=_gen_4d_gamma_log,
+    ),
+
+    # --- E. Basis variations (2 cases) -------------------------------- #
+    Case(
+        name="2d_gaussian_bs_n1500_k15",
+        description="2d with bs='bs' B-spline basis (de Boor coverage in 2d)",
+        seed=140, n=1500, d=2, k=[15, 15], bs=["bs", "bs"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_2d_additive,
+    ),
+    Case(
+        name="4d_gaussian_bs_n2000_k10",
+        description="4d B-spline — tests de Boor at higher d",
+        seed=141, n=2000, d=4, k=[10, 10, 10, 10], bs=["bs"] * 4,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_4d_mixed,
+    ),
+
+    # --- F. Realistic / pathological shapes (3 cases) ----------------- #
+    Case(
+        name="1d_gaussian_step_n500_k10_cr",
+        description="Step discontinuity at x=0.5 — pathological for splines",
+        seed=150, n=500, d=1, k=[10], bs=["cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_1d_step,
+    ),
+    Case(
+        name="1d_gaussian_low_signal_n1000_k10_cr",
+        description="Low SNR (~0.1) — should saturate λ → ∞",
+        seed=151, n=1000, d=1, k=[10], bs=["cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_1d_low_signal,
+    ),
+    Case(
+        name="7d_neighbourhoods_compact_n3000",
+        description="Production-shape, smaller n: 7 features, k=8 across",
+        seed=152, n=3000, d=7, k=[8] * 7, bs=["cr"] * 7,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_7d_compact,
     ),
 ]
 

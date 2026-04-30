@@ -162,10 +162,14 @@ def fit_one(case) -> dict[str, Any]:
         # use `gam` so the basis spec is identical (slower but offline,
         # one-shot fixture build).
         fitter = mgcv.gam if x_train.shape[0] > 10000 else mgcv.bam
+        # mgcv calls the GCV method "GCV.Cp" (its full name); our Rust
+        # core uses the shorter "GCV". Translate so cases.py can stay
+        # neutral (the case carries the Rust spelling).
+        r_method = "GCV.Cp" if case.method == "GCV" else case.method
         fit = fitter(
             formula,
             data=r_train,
-            method=case.method,
+            method=r_method,
             family=family,
         )
 

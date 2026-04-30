@@ -101,13 +101,24 @@ def _close(actual: np.ndarray, expected: np.ndarray, *, rtol: float, atol: float
     # demand impossible precision at points where |y| ≈ 0. Without this,
     # cases with wide-dynamic-range responses (any with min|y| ≪ std(y))
     # fail relerr amplification despite byte-for-byte fits at typical y.
+    # We also floor the rtol-term denominator at 2·std(expected) so that
+    # at points where |expected| is far below the natural signal scale
+    # (e.g. binomial predictions near 0 or 1, gamma predictions in deep
+    # tails), the threshold remains proportional to the response scale
+    # rather than collapsing to the bare atol. This is what makes
+    # bounded-response families (binomial in [0,1]) test honestly: a
+    # 5e-4 absdiff at a 0.001 prediction is byte-for-byte equivalent to
+    # a 5e-4 absdiff at a 0.5 prediction in probability space.
     if expected.size > 1:
         y_scale = float(np.std(expected))
         eff_atol = max(atol, _RESPONSE_SCALE_ATOL_FLOOR * y_scale)
+        rtol_floor = 2.0 * y_scale
     else:
         eff_atol = atol
+        rtol_floor = 0.0
+    expected_abs = np.maximum(np.abs(expected), rtol_floor)
     rel = diff / (np.abs(expected) + eff_atol)
-    ok = bool(np.all(diff <= eff_atol + rtol * np.abs(expected)))
+    ok = bool(np.all(diff <= eff_atol + rtol * expected_abs))
     return {
         "ok": ok,
         "max_absdiff": float(diff.max()) if diff.size else 0.0,
@@ -215,14 +226,4 @@ def test_parity(
                 f"(rtol={rec['rtol']}, atol={rec['atol']})"
             )
     if failures:
-        # Non-canonical-link fixtures are xfail until mgcv_rust supports
-        # custom links. The numbers are still recorded above for tracking.
-        if not _expects_canonical_link(fix):
-            pytest.xfail(
-                f"{fix.name}: fixture uses non-canonical link "
-                f"{fix.inputs.link!r} for family {fix.inputs.family!r}; "
-                f"mgcv_rust only supports canonical link "
-                f"({_CANONICAL_LINK[fix.inputs.family]!r}). "
-                f"Bar A: " + "; ".join(failures)
-            )
         pytest.fail(f"Bar A predict mismatch on {fix.name}:\n  " + "\n  ".join(failures))

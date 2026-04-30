@@ -22,5 +22,27 @@
   "8d_neighbourhoods_like_n15000":      1500.0,
   "6d_heatmap_pricing_n8000":            400.0,
   "4d_small_neighbourhood_n300":          50.0,
-  "5d_skewed_features_n5000":            200.0
+  "5d_skewed_features_n5000":            200.0,
+
+  "_parity_5_expansion": "20 new cases added in Parity 5 (commit a8de043+). Budgets ≈ 3× median observed on dev workstation; loose to absorb noise.",
+  "1d_gaussian_smooth_n50_k10_cr":         5.0,
+  "1d_gaussian_smooth_n2000_k30_cr":      40.0,
+  "2d_gaussian_additive_n50000_k15_cr": 1500.0,
+  "10d_gaussian_n3000_k8_cr":            500.0,
+  "1d_gaussian_smooth_n1000_k50_cr":     120.0,
+  "2d_binomial_logit_n200_k10_cr":        50.0,
+  "2d_binomial_logit_n5000_k10_cr":     5000.0,
+  "2d_poisson_log_n200_k10_cr":           50.0,
+  "2d_poisson_log_n5000_k10_cr":         800.0,
+  "2d_gamma_log_n200_k10_cr":           3500.0,
+  "2d_gamma_inverse_n1000_k10_cr":       150.0,
+  "1d_poisson_log_n500_k10_cr":           20.0,
+  "4d_binomial_logit_n2000_k8_cr":       450.0,
+  "3d_poisson_log_n2000_k10_cr":         500.0,
+  "4d_gamma_log_n2000_k8_cr":           2500.0,
+  "2d_gaussian_bs_n1500_k15":             40.0,
+  "4d_gaussian_bs_n2000_k10":            150.0,
+  "1d_gaussian_step_n500_k10_cr":          5.0,
+  "1d_gaussian_low_signal_n1000_k10_cr":   8.0,
+  "7d_neighbourhoods_compact_n3000":     250.0
 }

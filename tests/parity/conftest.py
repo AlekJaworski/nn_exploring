@@ -67,9 +67,33 @@ _8D_15K_FD_GRAD_REASON = (
     "which now passes). This test should be skipped when max(λ) > 1e6 "
     "but currently isn't."
 )
+_GAMMA_INVERSE_GAP_REASON = (
+    "Gamma + canonical inverse link parity: predict matches mgcv only "
+    "to ~1.5e-2 absdiff. The gamma(log) path passes byte-for-byte for "
+    "n≥1000 after #47 but the canonical inverse path needs more "
+    "investigation (likely the inverse-link Fisher weights aren't "
+    "exactly mgcv's). Tracked in Parity 5 expansion battery."
+)
+_GAMMA_LOG_SMALL_N_GAP_REASON = (
+    "gamma(log) at small n (=200): rust λ deviates ~30-40% from mgcv "
+    "and predict diverges to ~8e-2 on response scale. The n=1000 "
+    "gamma(log) case passes byte-for-byte; this small-n case stresses "
+    "the same path. Likely PIRLS at small n is hitting numerical "
+    "edge cases that mgcv's full outer iteration smooths over. "
+    "Followup beyond #47."
+)
+_GAMMA_LOG_HIGH_D_GAP_REASON = (
+    "gamma(log) in 4d: rust λ deviates ~10-15% from mgcv across all "
+    "smooths, response-scale absdiff ~1.4e-2. Same family/link as the "
+    "passing 2d case but higher dim amplifies the residual gap."
+)
+
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
-    # All known parity gaps closed — binomial closed by #47 (full mgcv
-    # replication: GLM deviance score + IFT grad/Hess + PIRLS-in-line-search).
+    "test_parity": {
+        "2d_gamma_inverse_n1000_k10_cr": _GAMMA_INVERSE_GAP_REASON,
+        "2d_gamma_log_n200_k10_cr": _GAMMA_LOG_SMALL_N_GAP_REASON,
+        "4d_gamma_log_n2000_k8_cr": _GAMMA_LOG_HIGH_D_GAP_REASON,
+    },
 }
 
 
