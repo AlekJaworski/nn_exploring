@@ -915,16 +915,15 @@ impl SmoothingParameter {
             // Converged if EITHER:
             // 1. Gradient L-infinity norm is small (gradient convergence)
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
-            // mgcv uses both criteria to handle different convergence scenarios
             //
-            // mgcv-exact mode uses mgcv's score-scale-relative tolerance
-            // (gam.fit3.r:1383): `|grad| < score.scale * conv.tol` where
-            // score.scale ≈ |REML| + 1 and conv.tol = 1e-6 (newton()
-            // default at gam.fit3.r:1260). Previously we used sqrt(eps) ≈
-            // 1.5e-8, which is 67× tighter — that pushed us past mgcv's
-            // stopping point on saturating-λ cases. Matching mgcv's 1e-6
-            // makes the parity battery's λ values track mgcv's stopping
-            // point (and unblocks MGCV_TK_GRAD without saturation runaway).
+            // Audit 2026-05-04 (Phase E1 N-3 diagnostic): tested AND with
+            // both our tols (grad 1e-6, score 1e-7) and mgcv's tols
+            // (gam.fit3.r:1652-1653: grad 5e-6, score 1e-6). Both AND
+            // variants broke `1d_gaussian_low_signal_n1000_k10_cr` and
+            // `4d_binomial_logit_n2000_k8_cr` (oscillation in flat regions)
+            // and did NOT fix N-3 — the Newton trajectory genuinely lands
+            // at a different stationary point than mgcv's joint-(ρ, log φ)
+            // outer Newton, regardless of convergence criterion. Keeping OR.
             let grad_tol = if self.mgcv_exact_score {
                 let score_scale = current_reml.abs() + 1.0;
                 score_scale * 1.0e-6
@@ -942,8 +941,7 @@ impl SmoothingParameter {
             // REML change convergence: stop if making negligible progress.
             // mgcv's documented outer-iteration default is `conv.tol = 1e-7`
             // (gam.control). The score-change test (gam.fit3.r:1645) uses
-            // 1e-7 as the absolute floor; the gradient test (line 1335) is
-            // the one that scales with √ε. Keeping 1e-7 here (Perf-1).
+            // 1e-7 as the absolute floor. Keeping 1e-7 here (Perf-1).
             let reml_change_tol = if self.mgcv_exact_score {
                 1.0e-7
             } else {
