@@ -140,6 +140,10 @@ class GAMFitter:
             listed in `term_k_mapping`.
         term_k_mapping: per-predictor `k` overrides, e.g.
             `{"days_ago": 25, "quality": 12}`.
+        predictor_basis_map: per-predictor basis-type overrides, e.g.
+            ``{"cluster": "re", "days": "cr"}``. Supported values: ``"cr"``,
+            ``"bs"``, ``"re"`` (random effects). Overrides the global
+            ``bs="cr"`` default for the listed predictors.
         term_pc_mapping: per-predictor placeholder constant `pc` — for
             each `(predictor, value)` the smooth is shifted so that
             `f(value) = 0`. Used for missing-value sentinels and for
@@ -179,6 +183,7 @@ class GAMFitter:
         link: str = "identity",
         term_k_mapping: Optional[dict[str, int]] = None,
         term_pc_mapping: Optional[dict[str, float]] = None,
+        predictor_basis_map: Optional[dict[str, str]] = None,
         consider_categorical: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -195,6 +200,7 @@ class GAMFitter:
         self.link = link
         self.term_k_mapping: dict[str, int] = dict(term_k_mapping or {})
         self.term_pc_mapping: dict[str, float] = dict(term_pc_mapping or {})
+        self.predictor_basis_map: dict[str, str] = dict(predictor_basis_map or {})
         self.consider_categorical = consider_categorical
 
         # Filled at fit time:
@@ -244,8 +250,15 @@ class GAMFitter:
         self.y = y_arr
         self.pc_map = dict(self.term_pc_mapping)  # surface to consumers
 
+        # Random-effect terms don't need k tuning (k = #levels, set by Rust).
+        # Treat them as "covered" so we skip the auto-k loop for them.
+        re_terms = {
+            name for name in (self._effective_predictors or [])
+            if self.predictor_basis_map.get(name) == "re"
+        }
         all_covered = all(
-            name in self.term_k_mapping for name in self._effective_predictors
+            name in self.term_k_mapping or name in re_terms
+            for name in self._effective_predictors
         )
 
         if all_covered:
@@ -270,9 +283,17 @@ class GAMFitter:
 
         For each predictor uses k_mapping if present, else self.k_default.
         Caps at n_unique(x_j) - 1 per predictor column.
+
+        Random-effect terms (``predictor_basis_map[name] == "re"``) use a
+        placeholder k=1 — the Rust side ignores it and sets k = #unique
+        levels from the training data.
         """
         ks: list[int] = []
         for name in predictors:
+            if self.predictor_basis_map.get(name) == "re":
+                # k is ignored for random effects; pass placeholder 1.
+                ks.append(1)
+                continue
             requested = k_mapping.get(name, self.k_default)
             col_idx = predictors.index(name)
             n_unique = int(np.unique(X_arr[:, col_idx]).size)
@@ -300,11 +321,26 @@ class GAMFitter:
         pcs = [self.term_pc_mapping.get(name, None) for name in predictors]
         return pcs if any(p is not None for p in pcs) else None
 
+    def _build_bs_list(self, predictors: list[str]) -> list[str | None] | None:
+        """Build a positional list of per-term basis types.
+
+        Returns None if no per-predictor overrides are requested, otherwise
+        a list of length len(predictors) where entry i is the basis type
+        string for predictor i (or None to use the global default).
+        """
+        if not self.predictor_basis_map:
+            return None
+        bs_vals = [self.predictor_basis_map.get(name, None) for name in predictors]
+        return bs_vals if any(b is not None for b in bs_vals) else None
+
     def _single_fit(self, X_arr: np.ndarray, y_arr: np.ndarray, ks: list[int]) -> None:
         """Run one native fit with the given k vector (mgcv bs='cr', REML)."""
         self._native = self._make_native()
         pc_values = self._build_pc_values(self._effective_predictors or [])
-        self._native.fit(X_arr, y_arr, k=ks, method="REML", bs="cr", pc_values=pc_values)
+        bs_list = self._build_bs_list(self._effective_predictors or [])
+        self._native.fit(
+            X_arr, y_arr, k=ks, method="REML", bs="cr", pc_values=pc_values, bs_list=bs_list
+        )
 
     def _auto_fit_k(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
         """Iteratively refit, growing k for terms whose EDF is near saturation.

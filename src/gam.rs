@@ -1,7 +1,7 @@
 //! Main GAM model structure and fitting
 
 use crate::{
-    basis::{BasisFunction, BoundaryCondition, CubicRegressionSpline, CubicSpline},
+    basis::{BasisFunction, BoundaryCondition, CubicRegressionSpline, CubicSpline, RandomEffectBasis},
     block_penalty::BlockPenalty,
     penalty::compute_penalty,
     pirls::{fit_pirls, Family},
@@ -26,6 +26,11 @@ pub struct SmoothTerm {
     /// Point-constraint value: when Some(v), enforce f(v) = 0 via pc-anchoring
     /// instead of the default sum-to-zero constraint.
     pub pc_value: Option<f64>,
+    /// Whether this is a random-effect smooth (`bs="re"`).
+    ///
+    /// When true, `FitCache::new` skips both sum-to-zero centering and
+    /// pc-anchoring — the identity penalty already provides identifiability.
+    pub is_random_effect: bool,
 }
 
 impl SmoothTerm {
@@ -44,6 +49,7 @@ impl SmoothTerm {
             lambda: 1.0,
             constraint_matrix: None, // No constraint for regular cubic splines
             pc_value: None,
+            is_random_effect: false,
         })
     }
 
@@ -69,6 +75,7 @@ impl SmoothTerm {
             lambda: 1.0,
             constraint_matrix: None,
             pc_value: None,
+            is_random_effect: false,
         })
     }
 
@@ -93,6 +100,7 @@ impl SmoothTerm {
             lambda: 1.0,
             constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
             pc_value: None,
+            is_random_effect: false,
         })
     }
 
@@ -112,6 +120,27 @@ impl SmoothTerm {
             lambda: 1.0,
             constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
             pc_value: None,
+            is_random_effect: false,
+        })
+    }
+
+    /// Create a random-effect smooth term (`bs="re"`).
+    ///
+    /// The design matrix is a one-hot indicator matrix (one column per unique
+    /// level) and the penalty is the identity I_p. No sum-to-zero or
+    /// pc-anchoring is applied — the identity penalty already provides
+    /// identifiability by shrinking all level coefficients toward zero.
+    pub fn random_effect(name: String, x_data: &Array1<f64>) -> Result<Self> {
+        let re = RandomEffectBasis::from_data(x_data.as_slice().unwrap_or(&x_data.to_vec()));
+        let penalty = re.penalty_matrix();
+        Ok(Self {
+            name,
+            basis: Box::new(re),
+            penalty,
+            lambda: 1.0,
+            constraint_matrix: None,
+            pc_value: None,
+            is_random_effect: true,
         })
     }
 

@@ -920,6 +920,88 @@ impl BasisFunction for ThinPlateSpline {
     }
 }
 
+/// Random-effect basis (`bs="re"` in mgcv).
+///
+/// Models a categorical predictor as independent random effects: the design
+/// matrix is a one-hot indicator matrix (one column per unique level), and
+/// the penalty is the identity matrix I_p. The smoothing parameter λ acts
+/// as the inverse variance of the Gaussian prior on each level's coefficient.
+///
+/// Levels are stored as `Vec<f64>` — cluster IDs in this codebase are
+/// integer-valued floats (1.0, 2.0, …). Exact equality (`bits`) is used
+/// for the lookup because the values are integer-valued.
+///
+/// Prediction on unseen levels returns a row of zeros (the smooth
+/// contributes nothing for unseen groups — matches mgcv's behavior).
+pub struct RandomEffectBasis {
+    /// Unique sorted levels from training data.
+    pub levels: Vec<f64>,
+}
+
+impl RandomEffectBasis {
+    /// Build a `RandomEffectBasis` from raw training data.
+    ///
+    /// Collects unique values, sorts them, and stores them as the level
+    /// vocabulary. Duplicate detection uses exact float-bit equality
+    /// (appropriate for integer-valued category IDs).
+    pub fn from_data(x: &[f64]) -> Self {
+        let mut vals: Vec<f64> = x.to_vec();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        vals.dedup_by(|a, b| a.to_bits() == b.to_bits());
+        Self { levels: vals }
+    }
+
+    /// Number of unique levels (= number of basis functions = number of
+    /// columns in the design matrix = size of the identity penalty).
+    pub fn k(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// One-hot design matrix: Z[i, j] = 1 iff x[i] == levels[j], else 0.
+    /// Unseen levels → row of zeros.
+    pub fn design_matrix_from_slice(&self, x: &[f64]) -> Array2<f64> {
+        let n = x.len();
+        let p = self.levels.len();
+        let mut z = Array2::<f64>::zeros((n, p));
+        for (i, &xi) in x.iter().enumerate() {
+            // Binary search on sorted levels for an exact bit match.
+            let pos = self
+                .levels
+                .partition_point(|&lv| lv.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less) == std::cmp::Ordering::Less);
+            if pos < p && self.levels[pos].to_bits() == xi.to_bits() {
+                z[[i, pos]] = 1.0;
+            }
+            // else: unseen level → row stays zero
+        }
+        z
+    }
+
+    /// Identity penalty matrix I_p.
+    pub fn penalty_matrix(&self) -> Array2<f64> {
+        let p = self.levels.len();
+        Array2::<f64>::eye(p)
+    }
+}
+
+impl BasisFunction for RandomEffectBasis {
+    fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        Ok(self.design_matrix_from_slice(x.as_slice().unwrap_or(&x.to_vec())))
+    }
+
+    fn evaluate_for_predict(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        // Same as fit-time: one-hot lookup; unseen → zeros.
+        self.evaluate(x)
+    }
+
+    fn num_basis(&self) -> usize {
+        self.levels.len()
+    }
+
+    fn knots(&self) -> Option<&Array1<f64>> {
+        None // No knots for random effects
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

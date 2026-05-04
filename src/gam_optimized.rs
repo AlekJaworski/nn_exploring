@@ -62,7 +62,11 @@ impl FitCache {
 
         for (i, smooth) in smooth_terms.iter_mut().enumerate() {
             let x_col = x.column(i).to_owned();
-            if smooth.pc_value.is_some() {
+            if smooth.is_random_effect {
+                // Random effects: identity penalty provides identifiability —
+                // no sum-to-zero or pc-anchoring needed. Leave constraint_matrix = None
+                // so the full k-column basis is used as-is.
+            } else if smooth.pc_value.is_some() {
                 // pc-anchoring replaces sum-to-zero: enforce f(pc) = 0.
                 smooth.apply_pc_anchoring()?;
             } else if mgcv_exact {

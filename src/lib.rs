@@ -24,7 +24,7 @@ pub mod utils;
 
 #[cfg(feature = "blas")]
 pub use crate::reml::ScaleParameterMethod;
-pub use basis::{BasisFunction, CubicSpline, ThinPlateSpline};
+pub use basis::{BasisFunction, CubicSpline, RandomEffectBasis, ThinPlateSpline};
 pub use gam::{SmoothTerm, GAM};
 pub use pirls::Family;
 pub use smooth::{OptimizationMethod, SmoothingParameter};
@@ -224,7 +224,7 @@ impl PyGAM {
     ///     gam = GAM()
     ///     result = gam.fit(X, y, k=[10, 15, 20])
     ///     result = gam.fit(X, y, k=[10, 15, 20], use_edf=True)  # For extreme cases
-    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None))]
+    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None, bs_list=None))]
     fn fit<'py>(
         &mut self,
         py: Python<'py>,
@@ -236,9 +236,10 @@ impl PyGAM {
         max_iter: Option<usize>,
         use_edf: Option<bool>,
         pc_values: Option<Vec<Option<f64>>>,
+        bs_list: Option<Vec<Option<String>>>,
     ) -> PyResult<Py<PyAny>> {
         // Route to the optimized implementation
-        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values)
+        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list)
     }
 
     /// Low-level fit method for users who manually configure smooths
@@ -370,7 +371,7 @@ impl PyGAM {
     /// Args:
     ///     algorithm: "newton" (default) or "fellner-schall" (faster, matches bam)
     #[cfg(feature = "blas")]
-    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None))]
+    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None, bs_list=None))]
     fn fit_auto_optimized<'py>(
         &mut self,
         py: Python<'py>,
@@ -383,6 +384,7 @@ impl PyGAM {
         use_edf: Option<bool>,
         algorithm: Option<&str>,
         pc_values: Option<Vec<Option<f64>>>,
+        bs_list: Option<Vec<Option<String>>>,
     ) -> PyResult<Py<PyAny>> {
         use crate::gam_optimized::*;
 
@@ -399,7 +401,7 @@ impl PyGAM {
             )));
         }
 
-        let basis_type = bs.unwrap_or("bs");
+        let default_basis_type = bs.unwrap_or("bs");
 
         // Clear any existing smooths
         self.inner.smooth_terms.clear();
@@ -409,7 +411,19 @@ impl PyGAM {
             let col = x_array.column(i);
             let col_owned = col.to_owned();
 
-            let smooth = match basis_type {
+            // Per-term basis type overrides the global `bs` when provided.
+            let term_bs: &str = bs_list
+                .as_ref()
+                .and_then(|v| v.get(i))
+                .and_then(|opt| opt.as_deref())
+                .unwrap_or(default_basis_type);
+
+            let smooth = match term_bs {
+                "re" => {
+                    // Random-effect smooth: one-hot design, identity penalty, no centering.
+                    SmoothTerm::random_effect(format!("x{}", i), &col_owned)
+                        .map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                }
                 "cr" => {
                     // mgcv's cr places knots at quantiles of the
                     // covariate by default — match that, not evenly
@@ -422,8 +436,8 @@ impl PyGAM {
                     .map_err(|e| PyValueError::new_err(format!("{}", e)))?,
                 _ => {
                     return Err(PyValueError::new_err(format!(
-                        "Unknown basis type '{}'. Use 'bs' or 'cr'.",
-                        basis_type
+                        "Unknown basis type '{}'. Use 'bs', 'cr', or 're'.",
+                        term_bs
                     )));
                 }
             };
