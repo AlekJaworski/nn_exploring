@@ -512,11 +512,16 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     let n_minus_tra = (n as f64) - tr_a;
     // Scale parameter:
     //   - Binomial / Poisson: φ = 1 (known).
-    //   - Gaussian / Gamma: profiled, φ = (D + bSb) / (n - trA).
-    // Using `dp` (which already includes bSb) per gam.fit3.r convention.
+    //   - Gaussian / Gamma: mgcv's profiled φ̂ solving dlr.dlphi = 0.
+    // `y_for_ls` must be computed before this so estimate_phi_mgcv can use y.len().
+    // For non-Gaussian we evaluate at y_original (the true response).
+    let y_for_ls = y_original.unwrap_or(y);
     let scale_est = match family {
         crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => 1.0,
-        _ => dev_numerator / n_minus_tra.max(1e-10),
+        _ => {
+            let phi_init = dev_numerator / n_minus_tra.max(1e-10);
+            family.estimate_phi_mgcv(y_for_ls, dp, mp, 1.0, phi_init)
+        }
     };
 
     // log|S+| terms — use eigen-based rank (robust to centring)
@@ -554,7 +559,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // ls function takes.
     let pi = std::f64::consts::PI;
     let _ = p;
-    let y_for_ls = y_original.unwrap_or(y);
+    // y_for_ls was already computed above (used in estimate_phi_mgcv).
     let ls1 = family.saturated_log_likelihood(y_for_ls, scale_est);
     let term_dp = dp / (2.0 * scale_est);
     let term_const = -ls1 - 0.5 * (mp as f64) * (2.0 * pi * scale_est).ln();
@@ -949,7 +954,7 @@ fn compute_dev_grad_beta(
     x.t().dot(&v1)
 }
 
-/// Compute profiled σ̂² = D(λ) / (n - trA(λ)) at arbitrary lambdas.
+/// Compute profiled φ̂ = estimate_phi_mgcv(...) at arbitrary lambdas.
 ///
 /// Used by the σ²-chain correction in `reml_gradient_mgcv_exact_ift` to
 /// compute `∂σ̂²/∂ρ_k` via central finite differences in log-λ space.
@@ -964,6 +969,7 @@ fn compute_sigma2_at(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    mp: usize,
 ) -> Result<f64> {
     use crate::pirls::Family;
     // Fixed dispersion families
@@ -989,6 +995,7 @@ fn compute_sigma2_at(
     a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
     let beta = crate::linalg::solve(a_solve, xtwy)?;
     let fitted = x.dot(&beta);
+    let y_for = y_original.unwrap_or(y);
     let dev_numerator: f64 = match (family, y_original) {
         (Family::Gaussian, _) | (_, None) => y
             .iter()
@@ -1001,10 +1008,16 @@ fn compute_sigma2_at(
             glm_deviance(y_orig, &mu, fam)
         }
     };
+    let bsb: f64 = lambdas
+        .iter()
+        .zip(penalties.iter())
+        .map(|(l, pen)| l * pen.quadratic_form(&beta))
+        .sum();
+    let dp = dev_numerator + bsb;
     let a_inv = inverse(&a)?;
     let tr_a = (xtwx.dot(&a_inv)).diag().sum();
-    let n_minus_tra = (n as f64) - tr_a;
-    Ok(dev_numerator / n_minus_tra.max(1e-10))
+    let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
+    Ok(family.estimate_phi_mgcv(y_for, dp, mp, 1.0, phi_init))
 }
 
 /// IFT-based gradient of the mgcv-exact REML score w.r.t. log(λ_k).
@@ -1040,6 +1053,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
     enable_sigma_chain: bool,
+    mp: usize,
 ) -> Result<Array1<f64>> {
     let n = y.len();
     let m = lambdas.len();
@@ -1068,10 +1082,9 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     // Scale estimate for Dp/(2σ²) — must match the score function's σ²
     // convention (reml_criterion_multi_cached_mgcv_exact, item 1 of #47).
     //   - Binomial / Poisson: σ² = 1 (known dispersion).
-    //   - Gaussian / Gamma: σ² = D / (n-trA) using the same deviance form
-    //     as the score (true GLM deviance when y_original is Some, else
-    //     working-RSS).
+    //   - Gaussian / Gamma: mgcv's profiled φ̂ from estimate_phi_mgcv.
     let fitted = x.dot(&beta);
+    let y_for_grad = y_original.unwrap_or(y);
     let dev_numerator: f64 = match (family, y_original) {
         (crate::pirls::Family::Gaussian, _) | (_, None) => y
             .iter()
@@ -1086,9 +1099,19 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     };
     let a_inv = inverse(&a)?;
     let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    // Compute bsb_total here so we can form dp for estimate_phi_mgcv.
+    let bsb_total_for_phi: f64 = lambdas
+        .iter()
+        .zip(penalties_blocks.iter())
+        .map(|(l, pen)| l * pen.quadratic_form(&beta))
+        .sum();
+    let dp_for_phi = dev_numerator + bsb_total_for_phi;
     let scale_est = match family {
         crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => 1.0,
-        _ => dev_numerator / ((n as f64) - tr_a).max(1e-10),
+        _ => {
+            let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
+            family.estimate_phi_mgcv(y_for_grad, dp_for_phi, mp, 1.0, phi_init)
+        }
     };
 
     let p = a.nrows();
@@ -1223,26 +1246,10 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
         )
     {
-        // Mp = 1 (intercept) + Σ null-space dims per penalty (same as lib.rs:1131-1144)
-        let mp: usize = 1 + penalties_blocks
-            .iter()
-            .map(|pen| {
-                let k = pen.block_view().nrows();
-                let rank_s = estimate_rank_eigen(pen);
-                k.saturating_sub(rank_s)
-            })
-            .sum::<usize>();
+        // Use dp_for_phi and mp already computed above.
+        let dp = dp_for_phi;
 
-        // bsb_total = Σ λ_k β'S_kβ  (β is in scope from above)
-        let bsb_total: f64 = lambdas
-            .iter()
-            .zip(penalties_blocks.iter())
-            .map(|(l, pen)| l * pen.quadratic_form(&beta))
-            .sum();
-        let dp = dev_numerator + bsb_total;
-
-        let y_for_ls = y_original.unwrap_or(y);
-        let dls_dsig2 = family.dls_dsigma2(y_for_ls, scale_est);
+        let dls_dsig2 = family.dls_dsigma2(y_for_grad, scale_est);
         let drem_dsig2 = -dp / (2.0 * scale_est * scale_est)
             - dls_dsig2
             - (mp as f64) / (2.0 * scale_est);
@@ -1265,6 +1272,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
                 cached_xtwx,
                 family,
                 y_original,
+                mp,
             )?;
             let s2_minus = compute_sigma2_at(
                 y,
@@ -1275,6 +1283,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
                 cached_xtwx,
                 family,
                 y_original,
+                mp,
             )?;
             let dsig2_drho = (s2_plus - s2_minus) / (2.0 * eps);
             grad[k] += drem_dsig2 * dsig2_drho;
@@ -1287,6 +1296,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
 /// Public wrapper for `reml_gradient_mgcv_exact_ift_inner`.
 /// Reads the `MGCV_SIGMA_CHAIN` environment variable to enable the σ²-chain
 /// correction term. Default OFF — set `MGCV_SIGMA_CHAIN=1` to enable.
+/// Computes `mp` (null-space dimension) from penalties_blocks.
 #[cfg(feature = "blas")]
 pub fn reml_gradient_mgcv_exact_ift(
     y: &Array1<f64>,
@@ -1299,6 +1309,15 @@ pub fn reml_gradient_mgcv_exact_ift(
     y_original: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     let enable_sigma_chain = std::env::var("MGCV_SIGMA_CHAIN").is_ok();
+    // Mp = 1 (intercept) + Σ null-space dims per penalty (matches lib.rs:1131-1144)
+    let mp: usize = 1 + penalties_blocks
+        .iter()
+        .map(|pen| {
+            let k = pen.block_view().nrows();
+            let rank_s = estimate_rank_eigen(pen);
+            k.saturating_sub(rank_s)
+        })
+        .sum::<usize>();
     reml_gradient_mgcv_exact_ift_inner(
         y,
         x,
@@ -1309,6 +1328,7 @@ pub fn reml_gradient_mgcv_exact_ift(
         family,
         y_original,
         enable_sigma_chain,
+        mp,
     )
 }
 
@@ -1382,9 +1402,28 @@ pub fn reml_hessian_mgcv_exact_ift(
     };
     let a_inv = inverse(&a)?;
     let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    // Compute mp and dp for estimate_phi_mgcv (matches lib.rs:1131-1144)
+    let mp_hess: usize = 1 + penalties_blocks
+        .iter()
+        .map(|pen| {
+            let k = pen.block_view().nrows();
+            let rank_s = estimate_rank_eigen(pen);
+            k.saturating_sub(rank_s)
+        })
+        .sum::<usize>();
+    let y_for_hess = y_original.unwrap_or(y);
+    let bsb_hess: f64 = lambdas
+        .iter()
+        .zip(penalties_blocks.iter())
+        .map(|(l, pen)| l * pen.quadratic_form(&beta))
+        .sum();
+    let dp_hess = dev_numerator + bsb_hess;
     let scale_est = match family {
         crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => 1.0,
-        _ => dev_numerator / ((n as f64) - tr_a).max(1e-10),
+        _ => {
+            let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
+            family.estimate_phi_mgcv(y_for_hess, dp_hess, mp_hess, 1.0, phi_init)
+        }
     };
 
     // IFT first derivatives

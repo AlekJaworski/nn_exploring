@@ -272,6 +272,94 @@ pub(crate) fn digamma(mut x: f64) -> f64 {
     result
 }
 
+/// Trigamma function ψ'(x) = d²/dx² ln Γ(x) = d/dx ψ(x).
+///
+/// Uses the recurrence ψ'(x) = ψ'(x+1) + 1/x² to push x ≥ 6, then the
+/// asymptotic series. Accurate to ~13 significant figures for x > 0.
+pub(crate) fn trigamma(mut x: f64) -> f64 {
+    let mut result = 0.0;
+    // Recurrence: push x ≥ 6 so the asymptotic series converges well.
+    while x < 6.0 {
+        result += 1.0 / (x * x);
+        x += 1.0;
+    }
+    // Asymptotic: ψ'(x) ≈ 1/x + 1/(2x²) + Σ B_{2k}/x^{2k+1}
+    let xinv = 1.0 / x;
+    let xinv2 = xinv * xinv;
+    result += xinv + 0.5 * xinv2;
+    let mut t = xinv2 * xinv; // 1/x^3
+    result += t / 6.0; // B2 = 1/6
+    t *= xinv2; // 1/x^5
+    result -= t / 30.0; // B4 = -1/30
+    t *= xinv2; // 1/x^7
+    result += t / 42.0; // B6 = 1/42
+    t *= xinv2; // 1/x^9
+    result -= t / 30.0; // B8 = -1/30
+    result
+}
+
+impl Family {
+    /// Solve for mgcv's φ̂ by family.
+    ///
+    /// For Gamma/GammaLog, solves the joint equation `dlr.dlphi = 0` from
+    /// `gam.fit3.r:630` via Newton-Raphson in F(φ) = dp + 2n[ψ(1/φ)+log φ] + mp·φ.
+    /// For Gaussian, uses the closed form φ = dp/(n-mp).
+    /// For Poisson/Binomial, returns 1.0 (fixed dispersion).
+    /// For TDist, returns phi_init unchanged (Gaussian-approximation σ̂²; no
+    /// digamma-style fix for t-dist in v1).
+    ///
+    /// # Arguments
+    /// * `y` — response vector (used only for `n = y.len()`)
+    /// * `dp` — penalised deviance Dp = D + β'Sβ
+    /// * `mp` — null-space dimension (intercept + per-smooth null spaces)
+    /// * `gamma` — smoothing parameter inflation factor (typically 1.0)
+    /// * `phi_init` — initial guess (caller passes D/(n-trA))
+    pub fn estimate_phi_mgcv(
+        &self,
+        y: &Array1<f64>,
+        dp: f64,
+        mp: usize,
+        _gamma: f64,
+        phi_init: f64,
+    ) -> f64 {
+        let n = y.len() as f64;
+        let mp_f = mp as f64;
+        match self {
+            Family::Gaussian => dp / (n - mp_f).max(1.0),
+            Family::Binomial | Family::Poisson => 1.0,
+            Family::TDist { .. } => phi_init,
+            Family::Gamma | Family::GammaLog => {
+                // Newton-Raphson on
+                //   F(φ) = dp + 2n[ψ(1/φ) + log φ] + mp·φ
+                // F'(φ) = (2n/φ)[1 - ψ'(1/φ)/φ] + mp
+                let mut phi = phi_init.max(1e-8);
+                let tol_abs = 1e-10 * (dp.abs() + mp_f + 1.0);
+                for _ in 0..30 {
+                    let inv_phi = 1.0 / phi;
+                    let f = dp + 2.0 * n * (digamma(inv_phi) + phi.ln()) + mp_f * phi;
+                    if f.abs() < tol_abs {
+                        break;
+                    }
+                    let fp = (2.0 * n / phi) * (1.0 - trigamma(inv_phi) * inv_phi) + mp_f;
+                    // Guard against zero / near-zero derivative
+                    if fp.abs() < 1e-15 {
+                        break;
+                    }
+                    let delta = -f / fp;
+                    // Damp to prevent runaway
+                    let phi_new = (phi + delta).max(phi * 0.1).min(phi * 10.0);
+                    let converged = (phi_new - phi).abs() < 1e-12 * phi;
+                    phi = phi_new;
+                    if converged {
+                        break;
+                    }
+                }
+                phi
+            }
+        }
+    }
+}
+
 /// Lanczos approximation of the log-Gamma function. Accurate to ~14 digits
 /// for x > 0. Pulled in directly to avoid a dependency on `statrs` for this
 /// single use.
@@ -1313,5 +1401,97 @@ mod tests {
         let result = result.unwrap();
         assert!(result.converged);
         assert_eq!(result.coefficients.len(), p);
+    }
+
+    /// trigamma(x) for small x values from Abramowitz & Stegun tables.
+    ///   trigamma(1) = π²/6 ≈ 1.6449340668
+    ///   trigamma(2) = π²/6 - 1 ≈ 0.6449340668
+    #[test]
+    fn test_trigamma_known_values() {
+        let pi2_over6 = std::f64::consts::PI * std::f64::consts::PI / 6.0;
+        let t1 = trigamma(1.0);
+        assert!(
+            (t1 - pi2_over6).abs() < 1e-9,
+            "trigamma(1) = {}, expected {}",
+            t1,
+            pi2_over6
+        );
+        let t2 = trigamma(2.0);
+        let expected_2 = pi2_over6 - 1.0;
+        assert!(
+            (t2 - expected_2).abs() < 1e-9,
+            "trigamma(2) = {}, expected {}",
+            t2,
+            expected_2
+        );
+    }
+
+    /// estimate_phi_mgcv: Gaussian closed form must equal dp/(n-mp).
+    #[test]
+    fn test_estimate_phi_mgcv_gaussian() {
+        let n = 50usize;
+        let y = Array1::<f64>::ones(n);
+        let dp = 120.0_f64;
+        let mp = 4usize;
+        let expected = dp / (n as f64 - mp as f64);
+        let phi = Family::Gaussian.estimate_phi_mgcv(&y, dp, mp, 1.0, 1.0);
+        assert!(
+            (phi - expected).abs() < 1e-12,
+            "Gaussian phi = {}, expected {}",
+            phi,
+            expected
+        );
+    }
+
+    /// estimate_phi_mgcv: Poisson and Binomial always return 1.0.
+    #[test]
+    fn test_estimate_phi_mgcv_fixed_dispersion() {
+        let y = Array1::<f64>::ones(10);
+        assert_eq!(Family::Poisson.estimate_phi_mgcv(&y, 50.0, 3, 1.0, 2.0), 1.0);
+        assert_eq!(Family::Binomial.estimate_phi_mgcv(&y, 50.0, 3, 1.0, 2.0), 1.0);
+    }
+
+    /// estimate_phi_mgcv Gamma: verify F(phi) ≈ 0 at the solved phi.
+    /// Uses dp=100, n=200, mp=5, gamma=1.0.
+    #[test]
+    fn test_estimate_phi_mgcv_gamma_residual() {
+        let n = 200usize;
+        let y = Array1::<f64>::ones(n);
+        let dp = 100.0_f64;
+        let mp = 5usize;
+        let phi_init = dp / (n as f64 - mp as f64);
+        let phi = Family::Gamma.estimate_phi_mgcv(&y, dp, mp, 1.0, phi_init);
+
+        // Verify F(phi) = dp + 2n[psi(1/phi) + ln phi] + mp*phi ≈ 0
+        let n_f = n as f64;
+        let mp_f = mp as f64;
+        let f_at_phi = dp + 2.0 * n_f * (digamma(1.0 / phi) + phi.ln()) + mp_f * phi;
+        let tol = 1e-8 * (dp.abs() + mp_f + 1.0);
+        println!("Gamma phi = {:.10}, F(phi) = {:.3e}, tol = {:.3e}", phi, f_at_phi, tol);
+        assert!(
+            f_at_phi.abs() < tol,
+            "F(phi) = {:.3e} is not near zero (tol {:.3e}); phi = {}",
+            f_at_phi,
+            tol,
+            phi
+        );
+    }
+
+    /// GammaLog should give same result as Gamma (same family equation).
+    #[test]
+    fn test_estimate_phi_mgcv_gammalog_same_as_gamma() {
+        let n = 200usize;
+        let y = Array1::<f64>::ones(n);
+        let dp = 100.0_f64;
+        let mp = 5usize;
+        let phi_init = dp / (n as f64 - mp as f64);
+        let phi_gamma = Family::Gamma.estimate_phi_mgcv(&y, dp, mp, 1.0, phi_init);
+        let phi_gammalog = Family::GammaLog.estimate_phi_mgcv(&y, dp, mp, 1.0, phi_init);
+        assert!(
+            (phi_gamma - phi_gammalog).abs() < 1e-12,
+            "Gamma phi = {}, GammaLog phi = {}",
+            phi_gamma,
+            phi_gammalog
+        );
     }
 }

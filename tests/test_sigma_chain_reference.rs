@@ -172,6 +172,7 @@ fn sigma_chain_grad_matches_fd_profile() {
         family,
         Some(&y_orig),
         true, // enable_sigma_chain
+        mp,
     )
     .unwrap();
 
@@ -186,6 +187,7 @@ fn sigma_chain_grad_matches_fd_profile() {
         family,
         Some(&y_orig),
         false, // enable_sigma_chain = false
+        mp,
     )
     .unwrap();
 
@@ -214,28 +216,41 @@ fn sigma_chain_grad_matches_fd_profile() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max);
 
+    // Envelope-theorem sanity: chain correction should now be ~0
+    let chain_correction_abs: f64 = grad_chain
+        .iter()
+        .zip(grad_nochain.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+
     println!("grad_chain  = {:?}", grad_chain);
     println!("grad_nochain= {:?}", grad_nochain);
     println!("fd_grad     = {:?}", fd_grad);
     println!("‖chain - fd‖∞ = {:.2e}", inf_norm_chain);
     println!("‖nochain - fd‖∞ = {:.2e}", inf_norm_nochain);
+    println!("‖chain_correction‖∞ = {:.2e}", chain_correction_abs);
 
-    // Chain term should match FD to 1e-5 (limited by FD precision)
+    // Both with and without chain term should match FD to 1e-5 (limited by FD precision),
+    // since with the correct φ̂ the chain term is near zero by the envelope theorem.
     assert!(
         inf_norm_chain < 1e-5,
         "gradient with chain term deviates from FD profile REML: ‖·‖∞ = {:.3e} (threshold 1e-5)",
         inf_norm_chain
     );
 
-    // Without chain term should be noticeably worse (chain is non-trivially nonzero)
     assert!(
-        inf_norm_nochain > inf_norm_chain,
-        "expected grad_without_chain to be farther from fd than grad_with_chain, \
-         but ‖nochain-fd‖∞={:.3e} ≤ ‖chain-fd‖∞={:.3e}",
-        inf_norm_nochain,
-        inf_norm_chain
+        inf_norm_nochain < 1e-5,
+        "gradient without chain term deviates from FD profile REML: ‖·‖∞ = {:.3e} (threshold 1e-5)",
+        inf_norm_nochain
     );
-    println!("PASS: σ²-chain correction brings ‖grad-fd‖∞ from {:.3e} → {:.3e}", inf_norm_nochain, inf_norm_chain);
+
+    // Envelope theorem: with the correct phi_hat, the chain term itself is near zero.
+    assert!(
+        chain_correction_abs < 1e-4,
+        "chain correction should be near zero by envelope theorem, got {:.3e}",
+        chain_correction_abs
+    );
+    println!("PASS: both with/without chain match FD; chain correction = {:.3e}", chain_correction_abs);
 }
 
 /// Unit tests for the digamma function (tested indirectly via dls_dsigma2).
@@ -327,15 +342,17 @@ fn sigma_chain_gaussian_near_zero_at_optimum() {
     let w = Array1::<f64>::ones(n);
     let lambdas = vec![1.0_f64];
     let family = Family::Gaussian;
+    // mp = 1 (intercept) + 2 (null-space of second-difference penalty on k=5 cols)
+    let mp_gauss: usize = 3;
 
     let grad_chain = reml_gradient_mgcv_exact_ift_inner(
         &y, &x_mat, &w, &lambdas, &[penalty.clone()],
-        None, family, None, true,
+        None, family, None, true, mp_gauss,
     ).unwrap();
 
     let grad_nochain = reml_gradient_mgcv_exact_ift_inner(
         &y, &x_mat, &w, &lambdas, &[penalty],
-        None, family, None, false,
+        None, family, None, false, mp_gauss,
     ).unwrap();
 
     // For Gaussian, chain term should change gradient by < 1e-8 (basically zero)
