@@ -154,14 +154,14 @@ def fit_one(case) -> dict[str, Any]:
         r_test = _df_to_r(df_test)
         r_extrap = _df_to_r(df_extrap)
 
-        # `bam` discretises basis-knot placement once `n > chunk.size`
-        # (default 10000), computing quantile knots from the first chunk
-        # rather than all n rows. That produces a basis our `gam`-style
-        # cr-spline can't match (knots differ by a few sample positions
-        # → ~2% energy loss in span comparison). For large-n cases we
-        # use `gam` so the basis spec is identical (slower but offline,
-        # one-shot fixture build).
-        fitter = mgcv.gam if x_train.shape[0] > 10000 else mgcv.bam
+        # Always use `gam`. Our Rust core matches mgcv's `gam.fit3.r`
+        # outer-Newton path exactly (Newton-B1..B5 + Newton-SF + N12).
+        # `bam` uses a BFGS-style smoothing-parameter optimizer that
+        # converges to slightly different ρ in flat-score regimes (e.g.
+        # gamma+log small-n), so bam-generated fixtures don't match our
+        # Rust even when our Rust is gam-correct. `gam` is slower but
+        # the fixture build is offline and one-shot.
+        fitter = mgcv.gam
         # mgcv calls the GCV method "GCV.Cp" (its full name); our Rust
         # core uses the shorter "GCV". Translate so cases.py can stay
         # neutral (the case carries the Rust spelling).
@@ -278,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         else all_cases()
     )
 
-    print(f"Generating {len(cases)} parity fixtures via rpy2 + mgcv::bam\n")
+    print(f"Generating {len(cases)} parity fixtures via rpy2 + mgcv::gam\n")
     successes = 0
     failures: list[str] = []
     for case in cases:

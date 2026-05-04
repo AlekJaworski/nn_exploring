@@ -74,25 +74,21 @@ _GAMMA_INVERSE_GAP_REASON = (
     "investigation (likely the inverse-link Fisher weights aren't "
     "exactly mgcv's). Tracked in Parity 5 expansion battery."
 )
-_GAMMA_LOG_SMALL_N_GAP_REASON = (
-    "gamma(log) at small n (=200): rust λ deviates ~30-40% from mgcv "
-    "and predict diverges to ~8e-2 on response scale. The n=1000 "
-    "gamma(log) case passes byte-for-byte; this small-n case stresses "
-    "the same path. Likely PIRLS at small n is hitting numerical "
-    "edge cases that mgcv's full outer iteration smooths over. "
-    "Followup beyond #47."
-)
-_GAMMA_LOG_HIGH_D_GAP_REASON = (
-    "gamma(log) in 4d: rust λ deviates ~10-15% from mgcv across all "
-    "smooths, response-scale absdiff ~1.4e-2. Same family/link as the "
-    "passing 2d case but higher dim amplifies the residual gap."
+_BINOMIAL_LOGIT_SMALL_N_GAP_REASON = (
+    "binomial(logit) at n=200: non-unique-optimum issue in a flat region "
+    "of the REML score. With Tk·KK' grad enabled (MGCV_TK_GRAD=1) our λ "
+    "tracks mgcv's saturation point closely (λ_2 ratio 0.99, post-N-SF) "
+    "but the trajectory lands at a slightly different stationary point "
+    "(λ_1 = 7.17 vs mgcv 7.84) — both with small gradients, predictions "
+    "diverge ~5e-3. Was masked by bam-based fixtures pre-N12; surfaces "
+    "with gam-based fixtures because gam and bam both pick different "
+    "non-unique optima here. Tracked as Defer-1 (post #44 edge.correct)."
 )
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
         "2d_gamma_inverse_n1000_k10_cr": _GAMMA_INVERSE_GAP_REASON,
-        "2d_gamma_log_n200_k10_cr": _GAMMA_LOG_SMALL_N_GAP_REASON,
-        "4d_gamma_log_n2000_k8_cr": _GAMMA_LOG_HIGH_D_GAP_REASON,
+        "2d_binomial_logit_n200_k10_cr": _BINOMIAL_LOGIT_SMALL_N_GAP_REASON,
     },
 }
 
