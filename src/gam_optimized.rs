@@ -6,7 +6,7 @@ use crate::{
     block_penalty::BlockPenalty,
     discrete::{DiscretizeConfig, DiscretizedDesign},
     gam::{SmoothTerm, GAM},
-    pirls::{fit_pirls_cached, fit_pirls_discretized},
+    pirls::{fit_pirls_cached, fit_pirls_discretized, fit_pirls_tdist},
     smooth::{OptimizationMethod, SmoothingParameter},
     GAMError, Result,
 };
@@ -261,6 +261,8 @@ impl FitCache {
     }
 
     /// Run PiRLS using the discretized path when available, falling back to cached.
+    /// For `Family::TDist`, dispatches to `fit_pirls_tdist` which manages the
+    /// outer σ²/df profiling loop with proper per-observation t-weights.
     fn run_pirls(
         &self,
         y: &Array1<f64>,
@@ -270,6 +272,20 @@ impl FitCache {
         tolerance: f64,
         cached_xtx: Option<&Array2<f64>>,
     ) -> Result<crate::pirls::PiRLSResult> {
+        // t-dist family needs a specialised fitter with σ²/df outer loop
+        if let crate::pirls::Family::TDist { df, .. } = family {
+            let fixed_df = if df > 0.0 { Some(df) } else { None };
+            return fit_pirls_tdist(
+                y,
+                &self.design_matrix,
+                lambda,
+                &self.penalties,
+                fixed_df,
+                max_iter,
+                tolerance,
+            );
+        }
+
         if let Some(ref disc) = self.discretized {
             fit_pirls_discretized(
                 y,
@@ -509,7 +525,8 @@ impl GAM {
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => Some(1.0),
             crate::pirls::Family::Gaussian
             | crate::pirls::Family::Gamma
-            | crate::pirls::Family::GammaLog => None,
+            | crate::pirls::Family::GammaLog
+            | crate::pirls::Family::TDist { .. } => None,
         };
         smoothing_params.family = self.family;
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For

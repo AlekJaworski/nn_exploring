@@ -21,6 +21,26 @@ pub enum Family {
     /// Gamma with log link — non-canonical, but the most common
     /// production choice for positive multiplicative responses.
     GammaLog,
+    /// Scaled t-distribution (mgcv's `scat` family).
+    ///
+    /// Identity link: μ = η. This is a location-scale model, NOT a standard
+    /// GLM exponential-family member. The IRLS weights are the t-likelihood
+    /// weights `w_i = (df+1)/(df + r_i²/σ²)`, NOT the Fisher information
+    /// of an exponential family. The special-purpose `fit_pirls_tdist`
+    /// function implements the outer σ²/df profiling loop.
+    ///
+    /// `df` holds the *current* degrees-of-freedom value. When profiling,
+    /// the outer loop updates it each iteration and passes a fresh variant.
+    /// `sigma2` is stored here for use in `variance` so that the standard
+    /// IRLS weight path (`dμ/dη)² / V(μ)`) yields the correct t-weight.
+    ///
+    /// **Layout**: IRLS weight `w_i = (df+1) / (df + r_i²/σ²)`.
+    /// For identity link `dμ/dη = 1`, so setting `V(μ) = σ² * df / (df+1)`
+    /// (constant, not residual-dependent) gives the *initial* Fisher weight.
+    /// The actual per-observation weights are computed directly in
+    /// `fit_pirls_tdist` — the `variance` method here is used only by code
+    /// paths that do not call the tdist-specific fitter.
+    TDist { df: f64, sigma2: f64 },
 }
 
 impl Family {
@@ -32,13 +52,18 @@ impl Family {
             Family::Binomial => mu * (1.0 - mu),
             Family::Poisson => mu,
             Family::Gamma | Family::GammaLog => mu * mu,
+            // For TDist: variance is not μ-dependent (identity link, location-scale
+            // model). We return σ² here so that the standard Fisher weight formula
+            // (dμ/dη)²/V(μ) = 1/σ² gives the baseline Fisher weight.
+            // The actual per-obs t-weights are computed in fit_pirls_tdist.
+            Family::TDist { sigma2, .. } => *sigma2,
         }
     }
 
     /// Link function g(μ).
     pub fn link(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian => mu,
+            Family::Gaussian | Family::TDist { .. } => mu,
             Family::Binomial => (mu / (1.0 - mu)).ln(),
             Family::Poisson | Family::GammaLog => mu.ln(),
             Family::Gamma => 1.0 / mu,
@@ -48,7 +73,7 @@ impl Family {
     /// Inverse link function g^(-1)(η).
     pub fn inverse_link(&self, eta: f64) -> f64 {
         match self {
-            Family::Gaussian => eta,
+            Family::Gaussian | Family::TDist { .. } => eta,
             Family::Binomial => {
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
@@ -67,7 +92,7 @@ impl Family {
     /// Derivative of inverse link function dμ/dη.
     pub fn d_inverse_link(&self, eta: f64) -> f64 {
         match self {
-            Family::Gaussian => 1.0,
+            Family::Gaussian | Family::TDist { .. } => 1.0,
             Family::Binomial => {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
@@ -82,7 +107,7 @@ impl Family {
     /// links to compute the α correction `α = 1 + (y−μ)·(V'/V + g''·dμ/dη)`.
     pub fn dvar(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian => 0.0,
+            Family::Gaussian | Family::TDist { .. } => 0.0,
             Family::Binomial => 1.0 - 2.0 * mu,
             Family::Poisson => 1.0,
             Family::Gamma | Family::GammaLog => 2.0 * mu,
@@ -94,7 +119,7 @@ impl Family {
     /// weight-derivative term in the REML gradient.
     pub fn d2var(&self, _mu: f64) -> f64 {
         match self {
-            Family::Gaussian => 0.0,
+            Family::Gaussian | Family::TDist { .. } => 0.0,
             Family::Binomial => -2.0,
             Family::Poisson => 0.0,
             Family::Gamma | Family::GammaLog => 2.0,
@@ -104,7 +129,7 @@ impl Family {
     /// Second derivative of link function: d²g/dμ².
     pub fn d2link(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian => 0.0,
+            Family::Gaussian | Family::TDist { .. } => 0.0,
             Family::Binomial => {
                 let one_minus = 1.0 - mu;
                 -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
@@ -117,7 +142,7 @@ impl Family {
     /// Third derivative of link function: d³g/dμ³.
     pub fn d3link(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian => 0.0,
+            Family::Gaussian | Family::TDist { .. } => 0.0,
             Family::Binomial => {
                 let one_minus = 1.0 - mu;
                 2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
@@ -132,7 +157,11 @@ impl Family {
     /// per `gam.fit3.r:118`.
     pub fn is_canonical_link(&self) -> bool {
         match self {
-            Family::Gaussian | Family::Binomial | Family::Poisson | Family::Gamma => true,
+            Family::Gaussian
+            | Family::Binomial
+            | Family::Poisson
+            | Family::Gamma
+            | Family::TDist { .. } => true,
             Family::GammaLog => false,
         }
     }
@@ -178,6 +207,14 @@ impl Family {
                 let k = -log_gamma(inv_phi) - scale.ln() * inv_phi - inv_phi;
                 let sum_log_y: f64 = y.iter().map(|&yi| yi.max(1e-300).ln()).sum();
                 n * k - sum_log_y
+            }
+            // For TDist we approximate with the Gaussian saturated log-likelihood.
+            // The saturated t-log-likelihood at y=μ is constant across observations
+            // (doesn't depend on β), so its effect on the REML optimum is a constant
+            // shift — acceptable for v1 λ-selection. The REML score absolute value
+            // will differ from mgcv's but the λ-optimum is unaffected.
+            Family::TDist { .. } => {
+                -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
         }
     }
@@ -296,7 +333,8 @@ pub fn fit_pirls_cached(
         let safe_y = match family {
             Family::Binomial => y[i].max(0.01).min(0.99),
             Family::Poisson | Family::Gamma | Family::GammaLog => y[i].max(0.1),
-            Family::Gaussian => unreachable!(),
+            // TDist and Gaussian use identity link; initialize to y directly
+            Family::Gaussian | Family::TDist { .. } => y[i],
         };
         eta[i] = family.link(safe_y);
     }
@@ -540,12 +578,310 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                 }
             }
             Family::Gamma | Family::GammaLog => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
+            // TDist deviance: -2 * log p(y|μ,σ²,df) up to an additive constant.
+            // Use the squared residual as a proxy (consistent scale comparison).
+            Family::TDist { .. } => (yi - mui).powi(2),
         };
 
         deviance += dev_i;
     }
 
     deviance
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Scaled t-distribution (scat) family — df profiling and IRLS
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Profile log-likelihood of the scaled t-distribution over df ∈ [2, 100],
+/// holding residuals and σ² fixed.
+///
+/// log p(y | μ, σ², ν) ∝ Σ_i [ lgamma((ν+1)/2) - lgamma(ν/2)
+///     - 0.5 ln(ν π σ²)
+///     - (ν+1)/2 · ln(1 + r_i²/(ν σ²)) ]
+///
+/// This is maximised over ν using Brent's method on [2, 100].
+/// `residuals` = y - μ for each observation.
+pub fn profile_df(residuals: &[f64], sigma2: f64) -> f64 {
+    // Profile log-likelihood (negated for minimization)
+    let neg_pll = |nu: f64| -> f64 {
+        let n = residuals.len() as f64;
+        let half_nu_p1 = (nu + 1.0) / 2.0;
+        let half_nu = nu / 2.0;
+        let log_sum: f64 = residuals
+            .iter()
+            .map(|&r| {
+                let t2 = r * r / (nu * sigma2.max(1e-300));
+                (1.0 + t2).ln()
+            })
+            .sum();
+        // Negative profile log-likelihood (minimise ↔ maximise log-likelihood)
+        -(n * (log_gamma(half_nu_p1) - log_gamma(half_nu) - 0.5 * (nu * std::f64::consts::PI * sigma2.max(1e-300)).ln())
+            - half_nu_p1 * log_sum)
+    };
+
+    brent_minimize(neg_pll, 2.0, 100.0, 1e-4, 50)
+}
+
+/// Brent's method for univariate function minimization on [a, b].
+/// Adapted from the classic algorithm (no external dependencies).
+fn brent_minimize<F: Fn(f64) -> f64>(
+    f: F,
+    mut a: f64,
+    mut b: f64,
+    tol: f64,
+    max_iter: usize,
+) -> f64 {
+    let golden = 0.381_966_011_250_105;
+    let eps = 1e-10;
+
+    let mut x = a + golden * (b - a);
+    let mut w = x;
+    let mut v = x;
+    let mut fx = f(x);
+    let mut fw = fx;
+    let mut fv = fx;
+    let mut d: f64 = 0.0;
+    let mut e: f64 = 0.0;
+
+    for _ in 0..max_iter {
+        let mid = 0.5 * (a + b);
+        let tol1 = tol * x.abs() + eps;
+        let tol2 = 2.0 * tol1;
+
+        if (x - mid).abs() <= tol2 - 0.5 * (b - a) {
+            return x;
+        }
+
+        let mut take_golden = true;
+        if e.abs() > tol1 {
+            // Parabolic fit
+            let r = (x - w) * (fx - fv);
+            let q = (x - v) * (fx - fw);
+            let p = (x - v) * q - (x - w) * r;
+            let mut q2 = 2.0 * (q - r);
+            let pp = if q2 > 0.0 { -p } else { p };
+            let q2a = q2.abs();
+            if pp.abs() < (0.5 * q2a * e).abs() && pp > q2a * (a - x) && pp < q2a * (b - x) {
+                d = pp / q2a;
+                let u = x + d;
+                if (u - a) < tol2 || (b - u) < tol2 {
+                    d = if x < mid { tol1 } else { -tol1 };
+                }
+                take_golden = false;
+            }
+        }
+
+        if take_golden {
+            e = if x < mid { b - x } else { a - x };
+            d = golden * e;
+        }
+
+        let u = x + if d.abs() >= tol1 { d } else if d > 0.0 { tol1 } else { -tol1 };
+        let fu = f(u);
+
+        if fu <= fx {
+            if u < x { b = x; } else { a = x; }
+            v = w; fv = fw;
+            w = x; fw = fx;
+            x = u; fx = fu;
+        } else {
+            if u < x { a = u; } else { b = u; }
+            if fu <= fw || w == x {
+                v = w; fv = fw;
+                w = u; fw = fu;
+            } else if fu <= fv || v == x || v == w {
+                v = u; fv = fu;
+            }
+        }
+    }
+    x
+}
+
+/// Fit a penalized GAM with scaled t-distribution errors.
+///
+/// This is the outer loop for `Family::TDist` fitting. It alternates between:
+///
+/// 1. **Inner PIRLS** — fit β at fixed (df, σ²) using t-distribution IRLS
+///    weights `w_i = (df+1) / (df + r_i²/σ²)` with identity link.
+/// 2. **σ² update** — method-of-moments: `σ² = Σ w_i r_i² / (Σ w_i - p)`.
+/// 3. **df update** (when `fixed_df` is None) — 1D Brent optimisation of the
+///    profile log-likelihood over df ∈ [2, 100].
+///
+/// Returns a `PiRLSResult` with the converged β. The `weights` field holds the
+/// final per-observation t-weights.
+pub fn fit_pirls_tdist(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    fixed_df: Option<f64>,
+    max_iter: usize,
+    tolerance: f64,
+) -> Result<PiRLSResult> {
+    let n = y.len();
+    let p = x.ncols();
+
+    if x.nrows() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            n
+        )));
+    }
+    if lambda.len() != penalties.len() {
+        return Err(GAMError::DimensionMismatch(
+            "Number of lambdas must match number of penalty matrices".to_string(),
+        ));
+    }
+
+    // Validate df if fixed
+    if let Some(df) = fixed_df {
+        if df < 2.0 {
+            return Err(GAMError::InvalidParameter(format!(
+                "t-dist df must be >= 2.0, got {}", df
+            )));
+        }
+        if df > 100.0 {
+            return Err(GAMError::InvalidParameter(format!(
+                "t-dist df must be <= 100.0, got {}", df
+            )));
+        }
+    }
+
+    // Build penalty total once
+    let mut penalty_total = Array2::<f64>::zeros((p, p));
+    for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
+        penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
+    }
+
+    let num_penalties = lambda.len();
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
+
+    // Initialise β = 0, η = y (identity link), σ² from sample variance
+    let mut beta = Array1::zeros(p);
+    let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
+    let y_var: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
+    let mut sigma2 = y_var.max(1e-6);
+
+    // df: start at user value or 5.0 (a reasonable default)
+    let mut df = fixed_df.unwrap_or(5.0).clamp(2.0, 100.0);
+
+    let mut converged = false;
+    let mut iter = 0;
+
+    for outer_iter in 0..max_iter {
+        iter = outer_iter + 1;
+
+        // ── Inner WLS: solve (X'WX + S) β = X'Wz with t-weights ─────────
+        // For identity link: μ = η = Xβ, z = y (working response = y for identity).
+        // t-weight: w_i = (df+1) / (df + r_i² / σ²) where r_i = y_i - η_i
+        let eta: Array1<f64> = x.dot(&beta);
+        let w: Array1<f64> = y
+            .iter()
+            .zip(eta.iter())
+            .map(|(&yi, &etai)| {
+                let r2 = (yi - etai).powi(2);
+                let t2 = r2 / sigma2.max(1e-300);
+                ((df + 1.0) / (df + t2)).max(1e-10)
+            })
+            .collect();
+
+        // X'WX via dense triple product
+        let xtwx = crate::reml::compute_xtwx(x, &w);
+
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p {
+            max_diag = max_diag.max(xtwx[[i, i]].abs());
+        }
+
+        let mut a = xtwx + &penalty_total;
+        let ridge = ridge_scale * max_diag;
+        for i in 0..p {
+            a[[i, i]] += ridge;
+        }
+
+        // z = y for identity link
+        let wz: Array1<f64> = w.iter().zip(y.iter()).map(|(&wi, &yi)| wi * yi).collect();
+        let xtwz = x.t().dot(&wz);
+
+        let beta_old = beta.clone();
+        beta = solve(a, xtwz)?;
+
+        // ── Update σ² via method-of-moments ──────────────────────────────
+        let eta_new: Array1<f64> = x.dot(&beta);
+        let residuals: Vec<f64> = y
+            .iter()
+            .zip(eta_new.iter())
+            .map(|(&yi, &etai)| yi - etai)
+            .collect();
+
+        // σ² = Σ w_i r_i² / Σ w_i   (simplified; ignores EDF correction for stability)
+        let w_new: Vec<f64> = residuals
+            .iter()
+            .map(|&r| {
+                let t2 = r * r / sigma2.max(1e-300);
+                ((df + 1.0) / (df + t2)).max(1e-10)
+            })
+            .collect();
+        let sum_wr2: f64 = w_new.iter().zip(residuals.iter()).map(|(&wi, &ri)| wi * ri * ri).sum();
+        let sum_w: f64 = w_new.iter().sum::<f64>();
+        let denom = (sum_w - p as f64).max(1.0);
+        sigma2 = (sum_wr2 / denom).max(1e-6);
+
+        // ── Update df via 1D Brent (skip if user fixed df) ───────────────
+        if fixed_df.is_none() && outer_iter % 2 == 0 {
+            // Profile df on every other outer iteration for efficiency
+            df = profile_df(&residuals, sigma2);
+        }
+
+        // ── Convergence check ─────────────────────────────────────────────
+        let max_change = beta
+            .iter()
+            .zip(beta_old.iter())
+            .map(|(b, b_old)| (b - b_old).abs())
+            .fold(0.0f64, f64::max);
+
+        if max_change < tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    // Final quantities
+    let eta: Array1<f64> = x.dot(&beta);
+    let fitted_values = eta.clone();
+
+    let residuals_final: Vec<f64> = y
+        .iter()
+        .zip(fitted_values.iter())
+        .map(|(&yi, &fi)| yi - fi)
+        .collect();
+
+    let weights: Array1<f64> = residuals_final
+        .iter()
+        .map(|&r| {
+            let t2 = r * r / sigma2.max(1e-300);
+            ((df + 1.0) / (df + t2)).max(1e-10)
+        })
+        .collect();
+
+    // Deviance as weighted RSS (used for REML score; not the t-log-likelihood)
+    let deviance: f64 = residuals_final.iter().map(|&r| r * r).sum();
+
+    Ok(PiRLSResult {
+        coefficients: beta,
+        fitted_values,
+        linear_predictor: eta,
+        weights,
+        deviance,
+        iterations: iter,
+        converged,
+    })
 }
 
 /// Fit PiRLS using a discretized design for O(n*k + m*k^2) X'WX computation.
@@ -594,7 +930,8 @@ pub fn fit_pirls_discretized(
         let safe_y = match family {
             Family::Binomial => y[i].max(0.01).min(0.99),
             Family::Poisson | Family::Gamma | Family::GammaLog => y[i].max(0.1),
-            Family::Gaussian => unreachable!(),
+            // TDist and Gaussian use identity link; initialize to y directly
+            Family::Gaussian | Family::TDist { .. } => y[i],
         };
         eta[i] = family.link(safe_y);
     }

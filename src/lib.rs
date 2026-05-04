@@ -148,12 +148,26 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None, link=None))]
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None))]
     fn new(
         family: Option<&str>,
         mgcv_exact: Option<bool>,
         link: Option<&str>,
+        df: Option<f64>,
     ) -> PyResult<Self> {
+        // Validate df early if provided
+        if let Some(df_val) = df {
+            if df_val < 2.0 {
+                return Err(PyValueError::new_err(format!(
+                    "t-dist df must be >= 2.0, got {}", df_val
+                )));
+            }
+            if df_val > 100.0 {
+                return Err(PyValueError::new_err(format!(
+                    "t-dist df must be <= 100.0, got {}. Use df ∈ [2, 100].", df_val
+                )));
+            }
+        }
         let fam = match (family, link) {
             (Some("gaussian"), None) | (None, None) => Family::Gaussian,
             (Some("gaussian"), Some("identity")) => Family::Gaussian,
@@ -161,17 +175,23 @@ impl PyGAM {
             (Some("poisson"), None) | (Some("poisson"), Some("log")) => Family::Poisson,
             (Some("gamma"), None) | (Some("gamma"), Some("inverse")) => Family::Gamma,
             (Some("gamma"), Some("log")) => Family::GammaLog,
+            // Scaled t-distribution (mgcv's scat family). Identity link only.
+            // df = 0.0 encodes "profile df"; df > 0 = user-fixed.
+            (Some("t-dist"), None) | (Some("t-dist"), Some("identity")) => {
+                let fixed_df = df.unwrap_or(0.0); // 0.0 = profile
+                Family::TDist { df: fixed_df, sigma2: 1.0 }
+            }
             (Some(f), Some(l)) => {
                 return Err(PyValueError::new_err(format!(
                     "Unsupported family/link combination: {}({}). Supported: \
                      gaussian(identity), binomial(logit), poisson(log), \
-                     gamma(inverse), gamma(log).",
+                     gamma(inverse), gamma(log), t-dist(identity).",
                     f, l
                 )))
             }
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
-                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', or 'gamma'",
+                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', or 't-dist'",
                     f
                 )))
             }
@@ -624,6 +644,7 @@ impl PyGAM {
             Family::Poisson => "poisson",
             Family::Gamma => "gamma",
             Family::GammaLog => "gamma",
+            Family::TDist { .. } => "t-dist",
         }
     }
 
@@ -635,6 +656,7 @@ impl PyGAM {
             Family::Poisson => "log",
             Family::Gamma => "inverse",
             Family::GammaLog => "log",
+            Family::TDist { .. } => "identity",
         }
     }
 

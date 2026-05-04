@@ -151,10 +151,14 @@ class GAMFitter:
             Currently passes through but the Rust core does NOT yet
             apply pc; tracked as Ergo followup.
         family: GLM family. One of
-            `"gaussian"`, `"binomial"`, `"poisson"`, `"gamma"`.
+            `"gaussian"`, `"binomial"`, `"poisson"`, `"gamma"`, `"t-dist"`.
+            ``"t-dist"`` is the scaled t-distribution (mgcv's ``scat`` family)
+            with identity link and heavier-tailed residuals.
         link: link function. Defaults to the canonical link per family.
-            For gamma we additionally support `"log"`. Other links and
-            `family="t-dist"` are not yet wired.
+            For gamma we additionally support `"log"`.
+        df: degrees of freedom for ``family="t-dist"``. If given (must be in
+            [2, 100]), df is held fixed during fitting. If omitted or ``None``,
+            df is profiled jointly with σ² each iteration.
         method: smoothing-parameter selection method. Accepted values
             `"REML"`, `"fREML"`. Both currently route to mgcv-exact
             REML; the byte-for-byte fREML path is a followup.
@@ -181,6 +185,7 @@ class GAMFitter:
         method: str = "REML",
         family: str = "gaussian",
         link: str = "identity",
+        df: Optional[float] = None,
         term_k_mapping: Optional[dict[str, int]] = None,
         term_pc_mapping: Optional[dict[str, float]] = None,
         predictor_basis_map: Optional[dict[str, str]] = None,
@@ -195,9 +200,16 @@ class GAMFitter:
         self.knots_increase_ratio = knots_increase_ratio
         self.min_points_to_save = min_points_to_save
         self.max_points_to_save = max_points_to_save
+        self.df = df  # degrees of freedom for t-dist family (None = profile)
         self.method = method
         self.family = family
         self.link = link
+        # Validate df for t-dist family at construction time (not just at fit)
+        if df is not None and family == "t-dist":
+            if df < 2.0:
+                raise ValueError(f"t-dist df must be >= 2.0, got {df}")
+            if df > 100.0:
+                raise ValueError(f"t-dist df must be <= 100.0, got {df}. Use df ∈ [2, 100].")
         self.term_k_mapping: dict[str, int] = dict(term_k_mapping or {})
         self.term_pc_mapping: dict[str, float] = dict(term_pc_mapping or {})
         self.predictor_basis_map: dict[str, str] = dict(predictor_basis_map or {})
@@ -307,6 +319,9 @@ class GAMFitter:
             return _NativeGAM(family="gamma", link="log")
         if self.link in (None, "", "identity") and self.family == "gaussian":
             return _NativeGAM()
+        if self.family == "t-dist":
+            # Pass optional df kwarg — Rust side accepts df=None for profiling
+            return _NativeGAM(family="t-dist", df=self.df)
         return _NativeGAM(self.family, link=self.link)
 
     def _build_pc_values(self, predictors: list[str]) -> list[float | None] | None:
