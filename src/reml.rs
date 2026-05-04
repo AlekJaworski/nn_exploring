@@ -949,6 +949,64 @@ fn compute_dev_grad_beta(
     x.t().dot(&v1)
 }
 
+/// Compute profiled σ̂² = D(λ) / (n - trA(λ)) at arbitrary lambdas.
+///
+/// Used by the σ²-chain correction in `reml_gradient_mgcv_exact_ift` to
+/// compute `∂σ̂²/∂ρ_k` via central finite differences in log-λ space.
+/// Returns 1.0 for Binomial/Poisson (fixed dispersion).
+#[cfg(feature = "blas")]
+fn compute_sigma2_at(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Result<f64> {
+    use crate::pirls::Family;
+    // Fixed dispersion families
+    if matches!(family, Family::Binomial | Family::Poisson) {
+        return Ok(1.0);
+    }
+    let n = y.len();
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    let beta = crate::linalg::solve(a_solve, xtwy)?;
+    let fitted = x.dot(&beta);
+    let dev_numerator: f64 = match (family, y_original) {
+        (Family::Gaussian, _) | (_, None) => y
+            .iter()
+            .zip(fitted.iter())
+            .zip(w.iter())
+            .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+            .sum(),
+        (fam, Some(y_orig)) => {
+            let mu: ndarray::Array1<f64> = fitted.iter().map(|&eta| fam.inverse_link(eta)).collect();
+            glm_deviance(y_orig, &mu, fam)
+        }
+    };
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let n_minus_tra = (n as f64) - tr_a;
+    Ok(dev_numerator / n_minus_tra.max(1e-10))
+}
+
 /// IFT-based gradient of the mgcv-exact REML score w.r.t. log(λ_k).
 ///
 /// Implements the full chain rule (matching mgcv's gdi.c assembly at
@@ -965,8 +1023,14 @@ fn compute_dev_grad_beta(
 /// non-Gaussian families — the only path where the IFT correction is
 /// genuinely nonzero given that our β = A⁻¹X'Wy is always at the IRLS
 /// solution for the inputs we see.
+///
+/// `enable_sigma_chain` adds the σ²-chain correction term:
+///   (∂REML/∂σ²) · ∂σ̂²/∂ρ_k
+/// where ∂σ̂²/∂ρ_k is estimated via central FD in log-λ space.
+/// The public wrapper reads `MGCV_SIGMA_CHAIN` env var; tests call the inner
+/// function directly with `enable_sigma_chain = true`.
 #[cfg(feature = "blas")]
-pub fn reml_gradient_mgcv_exact_ift(
+pub fn reml_gradient_mgcv_exact_ift_inner(
     y: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
@@ -975,6 +1039,7 @@ pub fn reml_gradient_mgcv_exact_ift(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    enable_sigma_chain: bool,
 ) -> Result<Array1<f64>> {
     let n = y.len();
     let m = lambdas.len();
@@ -1148,7 +1213,103 @@ pub fn reml_gradient_mgcv_exact_ift(
             + (tk_kkt + lam_k * tr_a_inv_s) / 2.0
             - (rank_k as f64) / 2.0;
     }
+
+    // σ²-chain correction: adds (∂REML/∂σ²) · ∂σ̂²/∂ρ_k to each grad[k].
+    // Gated behind `enable_sigma_chain` (set via MGCV_SIGMA_CHAIN env var or
+    // directly by tests). Skip for Binomial/Poisson (σ² fixed at 1).
+    if enable_sigma_chain
+        && !matches!(
+            family,
+            crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        )
+    {
+        // Mp = 1 (intercept) + Σ null-space dims per penalty (same as lib.rs:1131-1144)
+        let mp: usize = 1 + penalties_blocks
+            .iter()
+            .map(|pen| {
+                let k = pen.block_view().nrows();
+                let rank_s = estimate_rank_eigen(pen);
+                k.saturating_sub(rank_s)
+            })
+            .sum::<usize>();
+
+        // bsb_total = Σ λ_k β'S_kβ  (β is in scope from above)
+        let bsb_total: f64 = lambdas
+            .iter()
+            .zip(penalties_blocks.iter())
+            .map(|(l, pen)| l * pen.quadratic_form(&beta))
+            .sum();
+        let dp = dev_numerator + bsb_total;
+
+        let y_for_ls = y_original.unwrap_or(y);
+        let dls_dsig2 = family.dls_dsigma2(y_for_ls, scale_est);
+        let drem_dsig2 = -dp / (2.0 * scale_est * scale_est)
+            - dls_dsig2
+            - (mp as f64) / (2.0 * scale_est);
+
+        let eps = 1e-4_f64;
+        for k in 0..m {
+            let log_lam: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
+            let mut log_lam_plus = log_lam.clone();
+            log_lam_plus[k] += eps;
+            let mut log_lam_minus = log_lam.clone();
+            log_lam_minus[k] -= eps;
+            let lam_plus: Vec<f64> = log_lam_plus.iter().map(|l| l.exp()).collect();
+            let lam_minus: Vec<f64> = log_lam_minus.iter().map(|l| l.exp()).collect();
+            let s2_plus = compute_sigma2_at(
+                y,
+                x,
+                w,
+                &lam_plus,
+                penalties_blocks,
+                cached_xtwx,
+                family,
+                y_original,
+            )?;
+            let s2_minus = compute_sigma2_at(
+                y,
+                x,
+                w,
+                &lam_minus,
+                penalties_blocks,
+                cached_xtwx,
+                family,
+                y_original,
+            )?;
+            let dsig2_drho = (s2_plus - s2_minus) / (2.0 * eps);
+            grad[k] += drem_dsig2 * dsig2_drho;
+        }
+    }
+
     Ok(grad)
+}
+
+/// Public wrapper for `reml_gradient_mgcv_exact_ift_inner`.
+/// Reads the `MGCV_SIGMA_CHAIN` environment variable to enable the σ²-chain
+/// correction term. Default OFF — set `MGCV_SIGMA_CHAIN=1` to enable.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_ift(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Result<Array1<f64>> {
+    let enable_sigma_chain = std::env::var("MGCV_SIGMA_CHAIN").is_ok();
+    reml_gradient_mgcv_exact_ift_inner(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        family,
+        y_original,
+        enable_sigma_chain,
+    )
 }
 
 /// IFT-based Hessian of the mgcv-exact REML score w.r.t. log(λ_k, λ_j).

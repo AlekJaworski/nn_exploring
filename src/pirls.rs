@@ -218,6 +218,58 @@ impl Family {
             }
         }
     }
+
+    /// Derivative of saturated log-likelihood w.r.t. σ² (dispersion/scale).
+    ///
+    /// Used to compute the σ²-chain correction term:
+    ///   (∂REML/∂σ²) = -Dp/(2σ⁴) - dls/dσ² - Mp/(2σ²)
+    ///
+    /// For Gaussian and TDist: `ls = -n/2·log(2πσ²)`, so `dls/dσ² = -n/(2σ²)`.
+    /// For Poisson/Binomial: σ² is fixed at 1 (not a free parameter), so the
+    /// chain term is identically zero — this method is never called for those.
+    /// For Gamma/GammaLog: `ls = n·[-lgamma(1/φ) - log(φ)/φ - 1/φ] - Σlog y`
+    /// with φ = σ², so `dls/dφ = n·[digamma(1/φ) + log φ] / φ²`.
+    pub fn dls_dsigma2(&self, y: &Array1<f64>, scale: f64) -> f64 {
+        let n = y.len() as f64;
+        match self {
+            Family::Gaussian => -n / (2.0 * scale),
+            Family::Poisson | Family::Binomial => 0.0, // scale = 1, not a free parameter
+            Family::Gamma | Family::GammaLog => {
+                // ls = n·[-lgamma(1/φ) - log(φ)/φ - 1/φ] - Σlog y
+                // dls/dφ = n·[digamma(1/φ) + log(φ)] / φ²
+                let inv_phi = 1.0 / scale;
+                n * (digamma(inv_phi) + scale.ln()) / (scale * scale)
+            }
+            Family::TDist { .. } => -n / (2.0 * scale),
+        }
+    }
+}
+
+/// Digamma function ψ(x) = d/dx ln Γ(x).
+///
+/// Uses the recurrence ψ(x) = ψ(x+1) - 1/x to push x ≥ 6, then the
+/// asymptotic expansion ψ(x) ≈ ln(x) - 1/(2x) - Σ B_{2k}/(2k·x^{2k}).
+/// Accurate to ~13 significant figures for x > 0.
+pub(crate) fn digamma(mut x: f64) -> f64 {
+    let mut result = 0.0;
+    // Recurrence: push x ≥ 6 so the asymptotic series converges well.
+    while x < 6.0 {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    // Asymptotic expansion
+    let xinv = 1.0 / x;
+    let xinv2 = xinv * xinv;
+    result += x.ln() - 0.5 * xinv;
+    let mut t = xinv2;
+    result -= t / 12.0;   // B2/2 = (1/6)/2
+    t *= xinv2;
+    result += t / 120.0;  // B4/4 = (-1/30)/4  → +1/120
+    t *= xinv2;
+    result -= t / 252.0;  // B6/6 = (1/42)/6   → -1/252
+    t *= xinv2;
+    result += t / 240.0;  // B8/8 = (-1/30)/8  → +1/240
+    result
 }
 
 /// Lanczos approximation of the log-Gamma function. Accurate to ~14 digits
