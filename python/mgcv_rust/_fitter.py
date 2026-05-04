@@ -14,6 +14,7 @@ Status legend in this file:
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence, Union
@@ -356,11 +357,62 @@ class GAMFitter:
 
         self._term_k = dict(current_k)
 
+    # ---------------------- Subset-mask helper ----------------------- #
+
+    def _apply_subset_mask(self, lp: np.ndarray) -> np.ndarray:
+        """Zero lpmatrix columns that belong to non-selected smooths.
+
+        Only called when `_subset_mask` is set (i.e. this instance is a
+        subset view created by `__getitem__`).  The lpmatrix has shape
+        `(n, p)` with column 0 as the intercept and the remaining columns
+        split into per-smooth blocks according to `get_term_indices()`.
+
+        Rules:
+        - Column 0 (intercept): kept if ``"__constant__" in _subset_mask``,
+          zeroed otherwise.
+        - Smooth block ``[first, last]`` (inclusive, 1-based in the full
+          design): kept if the smooth's user-facing name is in
+          ``_subset_mask``, zeroed otherwise.
+
+        Returns a copy with un-selected columns set to zero.
+        """
+        mask = self._subset_mask  # type: ignore[attr-defined]
+        predictors = self._effective_predictors or []
+
+        # get_term_indices() returns [(native_name, first, last), ...] in
+        # predictor order with inclusive, 0-based indices.
+        term_indices_raw = self._native.get_term_indices()  # type: ignore[union-attr]
+
+        lp = lp.copy()
+
+        # Intercept (column 0).
+        if "__constant__" not in mask:
+            lp[:, 0] = 0.0
+
+        # Per-smooth blocks — map native order → user predictor names.
+        for user_name, (_native_name, first, last) in zip(
+            predictors, term_indices_raw, strict=False
+        ):
+            if user_name not in mask:
+                lp[:, first : last + 1] = 0.0
+
+        return lp
+
+    # ----------------------------------------------------------------- #
+
     def predict(self, X: ArrayLike) -> np.ndarray:
         """Predict at given X. Mirrors `r_fitting.GamFitter.predict`."""
         if self._native is None:
             raise RuntimeError("Model has not been fitted yet — call .fit() first.")
         X_arr, _ = _to_numpy_with_columns(X, self._effective_predictors)
+
+        subset_mask = getattr(self, "_subset_mask", None)
+        if subset_mask is not None:
+            lp = np.asarray(self._native.evaluate_lpmatrix(X_arr), dtype=float)
+            lp = self._apply_subset_mask(lp)
+            coef = np.asarray(self._native.get_coefficients(), dtype=float)
+            return lp @ coef
+
         return np.asarray(self._native.predict(X_arr), dtype=float)
 
     # -------------------------- Diagnostics --------------------------- #
@@ -427,6 +479,11 @@ class GAMFitter:
         coef = self.get_coefficients()
         vcov = self.get_vcov()
         lp = self.evaluate_lpmatrix(X)
+
+        subset_mask = getattr(self, "_subset_mask", None)
+        if subset_mask is not None:
+            lp = self._apply_subset_mask(lp)
+
         rng = np.random.default_rng(seed)
         # Use `multivariate_normal` for parity with r_fitting.GamFitter
         # which calls np.random.multivariate_normal seeded with 42.
@@ -585,10 +642,42 @@ class GAMFitter:
             "pc_map": dict(self.pc_map),
         }
 
-    def __getitem__(self, predictors: Iterable[str]) -> "GAMFitter":
-        """Marginal-effect view: `gam[["x0", "x2"]].predict(X)` returns
-        predictions using only those smooth contributions. 📋 Auto-k
-        followup."""
-        raise NotImplementedError(
-            "Marginal subset indexing is an Ergo followup."
-        )
+    def __getitem__(self, predictors: Union[str, Iterable[str]]) -> "GAMFitter":
+        """Return a subset view for marginal predictions.
+
+        ``gam[["x0", "x2"]].predict(X)`` returns predictions using only
+        the x0 and x2 smooth contributions (all other columns of the
+        lpmatrix are zeroed).  The special token ``"__constant__"``
+        selects the intercept column.
+
+        Args:
+            predictors: a single smooth name, or an iterable of smooth
+                names.  Each name must match a predictor known to this
+                fitted model, or be ``"__constant__"``.
+
+        Returns:
+            A shallow copy of this :class:`GAMFitter` with ``_subset_mask``
+            set.  The underlying Rust model is shared; only prediction
+            behaviour changes.
+
+        Raises:
+            RuntimeError: if the model has not been fitted yet.
+            KeyError: if any requested name is not a known smooth and is
+                not ``"__constant__"``.
+        """
+        if self._native is None:
+            raise RuntimeError("Model has not been fitted yet — call .fit() first.")
+
+        if isinstance(predictors, str):
+            requested: list[str] = [predictors]
+        else:
+            requested = list(predictors)
+
+        known = set(self._effective_predictors or []) | {"__constant__"}
+        for name in requested:
+            if name not in known:
+                raise KeyError(name)
+
+        view = copy.copy(self)
+        view._subset_mask = set(requested)
+        return view
