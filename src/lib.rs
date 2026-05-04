@@ -224,7 +224,7 @@ impl PyGAM {
     ///     gam = GAM()
     ///     result = gam.fit(X, y, k=[10, 15, 20])
     ///     result = gam.fit(X, y, k=[10, 15, 20], use_edf=True)  # For extreme cases
-    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None))]
+    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None))]
     fn fit<'py>(
         &mut self,
         py: Python<'py>,
@@ -235,9 +235,10 @@ impl PyGAM {
         bs: Option<&str>,
         max_iter: Option<usize>,
         use_edf: Option<bool>,
+        pc_values: Option<Vec<Option<f64>>>,
     ) -> PyResult<Py<PyAny>> {
         // Route to the optimized implementation
-        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None)
+        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values)
     }
 
     /// Low-level fit method for users who manually configure smooths
@@ -369,7 +370,7 @@ impl PyGAM {
     /// Args:
     ///     algorithm: "newton" (default) or "fellner-schall" (faster, matches bam)
     #[cfg(feature = "blas")]
-    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None))]
+    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None))]
     fn fit_auto_optimized<'py>(
         &mut self,
         py: Python<'py>,
@@ -381,6 +382,7 @@ impl PyGAM {
         max_iter: Option<usize>,
         use_edf: Option<bool>,
         algorithm: Option<&str>,
+        pc_values: Option<Vec<Option<f64>>>,
     ) -> PyResult<Py<PyAny>> {
         use crate::gam_optimized::*;
 
@@ -427,6 +429,18 @@ impl PyGAM {
             };
 
             self.inner.add_smooth(smooth);
+        }
+
+        // Apply per-smooth pc anchoring values if provided.
+        // pc_values[i] = Some(v) means smooth i should use pc-anchoring at v.
+        if let Some(ref pcs) = pc_values {
+            for (i, pc_opt) in pcs.iter().enumerate() {
+                if let Some(pc) = pc_opt {
+                    if i < self.inner.smooth_terms.len() {
+                        self.inner.smooth_terms[i].pc_value = Some(*pc);
+                    }
+                }
+            }
         }
 
         // Call optimized fit

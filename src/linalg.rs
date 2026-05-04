@@ -382,6 +382,67 @@ pub fn sum_to_zero_constraint_matrix(k: usize) -> Result<Array2<f64>> {
     Ok(q)
 }
 
+/// Build the pc-anchoring constraint matrix Q (k × k-1).
+///
+/// Given `b = B(pc)` ∈ ℝ^k (basis row evaluated at the point-constraint `pc`),
+/// Q spans the null space of `bᵀ` so that `b · Q β̃ = 0` for any β̃.
+/// This enforces `f(pc) = 0` identically.
+///
+/// Construction via Householder reflector (same primitive used by
+/// `sum_to_zero_constraint_matrix`):
+///
+/// 1. Normalise `b` → `b̂ = b / ‖b‖` (first column of the full Q factor).
+/// 2. Build the Householder vector `v` that maps `b̂ → ±e_0`.
+/// 3. The last k-1 columns of the full Q factor are the null-space basis.
+///
+/// # Arguments
+/// * `basis_at_pc` - Row vector `B(pc)` of length k
+///
+/// # Returns
+/// * Q matrix (k × k-1) with orthonormal columns spanning null(bᵀ)
+pub fn pc_constraint_matrix(basis_at_pc: &Array1<f64>) -> Result<Array2<f64>> {
+    let k = basis_at_pc.len();
+    if k <= 1 {
+        return Err(GAMError::SingularMatrix);
+    }
+    let b_norm: f64 = basis_at_pc.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if b_norm < 1e-10 {
+        // Basis is zero at pc — fall back to dropping last column (identity-like).
+        // This is degenerate but avoids panicking.
+        let mut z = Array2::<f64>::zeros((k, k - 1));
+        for j in 0..(k - 1) {
+            z[[j, j]] = 1.0;
+        }
+        return Ok(z);
+    }
+
+    // Normalised basis vector: b̂ = b / ‖b‖
+    // Build Householder reflector that maps b̂ → ±e_0.
+    // v = b̂ ± e_0,  H = I - 2 v vᵀ / ‖v‖²
+    // Columns 1..k of H span null(b̂ᵀ) = null(bᵀ).
+    let mut b_hat = basis_at_pc.clone();
+    for x in b_hat.iter_mut() {
+        *x /= b_norm;
+    }
+    let sign = if b_hat[0] >= 0.0 { 1.0 } else { -1.0 };
+    let mut v = b_hat.clone();
+    v[0] += sign; // v = b̂ + sign * e_0
+    let v_norm_sq: f64 = v.iter().map(|x| x * x).sum();
+
+    let mut q = Array2::<f64>::zeros((k, k - 1));
+    // j-th column of H (for j = 1..k-1) = e_j - (2 v_j / ‖v‖²) v
+    // stored as (j-1)-th column of Q.
+    for j in 1..k {
+        let coef = 2.0 * v[j] / v_norm_sq;
+        for i in 0..k {
+            let e_ij = if i == j { 1.0 } else { 0.0 };
+            q[[i, j - 1]] = e_ij - coef * v[i];
+        }
+    }
+
+    Ok(q)
+}
+
 /// Apply identifiability constraint to penalty matrix
 ///
 /// Given penalty matrix S (k x k) and constraint matrix Q (k x k-1),

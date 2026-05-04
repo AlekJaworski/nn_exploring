@@ -197,14 +197,6 @@ class GAMFitter:
         self.term_pc_mapping: dict[str, float] = dict(term_pc_mapping or {})
         self.consider_categorical = consider_categorical
 
-        if self.term_pc_mapping:
-            # 🚧 Rust core does not yet apply pc-anchoring; flag it so
-            # callers know predictions won't be pinned at the sentinel.
-            # Still accepted to keep the API drop-in.
-            self._pc_unsupported = list(self.term_pc_mapping.keys())
-        else:
-            self._pc_unsupported = []
-
         # Filled at fit time:
         self._native: Optional[_NativeGAM] = None
         self.X: Optional[np.ndarray] = None
@@ -296,10 +288,23 @@ class GAMFitter:
             return _NativeGAM()
         return _NativeGAM(self.family, link=self.link)
 
+    def _build_pc_values(self, predictors: list[str]) -> list[float | None] | None:
+        """Build a positional list of pc values for the given predictors.
+
+        Returns None if no pc anchoring is requested, otherwise a list of
+        length len(predictors) where entry i is the pc anchor for predictor i
+        (or None if that predictor has no pc constraint).
+        """
+        if not self.term_pc_mapping:
+            return None
+        pcs = [self.term_pc_mapping.get(name, None) for name in predictors]
+        return pcs if any(p is not None for p in pcs) else None
+
     def _single_fit(self, X_arr: np.ndarray, y_arr: np.ndarray, ks: list[int]) -> None:
         """Run one native fit with the given k vector (mgcv bs='cr', REML)."""
         self._native = self._make_native()
-        self._native.fit(X_arr, y_arr, k=ks, method="REML", bs="cr")
+        pc_values = self._build_pc_values(self._effective_predictors or [])
+        self._native.fit(X_arr, y_arr, k=ks, method="REML", bs="cr", pc_values=pc_values)
 
     def _auto_fit_k(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
         """Iteratively refit, growing k for terms whose EDF is near saturation.

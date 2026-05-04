@@ -62,7 +62,10 @@ impl FitCache {
 
         for (i, smooth) in smooth_terms.iter_mut().enumerate() {
             let x_col = x.column(i).to_owned();
-            if mgcv_exact {
+            if smooth.pc_value.is_some() {
+                // pc-anchoring replaces sum-to-zero: enforce f(pc) = 0.
+                smooth.apply_pc_anchoring()?;
+            } else if mgcv_exact {
                 // mgcv-exact: normalise penalty using ||X_raw||_∞²/||S_raw||_∞
                 // BEFORE applying the centring Z (matches smooth.r:3766
                 // ordering). Our default does it after Z, which gives a

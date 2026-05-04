@@ -23,6 +23,9 @@ pub struct SmoothTerm {
     /// Constraint matrix Q for identifiability (optional)
     /// If present, transforms unconstrained basis to constrained: X_constrained = X * Q
     pub constraint_matrix: Option<Array2<f64>>,
+    /// Point-constraint value: when Some(v), enforce f(v) = 0 via pc-anchoring
+    /// instead of the default sum-to-zero constraint.
+    pub pc_value: Option<f64>,
 }
 
 impl SmoothTerm {
@@ -40,6 +43,7 @@ impl SmoothTerm {
             penalty,
             lambda: 1.0,
             constraint_matrix: None, // No constraint for regular cubic splines
+            pc_value: None,
         })
     }
 
@@ -64,6 +68,7 @@ impl SmoothTerm {
             penalty,
             lambda: 1.0,
             constraint_matrix: None,
+            pc_value: None,
         })
     }
 
@@ -87,6 +92,7 @@ impl SmoothTerm {
             penalty,
             lambda: 1.0,
             constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
+            pc_value: None,
         })
     }
 
@@ -105,6 +111,7 @@ impl SmoothTerm {
             penalty,
             lambda: 1.0,
             constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
+            pc_value: None,
         })
     }
 
@@ -337,6 +344,44 @@ impl SmoothTerm {
 
         self.penalty = new_penalty;
         self.constraint_matrix = Some(z_total);
+        Ok(())
+    }
+
+    /// Apply point-constraint (pc) identifiability: enforce f(pc_value) = 0.
+    ///
+    /// Builds a (k × k-1) null-space matrix Q for `B(pc)` (the basis row at
+    /// the pc point) so that `B(pc) Q β̃ = 0` for any reduced coefficient β̃.
+    /// This replaces the default sum-to-zero constraint when a pc anchor is
+    /// requested — the two are alternatives, not additives.
+    ///
+    /// After this call `constraint_matrix = Some(Q)` and `penalty = Q' S Q`.
+    ///
+    /// Idempotent: a no-op if the constraint is already set.
+    pub fn apply_pc_anchoring(&mut self) -> Result<()> {
+        if self.constraint_matrix.is_some() {
+            return Ok(());
+        }
+        let pc = match self.pc_value {
+            Some(v) => v,
+            None => return Ok(()), // nothing to do
+        };
+
+        // Evaluate the basis at the single pc point to get b = B(pc) ∈ ℝ^k.
+        let pc_arr = Array1::from_vec(vec![pc]);
+        let basis_row = self.basis.evaluate(&pc_arr)?; // shape (1, k)
+        let k = basis_row.ncols();
+        if k <= 1 {
+            return Ok(());
+        }
+        let b: Array1<f64> = basis_row.row(0).to_owned();
+
+        // Build null-space Q via Householder (reuses linalg primitive).
+        let q = crate::linalg::pc_constraint_matrix(&b)?;
+
+        // Transform penalty: S_new = Q' S Q
+        let new_penalty = q.t().dot(&self.penalty).dot(&q);
+        self.penalty = new_penalty;
+        self.constraint_matrix = Some(q);
         Ok(())
     }
 
