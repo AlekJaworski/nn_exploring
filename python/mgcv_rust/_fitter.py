@@ -9,11 +9,12 @@ Status legend in this file:
 - ✅  fully implemented and tested.
 - 🚧  signature in place but raises NotImplementedError until the
       underlying Rust accessor lands.
-- 📋  not yet wired (subset indexing, auto-k tuning).
+- 📋  not yet wired (subset indexing).
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence, Union
 
@@ -210,6 +211,10 @@ class GAMFitter:
         self.pc_map: dict[str, float] = {}
         self.prediction_range: Optional[dict[str, dict[str, float]]] = None
         self._effective_predictors: Optional[list[str]] = None
+        # Stores final per-term k after fit (including auto-k results):
+        self._term_k: dict[str, int] = {}
+        # Stores iteration count when auto-k loop ran:
+        self._auto_k_iterations: int = 0
 
     # -------------------------- Fit / Predict ------------------------- #
 
@@ -219,6 +224,10 @@ class GAMFitter:
         Accepts numpy / pandas / polars inputs. If a DataFrame is given,
         column names are matched against `self.predictors` (if set)
         before the fit.
+
+        When `term_k_mapping` covers all predictors, a single fit is
+        run (existing behavior). Otherwise, an iterative auto-k loop
+        grows k for under-saturated terms until convergence.
         """
         X_arr, cols = _to_numpy_with_columns(X, self.predictors)
         y_arr = _to_1d_numpy(y)
@@ -232,16 +241,6 @@ class GAMFitter:
             self.predictors = cols
         self._effective_predictors = list(cols)
 
-        # Per-predictor k vector aligned with the (effective) predictor
-        # order. For predictors with very few unique values we cap k —
-        # mgcv would error on `k > nunique`, but we pre-cap to behave
-        # gracefully (matches r_fitting.GamFitter's defensive trim).
-        ks: list[int] = []
-        for name in self._effective_predictors:
-            requested = self.term_k_mapping.get(name, self.k_default)
-            n_unique = int(np.unique(X_arr[:, self._effective_predictors.index(name)]).size)
-            ks.append(max(self.min_k, min(requested, max(n_unique - 1, self.min_k))))
-
         # Capture per-predictor data range — used by `serialize` to grow
         # the prediction grid.
         self.prediction_range = {
@@ -252,26 +251,110 @@ class GAMFitter:
         self.y = y_arr
         self.pc_map = dict(self.term_pc_mapping)  # surface to consumers
 
-        # Build the native GAM. Family + link route through the
-        # canonical-link path for gaussian/binomial/poisson and accept
-        # `link="log"` for gamma. Anything else raises clearly.
-        if self.family == "gamma" and self.link == "log":
-            self._native = _NativeGAM(family="gamma", link="log")
-        elif self.link in (None, "", "identity") and self.family == "gaussian":
-            self._native = _NativeGAM()
-        else:
-            self._native = _NativeGAM(self.family, link=self.link)
-
-        # mgcv's bs="cr" is the production default — match
-        # neighbourhoods. (Term-level bs override is a followup.)
-        self._native.fit(
-            X_arr,
-            y_arr,
-            k=ks,
-            method="REML",  # fREML is still routed through REML internally
-            bs="cr",
+        all_covered = all(
+            name in self.term_k_mapping for name in self._effective_predictors
         )
+
+        if all_covered:
+            # Fixed-k path: single fit, no iteration.
+            ks = self._resolve_ks(X_arr, self._effective_predictors, self.term_k_mapping)
+            self._term_k = dict(zip(self._effective_predictors, ks))
+            self._auto_k_iterations = 0
+            self._single_fit(X_arr, y_arr, ks)
+        else:
+            # Auto-k path: iteratively refit growing k for uncovered terms.
+            self._auto_fit_k(X_arr, y_arr)
+
         return self
+
+    def _resolve_ks(
+        self,
+        X_arr: np.ndarray,
+        predictors: list[str],
+        k_mapping: dict[str, int],
+    ) -> list[int]:
+        """Compute the capped k vector for a given k_mapping.
+
+        For each predictor uses k_mapping if present, else self.k_default.
+        Caps at n_unique(x_j) - 1 per predictor column.
+        """
+        ks: list[int] = []
+        for name in predictors:
+            requested = k_mapping.get(name, self.k_default)
+            col_idx = predictors.index(name)
+            n_unique = int(np.unique(X_arr[:, col_idx]).size)
+            cap = max(n_unique - 1, self.min_k)
+            ks.append(max(self.min_k, min(requested, cap)))
+        return ks
+
+    def _make_native(self) -> _NativeGAM:
+        """Construct a fresh native GAM for this fitter's family/link."""
+        if self.family == "gamma" and self.link == "log":
+            return _NativeGAM(family="gamma", link="log")
+        if self.link in (None, "", "identity") and self.family == "gaussian":
+            return _NativeGAM()
+        return _NativeGAM(self.family, link=self.link)
+
+    def _single_fit(self, X_arr: np.ndarray, y_arr: np.ndarray, ks: list[int]) -> None:
+        """Run one native fit with the given k vector (mgcv bs='cr', REML)."""
+        self._native = self._make_native()
+        self._native.fit(X_arr, y_arr, k=ks, method="REML", bs="cr")
+
+    def _auto_fit_k(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
+        """Iteratively refit, growing k for terms whose EDF is near saturation.
+
+        Fixed-k terms (those in term_k_mapping) are frozen. Uncovered terms
+        start at k_default=4 and grow by ceil(k * knots_increase_ratio) each
+        iteration where (k - 1) - edf < edf_cutoff.
+
+        Stop when: no term grew, every term hit its cap, or 10 iterations.
+        """
+        predictors = self._effective_predictors
+
+        # Pre-compute per-term caps from unique-value counts.
+        caps: dict[str, int] = {}
+        for i, name in enumerate(predictors):
+            n_unique = int(np.unique(X_arr[:, i]).size)
+            caps[name] = max(n_unique - 1, self.min_k)
+
+        # Initial k for each term.
+        current_k: dict[str, int] = {}
+        for name in predictors:
+            if name in self.term_k_mapping:
+                requested = self.term_k_mapping[name]
+                current_k[name] = max(self.min_k, min(requested, caps[name]))
+            else:
+                current_k[name] = max(self.min_k, min(self.k_default, caps[name]))
+
+        for iteration in range(10):
+            ks = [current_k[name] for name in predictors]
+            self._single_fit(X_arr, y_arr, ks)
+
+            edf_map = dict(self._native.get_edf_per_smooth())
+
+            grew = False
+            all_capped = True
+            for name in predictors:
+                if name in self.term_k_mapping:
+                    # Fixed: never grow.
+                    continue
+                k_j = current_k[name]
+                edf_j = edf_map.get(name, 0.0)
+                # Grow when headroom (k-1) - edf < edf_cutoff (mirrors mgcv k.check).
+                if (k_j - 1) - edf_j < self.edf_cutoff:
+                    new_k = math.ceil(k_j * self.knots_increase_ratio)
+                    capped_k = min(new_k, caps[name])
+                    if capped_k > k_j:
+                        current_k[name] = capped_k
+                        grew = True
+                if current_k[name] < caps[name]:
+                    all_capped = False
+
+            self._auto_k_iterations = iteration + 1
+            if not grew or all_capped:
+                break
+
+        self._term_k = dict(current_k)
 
     def predict(self, X: ArrayLike) -> np.ndarray:
         """Predict at given X. Mirrors `r_fitting.GamFitter.predict`."""
@@ -391,11 +474,26 @@ class GAMFitter:
         raise NotImplementedError(f"predict_ci does not yet support link={link!r}")
 
     def get_edf_df(self) -> Any:
-        """Per-smooth EDF table for auto-k tuning. 🚧 Needs Rust EDF
-        accessor (Ergo-3 followup)."""
-        raise NotImplementedError(
-            "get_edf_df needs per-smooth EDF from the Rust core."
-        )
+        """Per-smooth EDF table. Returns a pandas DataFrame with columns
+        [predictor, k, edf, ratio] where ratio = edf / (k - 1).
+
+        Mirrors `r_fitting.GamFitter.get_edf_df()`. pandas is lazy-imported
+        so it remains an optional dependency.
+        """
+        if self._native is None:
+            raise RuntimeError("Model has not been fitted yet — call .fit() first.")
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "get_edf_df() requires pandas. Install it with: pip install pandas"
+            ) from exc
+        edf = dict(self._native.get_edf_per_smooth())
+        rows = []
+        for name, k in self._term_k.items():
+            e = edf.get(name, float("nan"))
+            rows.append({"predictor": name, "k": k, "edf": e, "ratio": e / max(k - 1, 1)})
+        return pd.DataFrame(rows)
 
     def serialize(
         self,
