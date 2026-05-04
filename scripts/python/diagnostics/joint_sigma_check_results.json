@@ -1,0 +1,26 @@
+{
+  "N-1": {
+    "case": "2d_gamma_log_n200_k10_cr",
+    "delta_log_sigma2": 0.1322661856949512,
+    "rust_sig2_glm": 0.2548053002570625,
+    "rust_sig2_working_rss": 2.76099,
+    "rust_glm_dev": 48.847331346510245,
+    "mgcv_sig2": 0.2232369,
+    "mgcv_dev": 48.80812,
+    "fd_profile_grad_inf": 0.7431310405081604,
+    "chain_inf": 0.7431310405081604,
+    "train_absdiff": 0.01798307197964011
+  },
+  "N-2": {
+    "case": "4d_gamma_log_n2000_k8_cr",
+    "delta_log_sigma2": 0.0655631227747937,
+    "rust_sig2_glm": 0.2659817190708989,
+    "rust_sig2_working_rss": 2.19710946,
+    "rust_glm_dev": 528.7448077223337,
+    "mgcv_sig2": 0.2491025,
+    "mgcv_dev": 528.6886,
+    "fd_profile_grad_inf": 0.2895068610087037,
+    "chain_inf": 0.2895068610087037,
+    "train_absdiff": 0.009095756510910213
+  }
+}
