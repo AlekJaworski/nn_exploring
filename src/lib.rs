@@ -1202,6 +1202,80 @@ impl PyGAM {
         )
         .map_err(|e| PyValueError::new_err(format!("REML evaluation failed: {}", e)))
     }
+
+    /// Per-smooth EDF (effective degrees of freedom), matching
+    /// `summary.gam()$edf` in mgcv. Intercept is excluded.
+    ///
+    /// EDF_j = Σ_{i ∈ [first_j, last_j]} (A⁻¹ X'WX)[i, i]
+    /// where A = X'WX + Σ λ_k S_k.
+    #[cfg(feature = "blas")]
+    fn get_edf_per_smooth(&self) -> PyResult<Vec<(String, f64)>> {
+        let design = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design.nrows());
+                &weights_arr
+            }
+        };
+        let smoothing = self
+            .inner
+            .smoothing_params
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Smoothing parameters not stored"))?;
+        let lambdas = &smoothing.lambda;
+
+        let total_cols = design.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+
+        let xtwx = crate::reml::compute_xtwx(design, weights);
+        let mut a = xtwx.clone();
+        for (lam, pen) in lambdas.iter().zip(penalties.iter()) {
+            pen.scaled_add_to(&mut a, *lam);
+        }
+        let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+        let ridge = 1e-12 * max_diag;
+        for i in 0..a.nrows() {
+            a[[i, i]] += ridge;
+        }
+        let a_inv = crate::linalg::inverse(&a)
+            .map_err(|e| PyValueError::new_err(format!("get_edf_per_smooth inverse failed: {}", e)))?;
+
+        // diag(A⁻¹ · X'WX): element [i,i] = row i of a_inv dotted with col i of xtwx
+        let a_inv_xtwx_diag: Vec<f64> = (0..total_cols)
+            .map(|i| {
+                let row = a_inv.row(i);
+                let col = xtwx.column(i);
+                row.iter().zip(col.iter()).map(|(a, b)| a * b).sum()
+            })
+            .collect();
+
+        let mut out = Vec::with_capacity(self.inner.smooth_terms.len());
+        let mut first = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            let last = first + nb - 1; // inclusive
+            let edf: f64 = a_inv_xtwx_diag[first..=last].iter().sum();
+            out.push((smooth.name.clone(), edf));
+            first += nb;
+        }
+        Ok(out)
+    }
 }
 
 /// Compute penalty matrix for debugging/comparison
