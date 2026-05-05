@@ -59,6 +59,13 @@ pub enum Family {
     /// Binomial, but the dispersion φ is **estimated from data** rather
     /// than fixed at 1. mgcv estimates φ̂ = Dp / (n − trA).
     QuasiBinomial,
+    /// Inverse Gaussian distribution with log link.
+    ///
+    /// Log link: η = log(μ), μ = exp(η). Variance function V(μ) = μ³.
+    /// The canonical link for Inverse Gaussian is 1/μ², but log link
+    /// is the most common production choice. The dispersion φ is profiled,
+    /// using the same closed-form φ̂ = Dp/(n-Mp) as Gaussian.
+    InverseGaussian,
 }
 
 impl Family {
@@ -76,6 +83,8 @@ impl Family {
             // The actual per-obs t-weights are computed in fit_pirls_tdist.
             Family::TDist { sigma2, .. } => *sigma2,
             Family::Tweedie { p } => mu.powf(*p),
+            // Inverse Gaussian variance: V(μ) = μ³
+            Family::InverseGaussian => mu * mu * mu,
         }
     }
 
@@ -84,7 +93,8 @@ impl Family {
         match self {
             Family::Gaussian | Family::TDist { .. } => mu,
             Family::Binomial | Family::QuasiBinomial => (mu / (1.0 - mu)).ln(),
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => mu.ln(),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
+            | Family::InverseGaussian => mu.ln(),
             Family::Gamma => 1.0 / mu,
         }
     }
@@ -97,7 +107,8 @@ impl Family {
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => {
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
+            | Family::InverseGaussian => {
                 let eta_safe = eta.min(20.0);
                 eta_safe.exp()
             }
@@ -116,7 +127,8 @@ impl Family {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => eta.exp(),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
+            | Family::InverseGaussian => eta.exp(),
             Family::Gamma => -1.0 / (eta * eta),
         }
     }
@@ -131,6 +143,8 @@ impl Family {
             Family::Poisson | Family::QuasiPoisson => 1.0,
             Family::Gamma | Family::GammaLog => 2.0 * mu,
             Family::Tweedie { p } => p * mu.powf(p - 1.0),
+            // dV/dμ = 3μ²
+            Family::InverseGaussian => 3.0 * mu * mu,
         }
     }
 
@@ -144,6 +158,8 @@ impl Family {
             Family::Poisson | Family::QuasiPoisson => 0.0,
             Family::Gamma | Family::GammaLog => 2.0,
             Family::Tweedie { p } => p * (p - 1.0) * mu.powf(p - 2.0),
+            // d²V/dμ² = 6μ
+            Family::InverseGaussian => 6.0 * mu,
         }
     }
 
@@ -155,7 +171,8 @@ impl Family {
                 let one_minus = 1.0 - mu;
                 -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => -1.0 / (mu * mu),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
+            | Family::InverseGaussian => -1.0 / (mu * mu),
             Family::Gamma => 2.0 / (mu * mu * mu),
         }
     }
@@ -168,7 +185,8 @@ impl Family {
                 let one_minus = 1.0 - mu;
                 2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => 2.0 / (mu * mu * mu),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
+            | Family::InverseGaussian => 2.0 / (mu * mu * mu),
             Family::Gamma => -6.0 / (mu * mu * mu * mu),
         }
     }
@@ -186,7 +204,8 @@ impl Family {
             | Family::Gamma
             | Family::TDist { .. } => true,
             // Tweedie canonical link is μ^(1-p); log link is non-canonical → full Newton.
-            Family::GammaLog | Family::Tweedie { .. } => false,
+            // InverseGaussian canonical link is 1/μ²; log link is non-canonical → full Newton.
+            Family::GammaLog | Family::Tweedie { .. } | Family::InverseGaussian => false,
         }
     }
 
@@ -248,6 +267,17 @@ impl Family {
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
+            // Inverse Gaussian saturated log-likelihood:
+            // ls = -n/2 · log(2π·φ) - 3/2 · Σ log(y_i)
+            // (from dinvgauss at saturation μ=y; the -3/2·Σlog(y) is a
+            // constant in β but depends on φ via the -n/2·log(2πφ) term).
+            Family::InverseGaussian => {
+                let sum_log_y: f64 = y
+                    .iter()
+                    .map(|&yi| if yi > 0.0 { yi.ln() } else { 0.0 })
+                    .sum();
+                -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln() - 1.5 * sum_log_y
+            }
             // Tweedie saturated log-likelihood for 1 < p < 2, log link.
             // At y=μ: log f(y; y, φ, p) = l_base(y, φ, p) - log(y) + log W(y, φ, p)
             // where l_base = μ^(1-p) * (y/(1-p) - μ/(2-p)) / φ  evaluated at μ=y.
@@ -295,6 +325,8 @@ impl Family {
             // QuasiPoisson/QuasiBinomial: Gaussian-approximation ls → dls/dσ² = -n/(2σ²).
             // σ² is profiled (free parameter), not fixed at 1.
             Family::QuasiPoisson | Family::QuasiBinomial => -n / (2.0 * scale),
+            // InverseGaussian: ls = -n/2·log(2πφ) - 3/2·Σlog(y), so dls/dφ = -n/(2φ).
+            Family::InverseGaussian => -n / (2.0 * scale),
             Family::Poisson | Family::Binomial => 0.0, // scale = 1, not a free parameter
             Family::Gamma | Family::GammaLog => {
                 // ls = n·[-lgamma(1/φ) - log(φ)/φ - 1/φ] - Σlog y
@@ -414,6 +446,8 @@ impl Family {
             // QuasiPoisson/QuasiBinomial: same closed-form φ̂ = Dp/(n-Mp) as Gaussian.
             // Dispersion is profiled, not fixed at 1.
             Family::QuasiPoisson | Family::QuasiBinomial => dp / (n - mp_f).max(1.0),
+            // InverseGaussian: ls = -n/2·log(2πφ) form → same closed-form φ̂ as Gaussian.
+            Family::InverseGaussian => dp / (n - mp_f).max(1.0),
             Family::Binomial | Family::Poisson => 1.0,
             Family::TDist { .. } => phi_init,
             Family::Gamma | Family::GammaLog => {
@@ -758,7 +792,8 @@ pub fn fit_pirls_cached(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
+            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog
+            | Family::Tweedie { .. } | Family::InverseGaussian => y[i].max(0.1),
             // TDist and Gaussian use identity link; initialize to y directly
             Family::Gaussian | Family::TDist { .. } => y[i],
         };
@@ -812,10 +847,13 @@ pub fn fit_pirls_cached(
                 let dvar = family.dvar(mu[i]);
                 let d2link = family.d2link(mu[i]);
                 let mut alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
-                // mgcv: alpha[alpha==0] <- .Machine$double.eps. Negative alpha
-                // is allowed through (rare, indicates we're far from optimum;
-                // line search / damping handles it).
-                if alpha == 0.0 {
+                // Clamp α positive so X'WX + λS stays PSD. For InverseGaussian+log,
+                // α = 2y/μ − 1 which goes negative when y < μ/2 (common far from
+                // optimum). Negative α makes W indefinite → Cholesky → NaN.
+                // mgcv handles this via QR with column pivoting; we use a direct
+                // solve, so clamp instead. The convergence trajectory differs but
+                // the final point is the same.
+                if alpha <= 0.0 {
                     alpha = f64::EPSILON;
                 }
                 z[i] = eta[i] + (y[i] - mu[i]) / (dmu_deta * alpha);
@@ -1021,6 +1059,13 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                         - yi * mui.powf(onep) / onep
                         + mui.powf(twop) / twop)
                 }
+            }
+            // Inverse Gaussian deviance: d_i = (y - μ)² / (μ² · y)
+            Family::InverseGaussian => {
+                let mu_c = mui.max(1e-15);
+                let yi_c = yi.max(1e-15);
+                let diff = yi_c - mu_c;
+                diff * diff / (mu_c * mu_c * yi_c)
             }
         };
 
@@ -1370,7 +1415,8 @@ pub fn fit_pirls_discretized(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
+            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog
+            | Family::Tweedie { .. } | Family::InverseGaussian => y[i].max(0.1),
             // TDist and Gaussian use identity link; initialize to y directly
             Family::Gaussian | Family::TDist { .. } => y[i],
         };

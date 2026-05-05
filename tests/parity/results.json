@@ -1523,6 +1523,65 @@
     "bar_a": {
       "extrap": {
         "atol": 0.001,
+        "eff_atol": 0.001,
+        "max_absdiff": 0.02710692934506609,
+        "max_relerr": 0.010678365864934236,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.00033489887077144494,
+        "max_absdiff": 0.021252430326761385,
+        "max_relerr": 0.006220474511189943,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.00032821715585682805,
+        "max_absdiff": 0.02469362044951673,
+        "max_relerr": 0.007087124924044226,
+        "n": 800,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.004833828190324518,
+      "beta_maxrelerr": 0.054049009754127235,
+      "beta_ok": false,
+      "deviance_actual": 7892.549662556282,
+      "deviance_expected": 776.3960509881681,
+      "deviance_relerr": 9.165623141064328,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        199.81372206559917,
+        534.4301339462392
+      ],
+      "lambda_expected": [
+        192.16284812521303,
+        504.4534182343682
+      ],
+      "lambda_max_relerr": 0.05942415023530244,
+      "lambda_ok": false
+    },
+    "description": "Inverse Gaussian, log link \u2014 V(\u03bc)=\u03bc\u00b3 positive-skewed",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_invgauss_log_n800_k10_cr.json",
+    "name": "2d_invgauss_log_n800_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
         "eff_atol": 0.0013446257239198606,
         "max_absdiff": 0.00044295072953737247,
         "max_relerr": 6.598958460132848e-05,
@@ -1695,6 +1754,124 @@
     "description": "Large poisson",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_poisson_log_n5000_k10_cr.json",
     "name": "2d_poisson_log_n5000_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "eff_atol": 0.001,
+        "max_absdiff": 0.000794212908198394,
+        "max_relerr": 0.0063347691507338886,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.00013670244065385083,
+        "max_absdiff": 0.00041130975582659435,
+        "max_relerr": 0.0008255448254794893,
+        "n": 100,
+        "ok": true,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.00014266686942005202,
+        "max_absdiff": 0.0005040321457040475,
+        "max_relerr": 0.001395754129333794,
+        "n": 1000,
+        "ok": true,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.0024417969481147495,
+      "beta_maxrelerr": 0.004719222393252012,
+      "beta_ok": true,
+      "deviance_actual": 166.25312678590026,
+      "deviance_expected": 1013.6851416049702,
+      "deviance_relerr": 0.8359913547488017,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        22.296280416022945,
+        1728483.5220275016
+      ],
+      "lambda_expected": [
+        21.90319402491654,
+        7956588.987517523
+      ],
+      "lambda_max_relerr": 0.7827607377056693,
+      "lambda_ok": false
+    },
+    "description": "quasibinomial(logit) \u2014 overdispersed proportions; estimates \u03c6 \u2260 1",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_quasibinomial_logit_n1000_k10_cr.json",
+    "name": "2d_quasibinomial_logit_n1000_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "eff_atol": 0.0013600679637793896,
+        "max_absdiff": 0.006474029871272435,
+        "max_relerr": 0.0006904584691642694,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.00181960383302262,
+        "max_absdiff": 0.0013795119522939103,
+        "max_relerr": 0.00035260349851617815,
+        "n": 100,
+        "ok": true,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.0018901135464783447,
+        "max_absdiff": 0.0016247574120944464,
+        "max_relerr": 0.0003747402576313233,
+        "n": 1000,
+        "ok": true,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.000285750087399006,
+      "beta_maxrelerr": 0.003058404896000649,
+      "beta_ok": true,
+      "deviance_actual": 30193.008471651854,
+      "deviance_expected": 3697.106675082838,
+      "deviance_relerr": 7.166658721302745,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        393.29843136309734,
+        200017.91842201847
+      ],
+      "lambda_expected": [
+        390.77013263012793,
+        199669.18423172008
+      ],
+      "lambda_max_relerr": 0.006470040880433642,
+      "lambda_ok": true
+    },
+    "description": "quasipoisson(log) \u2014 overdispersed counts; estimates \u03c6 \u2260 1",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_quasipoisson_log_n1000_k10_cr.json",
+    "name": "2d_quasipoisson_log_n1000_k10_cr"
   },
   {
     "bar_a": {

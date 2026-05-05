@@ -173,6 +173,13 @@ pub fn glm_deviance(
                         + mu_c.powf(twop) / twop)
                 }
             }
+            // Inverse Gaussian deviance: d_i = (y - μ)² / (μ² · y)
+            Family::InverseGaussian => {
+                let mu_c = mui.max(1e-15);
+                let yi_c = yi.max(1e-15);
+                let diff = yi_c - mu_c;
+                diff * diff / (mu_c * mu_c * yi_c)
+            }
         };
         dev += dev_i;
     }
@@ -1177,7 +1184,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
                 let y_for_resid = y_original.unwrap_or(y);
                 let c_resid = y_for_resid[i] - mu_i;
                 let mut alpha = 1.0 + c_resid * (v1n + g2n);
-                if alpha == 0.0 {
+                if alpha <= 0.0 {
                     alpha = f64::EPSILON;
                 }
                 let xx = v2n - v1n * v1n + g3n - g2n * g2n;

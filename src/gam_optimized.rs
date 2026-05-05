@@ -530,7 +530,8 @@ impl GAM {
             | crate::pirls::Family::Gamma
             | crate::pirls::Family::GammaLog
             | crate::pirls::Family::TDist { .. }
-            | crate::pirls::Family::Tweedie { .. } => None,
+            | crate::pirls::Family::Tweedie { .. }
+            | crate::pirls::Family::InverseGaussian => None,
         };
         smoothing_params.family = self.family;
         // Profile-p for Tweedie: enable the θ Newton step in the outer loop.

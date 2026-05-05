@@ -40,6 +40,7 @@ _FAMILY_MAP = {
     "tw": "tweedie",
     "quasipoisson": "quasipoisson",
     "quasibinomial": "quasibinomial",
+    "inverse.gaussian": "inverse.gaussian",
 }
 
 # mgcv_rust's Family enum has no link parameter — only the canonical link
@@ -60,6 +61,7 @@ _CANONICAL_LINK = {
     "tw": "log",
     "quasipoisson": "log",
     "quasibinomial": "logit",
+    "inverse.gaussian": "log",
 }
 
 

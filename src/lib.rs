@@ -186,6 +186,10 @@ impl PyGAM {
                 let fixed_df = df.unwrap_or(0.0); // 0.0 = profile
                 Family::TDist { df: fixed_df, sigma2: 1.0 }
             }
+            // Inverse Gaussian with log link.
+            (Some("inverse.gaussian") | Some("inverse_gaussian"), Some("log") | None) => {
+                Family::InverseGaussian
+            }
             // Tweedie with log link (1 < p < 2).
             // p=None → profile-p mode (mgcv's tw()), starting at p=1.5.
             // p=Some(val) → fixed-p mode (mgcv's Tweedie(p=val)).
@@ -203,14 +207,14 @@ impl PyGAM {
                     "Unsupported family/link combination: {}({}). Supported: \
                      gaussian(identity), binomial(logit), poisson(log), \
                      gamma(inverse), gamma(log), quasipoisson(log), quasibinomial(logit), \
-                     t-dist(identity), tweedie(log).",
+                     t-dist(identity), tweedie(log), inverse.gaussian(log).",
                     f, l
                 )))
             }
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
                     "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', \
-                     'quasipoisson', 'quasibinomial', 't-dist', or 'tweedie'",
+                     'quasipoisson', 'quasibinomial', 't-dist', 'tweedie', or 'inverse.gaussian'",
                     f
                 )))
             }
@@ -673,6 +677,7 @@ impl PyGAM {
             Family::QuasiBinomial => "quasibinomial",
             Family::TDist { .. } => "t-dist",
             Family::Tweedie { .. } => "tweedie",
+            Family::InverseGaussian => "inverse.gaussian",
         }
     }
 
@@ -688,6 +693,7 @@ impl PyGAM {
             Family::QuasiBinomial => "logit",
             Family::TDist { .. } => "identity",
             Family::Tweedie { .. } => "log",
+            Family::InverseGaussian => "log",
         }
     }
 
