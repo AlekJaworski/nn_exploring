@@ -48,6 +48,9 @@ jobs:
           path: dist
 
   macos:
+    # macOS Apple Silicon (aarch64) only by default. Intel mac wheels can be
+    # produced manually by adding { target: x86_64, runner: macos-13 } to
+    # the matrix when GitHub's macos-13 runner pool is healthy.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -55,8 +58,6 @@ jobs:
         include:
           - target: aarch64
             runner: macos-latest  # Apple Silicon
-          - target: x86_64
-            runner: macos-13      # last Intel runner image
     steps:
       - uses: actions/checkout@v4
 

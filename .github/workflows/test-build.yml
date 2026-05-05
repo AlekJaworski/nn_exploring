@@ -85,6 +85,10 @@ jobs:
           path: dist
 
   test-macos:
+    # macOS Apple Silicon (aarch64) only by default.
+    # Intel mac (macos-13, x86_64) is opt-in: GitHub's macos-13 runner pool
+    # is small and routinely queues 30+ minutes. To re-enable, add another
+    # matrix entry: { target: x86_64, runner: macos-13 }.
     name: Test macOS ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -93,8 +97,6 @@ jobs:
         include:
           - target: aarch64
             runner: macos-latest  # Apple Silicon (M-series)
-          - target: x86_64
-            runner: macos-13      # last Intel runner image
     steps:
       - uses: actions/checkout@v4
 
