@@ -57,3 +57,4 @@ INVESTIGATION_PLAN.md
 
 # Cloned mgcv source (used as a reference, not part of this repo)
 /mgcv_analysis/
+.claude/
