@@ -820,8 +820,8 @@
       "extrap": {
         "atol": 0.001,
         "eff_atol": 0.001,
-        "max_absdiff": 0.009917884417805611,
-        "max_relerr": 0.006300574279740425,
+        "max_absdiff": 0.0005492151699511005,
+        "max_relerr": 0.00034890212751670656,
         "n": 20,
         "ok": true,
         "rtol": 0.05
@@ -829,29 +829,29 @@
       "test": {
         "atol": 1e-06,
         "eff_atol": 0.00043581321320052316,
-        "max_absdiff": 0.00994071364641469,
-        "max_relerr": 0.004028801037477026,
+        "max_absdiff": 0.0002070538421068413,
+        "max_relerr": 0.0001738164894423072,
         "n": 100,
-        "ok": false,
+        "ok": true,
         "rtol": 0.001
       },
       "train": {
         "atol": 1e-06,
         "eff_atol": 0.00044872088363092093,
-        "max_absdiff": 0.009905401865426544,
-        "max_relerr": 0.004039160584864723,
+        "max_absdiff": 0.00022487800049875162,
+        "max_relerr": 0.00018534931222729034,
         "n": 400,
-        "ok": false,
+        "ok": true,
         "rtol": 0.001
       }
     },
     "bar_b": {
-      "beta_maxabsdiff": 0.004111277072244901,
-      "beta_maxrelerr": 0.016302320241655566,
-      "beta_ok": false,
-      "deviance_actual": 940.4920570209262,
+      "beta_maxabsdiff": 0.00021042626326384095,
+      "beta_maxrelerr": 0.0012151502687742161,
+      "beta_ok": true,
+      "deviance_actual": 940.9521424287976,
       "deviance_expected": 470.7540050444836,
-      "deviance_relerr": 0.9978418599583766,
+      "deviance_relerr": 0.9988191971725932,
       "edf_per_smooth": "not_implemented",
       "edf_total": "not_implemented",
       "n_iter": "not_implemented",
@@ -860,13 +860,13 @@
     },
     "bar_c": {
       "lambda_actual": [
-        1217.4300644208026
+        1286.511003762988
       ],
       "lambda_expected": [
         1282.5105675088753
       ],
-      "lambda_max_relerr": 0.05074461352352348,
-      "lambda_ok": false
+      "lambda_max_relerr": 0.0031192228395302826,
+      "lambda_ok": true
     },
     "description": "tw(link='log') \u2014 Tweedie with profiled p, 1D smooth k=20",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_tw_log_n400_k20_cr.json",

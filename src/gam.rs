@@ -503,6 +503,10 @@ pub struct GAM {
     /// QR-based sum-to-zero Z, and gam.fit3.r:621 REML). Default false
     /// preserves the current fast/working path.
     pub mgcv_exact: bool,
+    /// When true, Tweedie p is profiled jointly with λ via an outer
+    /// Newton step on θ (mgcv's `tw()` family). Default false means
+    /// fixed-p (`Tweedie(p=...)` family).
+    pub tweedie_profile: bool,
 }
 
 impl GAM {
@@ -520,6 +524,7 @@ impl GAM {
             design_matrix: None,
             fitted: false,
             mgcv_exact: false,
+            tweedie_profile: false,
         }
     }
 

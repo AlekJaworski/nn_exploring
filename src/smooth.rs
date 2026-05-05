@@ -51,6 +51,37 @@ fn dispatch_reml_score(
     }
 }
 
+/// Like `dispatch_reml_score` but with an explicit family override.
+/// Used by the Tweedie profile-p θ Newton step to evaluate the REML
+/// score with a trial p value without mutating `self.family`.
+#[cfg(feature = "blas")]
+fn dispatch_reml_score_with_family(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+) -> Result<f64> {
+    if sp.mgcv_exact_score {
+        reml_criterion_multi_cached_mgcv_exact(
+            y,
+            x,
+            w,
+            lambdas,
+            penalties,
+            cached_xtwx,
+            sp.mp,
+            family,
+            sp.y_original.as_ref(),
+        )
+    } else {
+        reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
+    }
+}
+
 /// Central-difference gradient of the REML score wrt log(λ_j), using
 /// whichever score function dispatch_reml_score selects. Used in
 /// mgcv_exact mode where the closed-form gradient
@@ -230,6 +261,16 @@ pub struct SmoothingParameter {
     /// (always inner-loop converged) β. None ⟹ fall back to working-RSS
     /// deviance (≡ envelope at converged β).
     pub y_original: Option<Array1<f64>>,
+    /// Profile-p mode for Tweedie family (mgcv's `tw()` function).
+    ///
+    /// When `true`, the outer Newton loop optimises θ (the working parameter
+    /// for p) jointly with ρ = log(λ). The mapping is:
+    ///   p(θ) = (a + b·exp(θ))/(exp(θ)+1)  for θ ≤ 0
+    ///          (b + a·exp(-θ))/(exp(-θ)+1) for θ > 0
+    /// with defaults a=1.001, b=1.999.  Initial θ = 0 ⟹ p = 1.5.
+    pub tweedie_profile: bool,
+    /// Current θ for Tweedie profile-p. Updated each outer Newton iteration.
+    pub tweedie_theta: f64,
 }
 
 /// Refresh produced by an inner PIRLS run at a candidate λ during the
@@ -271,6 +312,8 @@ impl SmoothingParameter {
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
             y_original: None,
+            tweedie_profile: false,
+            tweedie_theta: 0.0,
         }
     }
 
@@ -291,6 +334,8 @@ impl SmoothingParameter {
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
             y_original: None,
+            tweedie_profile: false,
+            tweedie_theta: 0.0,
         }
     }
 
@@ -311,6 +356,8 @@ impl SmoothingParameter {
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
             y_original: None,
+            tweedie_profile: false,
+            tweedie_theta: 0.0,
         }
     }
 
@@ -1373,6 +1420,105 @@ impl SmoothingParameter {
                     break;
                 }
             }
+
+            // -----------------------------------------------------------------------
+            // Tweedie profile-p: Newton step on θ (the working parameter for p).
+            // Architecture A (matching mgcv): after each ρ step, also step on θ.
+            //
+            // θ ↔ p mapping (misc.c:212-224, a=1.001, b=1.999):
+            //   θ > 0: p = (b + a·exp(-θ))/(exp(-θ)+1)
+            //   θ ≤ 0: p = (b·exp(θ)+a)/(exp(θ)+1)
+            // Gradient dlr/dθ via FD on REML score at θ ± h (with PIRLS refresh).
+            // -----------------------------------------------------------------------
+            if self.tweedie_profile {
+                let theta = self.tweedie_theta;
+                let h_th: f64 = 1e-3;
+                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+
+                // Helper: map θ → p (mgcv convention, a=1.001 b=1.999)
+                fn tw_theta_to_p(th: f64) -> f64 {
+                    let a = 1.001_f64;
+                    let b = 1.999_f64;
+                    if th > 0.0 {
+                        let e = (-th).exp();
+                        (b + a * e) / (e + 1.0)
+                    } else {
+                        let e = th.exp();
+                        (b * e + a) / (e + 1.0)
+                    }
+                }
+
+                // Inline helper: evaluate REML score at trial θ using
+                // the frozen working data (y_local, w_local, xtwx_local)
+                // from the start-of-iteration PIRLS refresh. We do NOT
+                // re-run PIRLS for the θ step; the current working linearisation
+                // is a good approximation since p changes slowly.
+                // Temporarily set self.family so that `dispatch_reml_score_with_family`
+                // uses the trial p for the score formula (ls, estimate_phi_mgcv).
+                macro_rules! tw_eval {
+                    ($th_trial:expr) => {{
+                        let th_trial: f64 = $th_trial;
+                        let p_trial = tw_theta_to_p(th_trial).max(1.001_f64).min(1.999_f64);
+                        let trial_fam = crate::pirls::Family::Tweedie { p: p_trial };
+                        dispatch_reml_score_with_family(
+                            self,
+                            &y_local,
+                            x,
+                            &w_local,
+                            &current_lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            trial_fam,
+                        )
+                    }};
+                }
+
+                // FD gradient and curvature wrt θ, evaluated at the updated λ.
+                // Also compute the center score (at current θ, updated λ) for
+                // the line-search comparison baseline.
+                let reml_center = tw_eval!(theta);
+                let reml_plus = tw_eval!(theta + h_th);
+                let reml_minus = tw_eval!(theta - h_th);
+
+                if let (Ok(rc), Ok(rp), Ok(rm)) = (reml_center, reml_plus, reml_minus) {
+                    let dlr_dth = (rp - rm) / (2.0 * h_th);
+                    let d2lr_dth2 = (rp - 2.0 * rc + rm) / (h_th * h_th);
+
+                    // Newton step: δθ = -g / |H| with |H| floored for stability
+                    let denom = d2lr_dth2.abs().max(1e-4);
+                    let delta_theta = -(dlr_dth / denom);
+                    let delta_theta = delta_theta.max(-2.0_f64).min(2.0_f64);
+
+                    // Line-search on θ: try full step, then half-step.
+                    // Compare against rc (REML at current θ with updated λ).
+                    let mut accepted_theta = theta;
+                    let candidate = theta + delta_theta;
+                    if let Ok(r_new) = tw_eval!(candidate) {
+                        if r_new < rc {
+                            accepted_theta = candidate;
+                        } else {
+                            let half_cand = theta + delta_theta * 0.5;
+                            if let Ok(r_half) = tw_eval!(half_cand) {
+                                if r_half < rc {
+                                    accepted_theta = half_cand;
+                                }
+                            }
+                        }
+                    }
+
+                    self.tweedie_theta = accepted_theta;
+                    let new_p = tw_theta_to_p(accepted_theta).max(1.001).min(1.999);
+                    self.family = crate::pirls::Family::Tweedie { p: new_p };
+
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!(
+                            "[PROFILE]   Tweedie profile-p: θ {:.4}→{:.4} p={:.4} dlr/dθ={:.4e}",
+                            theta, accepted_theta, new_p, dlr_dth
+                        );
+                    }
+                }
+            }
+            // End of Tweedie profile-p θ step
         }
 
         // Update final lambdas

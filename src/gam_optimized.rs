@@ -530,6 +530,10 @@ impl GAM {
             | crate::pirls::Family::Tweedie { .. } => None,
         };
         smoothing_params.family = self.family;
+        // Profile-p for Tweedie: enable the θ Newton step in the outer loop.
+        // Initial θ=0 ⟹ p=1.5 (midpoint of [1.001, 1.999]).
+        smoothing_params.tweedie_profile = self.tweedie_profile;
+        smoothing_params.tweedie_theta = 0.0; // start at p=1.5
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For
         // non-Gaussian, the optimizer is called with the working response z;
         // y_original carries the true y so IFT can evaluate
@@ -715,6 +719,79 @@ impl GAM {
                     "[PROFILE] Per-trial PIRLS refresh: {} calls, {} total inner IRLS iters",
                     callback_pirls_calls, callback_pirls_iters
                 );
+            }
+
+            // After the first Newton pass, propagate the converged p back to
+            // self.family so that subsequent PIRLS + Newton use the correct p.
+            if self.tweedie_profile {
+                self.family = smoothing_params.family;
+                // Second Newton pass: re-optimize λ with the converged p.
+                // The first pass optimized λ at p=1.5 (the callback's captured
+                // family). Now that p is updated, we run a second compact pass
+                // (≤40 iterations) with the correct p so λ converges at the
+                // joint (λ, p) optimum. This mirrors mgcv's joint outer Newton.
+                if std::env::var("MGCV_PROFILE").is_ok() {
+                    eprintln!("[PROFILE] Tweedie profile-p: second Newton pass at p={:.4}",
+                        match self.family { crate::pirls::Family::Tweedie { p } => p, _ => 1.5 });
+                }
+                let pirls2 = cache.run_pirls(
+                    y,
+                    &smoothing_params.lambda,
+                    self.family,
+                    max_inner_iter,
+                    tolerance,
+                    xtx_ref,
+                )?;
+                let w2 = pirls2.weights.clone();
+                let mut z2 = pirls2.linear_predictor.clone();
+                for i in 0..z2.len() {
+                    let dmu_deta = self.family.d_inverse_link(pirls2.linear_predictor[i]);
+                    if dmu_deta.abs() > 1e-10 {
+                        z2[i] += (y[i] - pirls2.fitted_values[i]) / dmu_deta;
+                    }
+                }
+                let xtwx2 = if let Some(ref disc) = cache.discretized {
+                    disc.compute_xtwx(&w2)
+                } else {
+                    crate::reml::compute_xtwx(&cache.design_matrix, &w2)
+                };
+                let family2 = self.family;
+                let mut cb2 = |trial_lambdas: &[f64]| -> Result<crate::smooth::PirlsRefresh> {
+                    let res = cache.run_pirls(y, trial_lambdas, family2,
+                                             (max_inner_iter / 5).max(15), tolerance, xtx_ref)?;
+                    let mut z = res.linear_predictor.clone();
+                    for i in 0..z.len() {
+                        let dmu = family2.d_inverse_link(res.linear_predictor[i]);
+                        if dmu.abs() > 1e-10 { z[i] += (y[i] - res.fitted_values[i]) / dmu; }
+                    }
+                    let xtwx = if let Some(ref disc) = cache.discretized {
+                        disc.compute_xtwx(&res.weights)
+                    } else {
+                        crate::reml::compute_xtwx(&cache.design_matrix, &res.weights)
+                    };
+                    Ok(crate::smooth::PirlsRefresh {
+                        beta: res.coefficients,
+                        weights: res.weights,
+                        working_response: z,
+                        xtwx,
+                    })
+                };
+                // Reset tweedie_profile on smoothing_params so the second pass
+                // only optimizes λ (p is already converged).
+                smoothing_params.tweedie_profile = false;
+                let _ = smoothing_params.optimize_with_beta_xtwx_and_pirls_callback(
+                    &z2,
+                    &cache.design_matrix,
+                    &w2,
+                    &cache.penalties,
+                    40, // cap second pass
+                    tolerance,
+                    Some(&pirls2.coefficients),
+                    Some(&xtwx2),
+                    Some(&mut cb2),
+                );
+                // Restore profile flag for store_results context
+                smoothing_params.tweedie_profile = true;
             }
 
             // Step 3: Final PiRLS with optimal lambda (uses discretized scatter-gather)

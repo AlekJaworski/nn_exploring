@@ -85,19 +85,10 @@ _BINOMIAL_LOGIT_SMALL_N_GAP_REASON = (
     "non-unique optima here. Tracked as Defer-1 (post #44 edge.correct)."
 )
 
-_TW_PROFILE_P_REASON = (
-    "Tweedie profile-p (tw() family): the tw() fixture uses mgcv's built-in "
-    "profile-p joint optimisation (profiling over p and φ simultaneously). "
-    "Our Rust implementation only supports fixed p (defaulting to 1.5) — "
-    "profile-p is Phase F2. With fixed p=1.5 the fit converges but λ and "
-    "predictions differ from mgcv's profile-p solution (~1e-2 absdiff)."
-)
-
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
         "2d_gamma_inverse_n1000_k10_cr": _GAMMA_INVERSE_GAP_REASON,
         "2d_binomial_logit_n200_k10_cr": _BINOMIAL_LOGIT_SMALL_N_GAP_REASON,
-        "1d_tw_log_n400_k20_cr": _TW_PROFILE_P_REASON,
     },
 }
 

@@ -182,8 +182,9 @@ impl PyGAM {
                 let fixed_df = df.unwrap_or(0.0); // 0.0 = profile
                 Family::TDist { df: fixed_df, sigma2: 1.0 }
             }
-            // Tweedie with log link (1 < p < 2). `p` defaults to 1.5 (fixed-p mode).
-            // Profile-p is not yet implemented; p=1.5 is used when p is not supplied.
+            // Tweedie with log link (1 < p < 2).
+            // p=None → profile-p mode (mgcv's tw()), starting at p=1.5.
+            // p=Some(val) → fixed-p mode (mgcv's Tweedie(p=val)).
             (Some("tweedie"), None) | (Some("tweedie"), Some("log")) => {
                 let tweedie_p = p.unwrap_or(1.5);
                 if tweedie_p <= 1.0 || tweedie_p >= 2.0 {
@@ -215,6 +216,12 @@ impl PyGAM {
         // `mgcv_exact=False` explicitly for the legacy fast path.
         let exact = mgcv_exact.unwrap_or(true);
         g.mgcv_exact = exact;
+        // Profile-p for Tweedie: enabled when the caller passes p=None
+        // (mgcv's tw() family). Fixed-p mode uses p=Some(val).
+        let is_tweedie = matches!(fam, Family::Tweedie { .. });
+        if is_tweedie && p.is_none() {
+            g.tweedie_profile = true;
+        }
         Ok(PyGAM { inner: g, mgcv_exact: exact })
     }
 

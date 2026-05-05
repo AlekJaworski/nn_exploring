@@ -242,7 +242,7 @@ impl Family {
             // For y=0: log f = -μ^(2-p)/(φ*(2-p)) → at μ=y=0 this is 0.
             Family::Tweedie { p } => {
                 let phi = scale;
-                let (log_w, _) = tweedie_series(y, phi, *p);
+                let (log_w, _, _) = tweedie_series(y, phi, *p);
                 let mut ls = 0.0f64;
                 for (i, &yi) in y.iter().enumerate() {
                     if yi <= 0.0 {
@@ -289,7 +289,7 @@ impl Family {
             // We get dlogW/drho from tweedie_series as the second output.
             Family::Tweedie { p } => {
                 let phi = scale;
-                let (log_w, dlog_w_drho) = tweedie_series(y, phi, *p);
+                let (log_w, dlog_w_drho, _) = tweedie_series(y, phi, *p);
                 let _ = log_w; // log_w already used for ls; here we only need derivs
                 let mut dls = 0.0f64;
                 for (i, &yi) in y.iter().enumerate() {
@@ -503,25 +503,39 @@ fn log_gamma(x: f64) -> f64 {
 /// mirroring `tweedious` in mgcv/src/misc.c:170.
 ///
 /// For y=0 entries: returns (0.0, 0.0) — the density for y=0 doesn't need the series.
-fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
+/// Dunn-Smyth (2005) series for the Tweedie log-density (1 < p < 2).
+///
+/// Returns `(log_W, dlog_W_drho, dlog_W_dp)` per observation, where:
+/// - `log_W[i]` = log of the series sum W = Σ_j W_j for y[i]
+/// - `dlog_W_drho[i]` = d(log W)/d(rho) where rho = log(phi)
+/// - `dlog_W_dp[i]` = d(log W)/dp (used for profile-p Newton step on theta)
+///
+/// The wp_base term for dlogW/dp comes from misc.c:231:
+///   wp_base = (log(-(1-p)) + rho) / (1-p)^2 - alpha/(1-p) + 1/(2-p)
+/// Per j: wp1_j_base = j * wp_base + (j/(1-p)^2) * digamma(-j*alpha)
+/// Per observation: subtract j * log(y) / (1-p)^2 to get the full wp1_j
+/// Then dlogW/dp = sum(wj_scaled * wp1j) / wi  (C misc.c:503: w1p[i] = wdlogwdp/wi)
+fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = y.len();
     let mut log_w_out = vec![0.0f64; n];
     let mut dlog_w_drho_out = vec![0.0f64; n];
+    let mut dlog_w_dp_out = vec![0.0f64; n];
 
     let onep = 1.0 - p;
+    let onep2 = onep * onep; // (1-p)^2
     let twop = 2.0 - p;
     let alpha = twop / onep; // (2-p)/(1-p), negative for 1<p<2
     let rho = phi.ln();
 
     // w_base = j * (alpha*log(p-1) + rho/onep - log(2-p))
-    // Note: p-1 > 0 for p>1, so log(p-1) is real. (p-1) = -(onep) so log(p-1) = log(-onep).
-    // alpha*log(p-1) = ((2-p)/(1-p)) * log(p-1) — both numerator and 1-p<0, log(p-1)>0 for p>1
-    // In C: w_base = alpha * log(p-1) + rho/onep - log(2-p)
-    // p-1 > 0 (since p>1), onep = 1-p < 0 for 1<p<2, so rho/onep < 0 if phi>1
-    let log_pm1 = (p - 1.0).ln(); // log(p-1) >= 0 for p >= 2, but for 1<p<2 it's < 0 when p<2
+    // Note: log(-onep) = log(p-1) since onep = 1-p < 0 for 1<p<2.
+    let log_pm1 = (p - 1.0).ln(); // = log(-onep) = log(p-1)
     let w_base = alpha * log_pm1 + rho / onep - twop.ln();
     // wb1_base: for obs i, wb1_j = -j/onep (= j/|onep| > 0 since onep < 0)
     let wb1_base = -1.0 / onep; // multiply by j to get wb1_j
+    // wp_base for dlogW/dp: misc.c:231
+    //   wp_base = (log(-onep) + rho)/onep^2 - alpha/onep + 1/(2-p)
+    let wp_base = (log_pm1 + rho) / onep2 - alpha / onep + 1.0 / twop;
 
     let log_eps = f64::EPSILON * f64::EPSILON; // tolerance for convergence (~5e-32)
 
@@ -531,18 +545,17 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
             // y=0: no series needed
             log_w_out[i] = 0.0;
             dlog_w_drho_out[i] = 0.0;
+            dlog_w_dp_out[i] = 0.0;
             continue;
         }
 
-        let alogy_i = alpha * yi.ln(); // alpha * log(y_i), used as subtracted from each j*log(W_j)
+        let logy_i = yi.ln();
+        let alogy_i = alpha * logy_i; // alpha * log(y_i)
+        let logy1p2_i = logy_i / onep2; // log(y_i) / (1-p)^2  (for wp1 adjustment per obs)
 
         // j_max: the series mode near y^(2-p) / (phi*(2-p))
         let x = yi.powf(twop) / (phi * twop);
         let j_max = (x.floor() as i64).max(1);
-
-        // Collect all (log W_j) terms we need, sweeping up and down from j_max.
-        // We use a bounded buffer approach: start at j_max, expand until convergence.
-        // For typical Tweedie data (p=1.5, phi~1) j_max is O(y^0.5) which is small.
 
         // First pass: find wmax by evaluating at j_max
         let wmax_j = j_max;
@@ -556,8 +569,17 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
         // Accumulate sums (scaled by exp(-wmax)):
         // wi = Σ exp(wj - wmax) = W / exp(wmax)
         // w1i = Σ exp(wj - wmax) * wb1_j  (for dlogW/drho numerator)
+        // wdlogwdp = Σ exp(wj - wmax) * wp1_j  (for dlogW/dp numerator)
         let mut wi = 0.0f64;
         let mut w1i = 0.0f64;
+        let mut wdlogwdp = 0.0f64;
+
+        // Helper: compute wp1_j = j * wp_base + (j/onep2) * digamma(-j*alpha) - j * logy1p2_i
+        // This is the per-j derivative of log W_j w.r.t. p (misc.c:333).
+        let wp1_j = |jf: f64| -> f64 {
+            let dig_term = (jf / onep2) * digamma(-jf * alpha);
+            jf * wp_base + dig_term - jf * logy1p2_i
+        };
 
         // Upsweep from j_max upward until wj < wmin
         let mut j = wmax_j;
@@ -566,7 +588,8 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
             let wj = jf * w_base - log_gamma(jf + 1.0) - log_gamma(-jf * alpha) - jf * alogy_i;
             let wj_scaled = (wj - wmax_val).exp();
             wi += wj_scaled;
-            w1i += wj_scaled * jf * wb1_base; // wb1_j = j * (-1/onep) = j * wb1_base
+            w1i += wj_scaled * jf * wb1_base; // wb1_j = j * (-1/onep)
+            wdlogwdp += wj_scaled * wp1_j(jf);
             if wj < wmin {
                 break;
             }
@@ -585,6 +608,7 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
             let wj_scaled = (wj - wmax_val).exp();
             wi += wj_scaled;
             w1i += wj_scaled * jf * wb1_base;
+            wdlogwdp += wj_scaled * wp1_j(jf);
             if wj < wmin {
                 break;
             }
@@ -593,14 +617,39 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
 
         // log W = wmax + log(wi)
         log_w_out[i] = wmax_val + wi.ln();
-        // d(log W)/d(rho) from C misc.c:502: w1[i] = -w1i/wi
-        // where wb1[jb] = -j/onep and w1i = sum(W_j_scaled * wb1[j]).
-        // Our w1i = sum(W_j_scaled * j * (-1/onep)) matches C's w1i,
-        // so we apply the same negation: dlogW/drho = -w1i/wi.
+        // d(log W)/d(rho): w1[i] = -w1i/wi  (misc.c:502)
         dlog_w_drho_out[i] = -w1i / wi;
+        // d(log W)/dp: w1p[i] = wdlogwdp / wi  (misc.c:503)
+        dlog_w_dp_out[i] = wdlogwdp / wi;
     }
 
-    (log_w_out, dlog_w_drho_out)
+    (log_w_out, dlog_w_drho_out, dlog_w_dp_out)
+}
+
+/// Compute dls/dp for the Tweedie family — the derivative of the saturated
+/// log-likelihood w.r.t. p. Used by the profile-p outer Newton step.
+///
+/// From ldTweedie (gam.fit3.r:2924): for y>0,
+///   dls_i/dp = l_base_i * (log(mu) - 1/(2-p))  [at mu=y, log(mu)=log(y)]
+///            + dlogW_i/dp
+/// For y=0: from gam.fit3.r:2924:
+///   dls_i/dp = -ls_i * (log(y) - 1/(2-p))  ... but ls_i = 0 at y=0 so dls=0.
+pub(crate) fn tweedie_dls_dp(y: &Array1<f64>, phi: f64, p: f64) -> f64 {
+    let (_log_w, _dlog_w_drho, dlog_w_dp) = tweedie_series(y, phi, p);
+    let twop = 2.0 - p;
+    let onep = 1.0 - p;
+    let mut dls = 0.0f64;
+    for (i, &yi) in y.iter().enumerate() {
+        if yi <= 0.0 {
+            continue;
+        }
+        let logy = yi.ln();
+        // l_base at mu=y: y^(1-p) * y * (1/onep - 1/twop) / phi
+        let l_base = yi.powf(onep) * yi * (1.0 / onep - 1.0 / twop) / phi;
+        // dls_i/dp = l_base_i * (log(y_i) - 1/(2-p)) + dlogW_i/dp
+        dls += l_base * (logy - 1.0 / twop) + dlog_w_dp[i];
+    }
+    dls
 }
 
 /// PiRLS fitting result

@@ -79,6 +79,13 @@ def _fit(fix: Fixture):
         link_kw: dict = {}
         if not _expects_canonical_link(fix):
             link_kw["link"] = inp.link
+        # Tweedie family: distinguish fixed-p (family="Tweedie") from
+        # profile-p (family="tw"). For fixed-p, pass p=1.5 explicitly
+        # so the constructor knows not to profile. For profile-p (tw()),
+        # omit p (or pass None) to trigger the outer-Newton θ step.
+        if inp.family == "Tweedie":
+            link_kw["p"] = 1.5
+        # For inp.family == "tw": omit p → profile-p mode (p=None default)
         try:
             gam = mgcv_rust.GAM(family, **link_kw)
         except Exception as exc:  # pragma: no cover - depends on Rust build
