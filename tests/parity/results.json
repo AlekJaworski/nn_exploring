@@ -820,6 +820,120 @@
       "extrap": {
         "atol": 0.001,
         "eff_atol": 0.001,
+        "max_absdiff": 0.009917884417805611,
+        "max_relerr": 0.006300574279740425,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.00043581321320052316,
+        "max_absdiff": 0.00994071364641469,
+        "max_relerr": 0.004028801037477026,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.00044872088363092093,
+        "max_absdiff": 0.009905401865426544,
+        "max_relerr": 0.004039160584864723,
+        "n": 400,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.004111277072244901,
+      "beta_maxrelerr": 0.016302320241655566,
+      "beta_ok": false,
+      "deviance_actual": 940.4920570209262,
+      "deviance_expected": 470.7540050444836,
+      "deviance_relerr": 0.9978418599583766,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        1217.4300644208026
+      ],
+      "lambda_expected": [
+        1282.5105675088753
+      ],
+      "lambda_max_relerr": 0.05074461352352348,
+      "lambda_ok": false
+    },
+    "description": "tw(link='log') \u2014 Tweedie with profiled p, 1D smooth k=20",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_tw_log_n400_k20_cr.json",
+    "name": "1d_tw_log_n400_k20_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "eff_atol": 0.001,
+        "max_absdiff": 0.0007437103607039752,
+        "max_relerr": 0.00046928140972797653,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.00043665330700048147,
+        "max_absdiff": 0.00040270006389286905,
+        "max_relerr": 0.0002359007611601374,
+        "n": 100,
+        "ok": true,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.00044965169194433616,
+        "max_absdiff": 0.00040319848149605875,
+        "max_relerr": 0.0002512725173470508,
+        "n": 400,
+        "ok": true,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.0002774835274006182,
+      "beta_maxrelerr": 0.001491688222784022,
+      "beta_ok": true,
+      "deviance_actual": 940.4920570209262,
+      "deviance_expected": 462.0667025647366,
+      "deviance_relerr": 1.035403225985887,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        1217.4300644208026
+      ],
+      "lambda_expected": [
+        1212.342146156453
+      ],
+      "lambda_max_relerr": 0.00419676762082392,
+      "lambda_ok": true
+    },
+    "description": "Tweedie(p=1.5) log link, 1D smooth k=20 \u2014 fixed-p",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_tweedie_log_n400_k20_cr_p15.json",
+    "name": "1d_tweedie_log_n400_k20_cr_p15"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "eff_atol": 0.001,
         "max_absdiff": 0.0007751354634408791,
         "max_relerr": 0.0032064696574828334,
         "n": 20,

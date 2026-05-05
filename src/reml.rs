@@ -160,6 +160,19 @@ pub fn glm_deviance(
             }
             // TDist: use squared residual as deviance proxy (identity link, μ = η)
             Family::TDist { .. } => (yi - mui).powi(2),
+            // Tweedie deviance for 1 < p < 2
+            Family::Tweedie { p } => {
+                let twop = 2.0 - p;
+                let onep = 1.0 - p;
+                let mu_c = mui.max(1e-15);
+                if yi <= 0.0 {
+                    2.0 * mu_c.powf(twop) / twop
+                } else {
+                    2.0 * (yi.powf(twop) / (onep * twop)
+                        - yi * mu_c.powf(onep) / onep
+                        + mu_c.powf(twop) / twop)
+                }
+            }
         };
         dev += dev_i;
     }

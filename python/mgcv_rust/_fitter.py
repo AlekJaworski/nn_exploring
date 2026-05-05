@@ -186,6 +186,7 @@ class GAMFitter:
         family: str = "gaussian",
         link: str = "identity",
         df: Optional[float] = None,
+        tweedie_p: Optional[float] = None,
         term_k_mapping: Optional[dict[str, int]] = None,
         term_pc_mapping: Optional[dict[str, float]] = None,
         predictor_basis_map: Optional[dict[str, str]] = None,
@@ -201,6 +202,7 @@ class GAMFitter:
         self.min_points_to_save = min_points_to_save
         self.max_points_to_save = max_points_to_save
         self.df = df  # degrees of freedom for t-dist family (None = profile)
+        self.tweedie_p = tweedie_p  # power parameter for Tweedie family (None → default 1.5)
         self.method = method
         self.family = family
         self.link = link
@@ -322,6 +324,9 @@ class GAMFitter:
         if self.family == "t-dist":
             # Pass optional df kwarg — Rust side accepts df=None for profiling
             return _NativeGAM(family="t-dist", df=self.df)
+        if self.family == "tweedie":
+            # Pass optional p kwarg — Rust side defaults to 1.5 for fixed-p mode
+            return _NativeGAM(family="tweedie", link="log", p=self.tweedie_p)
         return _NativeGAM(self.family, link=self.link)
 
     def _build_pc_values(self, predictors: list[str]) -> list[float | None] | None:

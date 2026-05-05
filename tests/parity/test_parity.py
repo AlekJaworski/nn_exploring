@@ -33,6 +33,11 @@ _FAMILY_MAP = {
     "poisson": "poisson",
     "Gamma": "gamma",
     "gamma": "gamma",
+    # Tweedie family — both fixed-p (Tweedie) and profile-p (tw())
+    # use the same Rust family string. The fixed-p case passes p as a
+    # constructor kwarg; the profile-p case omits p (or passes None).
+    "Tweedie": "tweedie",
+    "tw": "tweedie",
 }
 
 # mgcv_rust's Family enum has no link parameter — only the canonical link
@@ -46,6 +51,11 @@ _CANONICAL_LINK = {
     "poisson": "log",
     "Gamma": "inverse",
     "gamma": "inverse",
+    # No canonical link for Tweedie in our wrapper — log is the
+    # standard choice; treat it as canonical so we don't pass `link=`
+    # explicitly (the wrapper picks log when family="tweedie").
+    "Tweedie": "log",
+    "tw": "log",
 }
 
 

@@ -41,6 +41,16 @@ pub enum Family {
     /// `fit_pirls_tdist` — the `variance` method here is used only by code
     /// paths that do not call the tdist-specific fitter.
     TDist { df: f64, sigma2: f64 },
+    /// Tweedie distribution with log link (1 < p < 2).
+    ///
+    /// Log link: η = log(μ), μ = exp(η). Variance function V(μ) = μ^p.
+    /// The dispersion φ is profiled (not fixed at 1), similar to Gamma.
+    ///
+    /// The saturated log-likelihood is computed via the Dunn-Smyth (2005)
+    /// series summation for 1 < p < 2 — a port of mgcv's `tweedious` C
+    /// function (misc.c:170). For y=0 the density simplifies; for y>0 the
+    /// series `W = Σ_j W_j` is summed using log-sum-exp to avoid overflow.
+    Tweedie { p: f64 },
 }
 
 impl Family {
@@ -57,6 +67,7 @@ impl Family {
             // (dμ/dη)²/V(μ) = 1/σ² gives the baseline Fisher weight.
             // The actual per-obs t-weights are computed in fit_pirls_tdist.
             Family::TDist { sigma2, .. } => *sigma2,
+            Family::Tweedie { p } => mu.powf(*p),
         }
     }
 
@@ -65,7 +76,7 @@ impl Family {
         match self {
             Family::Gaussian | Family::TDist { .. } => mu,
             Family::Binomial => (mu / (1.0 - mu)).ln(),
-            Family::Poisson | Family::GammaLog => mu.ln(),
+            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => mu.ln(),
             Family::Gamma => 1.0 / mu,
         }
     }
@@ -78,7 +89,7 @@ impl Family {
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
             }
-            Family::Poisson | Family::GammaLog => {
+            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => {
                 let eta_safe = eta.min(20.0);
                 eta_safe.exp()
             }
@@ -97,7 +108,7 @@ impl Family {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
             }
-            Family::Poisson | Family::GammaLog => eta.exp(),
+            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => eta.exp(),
             Family::Gamma => -1.0 / (eta * eta),
         }
     }
@@ -111,18 +122,20 @@ impl Family {
             Family::Binomial => 1.0 - 2.0 * mu,
             Family::Poisson => 1.0,
             Family::Gamma | Family::GammaLog => 2.0 * mu,
+            Family::Tweedie { p } => p * mu.powf(p - 1.0),
         }
     }
 
     /// Second derivative of variance function: d²V/dμ².
     /// Used by mgcv's α₁ derivative (`gdi.c:2548`) needed for the Tk
     /// weight-derivative term in the REML gradient.
-    pub fn d2var(&self, _mu: f64) -> f64 {
+    pub fn d2var(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => 0.0,
             Family::Binomial => -2.0,
             Family::Poisson => 0.0,
             Family::Gamma | Family::GammaLog => 2.0,
+            Family::Tweedie { p } => p * (p - 1.0) * mu.powf(p - 2.0),
         }
     }
 
@@ -134,7 +147,7 @@ impl Family {
                 let one_minus = 1.0 - mu;
                 -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
             }
-            Family::Poisson | Family::GammaLog => -1.0 / (mu * mu),
+            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => -1.0 / (mu * mu),
             Family::Gamma => 2.0 / (mu * mu * mu),
         }
     }
@@ -147,7 +160,7 @@ impl Family {
                 let one_minus = 1.0 - mu;
                 2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
             }
-            Family::Poisson | Family::GammaLog => 2.0 / (mu * mu * mu),
+            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => 2.0 / (mu * mu * mu),
             Family::Gamma => -6.0 / (mu * mu * mu * mu),
         }
     }
@@ -162,7 +175,8 @@ impl Family {
             | Family::Poisson
             | Family::Gamma
             | Family::TDist { .. } => true,
-            Family::GammaLog => false,
+            // Tweedie canonical link is μ^(1-p); log link is non-canonical → full Newton.
+            Family::GammaLog | Family::Tweedie { .. } => false,
         }
     }
 
@@ -216,6 +230,33 @@ impl Family {
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
+            // Tweedie saturated log-likelihood for 1 < p < 2, log link.
+            // At y=μ: log f(y; y, φ, p) = l_base(y, φ, p) - log(y) + log W(y, φ, p)
+            // where l_base = μ^(1-p) * (y/(1-p) - μ/(2-p)) / φ  evaluated at μ=y.
+            //   = y^(1-p) * y * (1/(1-p) - 1/(2-p)) / φ
+            //   = y^(2-p) * (1/((1-p)(2-p))) * (2-p-(1-p)) / φ
+            //   = y^(2-p) / (φ * (2-p)) * (-1)  ... simplified:
+            // At μ=y: l_base = y^(1-p) * (y/(1-p) - y/(2-p)) / φ
+            //                = y^(2-p) * (1/(1-p) - 1/(2-p)) / φ
+            // And log W is the Dunn-Smyth series log-sum.
+            // For y=0: log f = -μ^(2-p)/(φ*(2-p)) → at μ=y=0 this is 0.
+            Family::Tweedie { p } => {
+                let phi = scale;
+                let (log_w, _) = tweedie_series(y, phi, *p);
+                let mut ls = 0.0f64;
+                for (i, &yi) in y.iter().enumerate() {
+                    if yi <= 0.0 {
+                        // log f(0; 0, φ, p) = 0 at y=μ=0
+                        continue;
+                    }
+                    let onep = 1.0 - p;
+                    let twop = 2.0 - p;
+                    // l_base at μ=y: y^(1-p) * (y/(1-p) - y/(2-p)) / φ
+                    let l_base = yi.powf(onep) * yi * (1.0 / onep - 1.0 / twop) / phi;
+                    ls += l_base - yi.ln() + log_w[i];
+                }
+                ls
+            }
         }
     }
 
@@ -241,6 +282,29 @@ impl Family {
                 n * (digamma(inv_phi) + scale.ln()) / (scale * scale)
             }
             Family::TDist { .. } => -n / (2.0 * scale),
+            // Tweedie dls/dφ: from ldTweedie0 R code (gam.fit3.r:2799):
+            //   ld[,2] = -l_base/φ + dlogW/dφ
+            // where l_base is the analytic density term at μ=y, and
+            // dlogW/dφ = (dlogW/drho) * (1/φ)  [since rho = log φ].
+            // We get dlogW/drho from tweedie_series as the second output.
+            Family::Tweedie { p } => {
+                let phi = scale;
+                let (log_w, dlog_w_drho) = tweedie_series(y, phi, *p);
+                let _ = log_w; // log_w already used for ls; here we only need derivs
+                let mut dls = 0.0f64;
+                for (i, &yi) in y.iter().enumerate() {
+                    if yi <= 0.0 {
+                        // For y=0: ls_i = -μ^(2-p)/(φ*(2-p)) at μ=y=0 is 0 → dls=0
+                        continue;
+                    }
+                    let onep = 1.0 - p;
+                    let twop = 2.0 - p;
+                    let l_base = yi.powf(onep) * yi * (1.0 / onep - 1.0 / twop) / phi;
+                    // dls_i/dphi = -l_base/phi + dlogW_i/drho / phi
+                    dls += -l_base / phi + dlog_w_drho[i] / phi;
+                }
+                dls
+            }
         }
     }
 }
@@ -356,6 +420,40 @@ impl Family {
                 }
                 phi
             }
+            // Tweedie: profile φ via Newton-Raphson on the REML score derivative
+            //   dlr/dφ = -dp/(2φ²) - dls/dφ - mp/(2φ) = 0
+            // We solve this numerically using FD for the second derivative of ls,
+            // since the Tweedie series ls has no closed-form second derivative here.
+            Family::Tweedie { p } => {
+                let p = *p;
+                let mut phi = phi_init.max(1e-8);
+                for _ in 0..30 {
+                    let dls = self.dls_dsigma2(y, phi);
+                    // dlr/dphi = -dp/(2 phi^2) - dls/dphi - mp/(2 phi)
+                    let f = -dp / (2.0 * phi * phi) - dls - mp_f / (2.0 * phi);
+                    if f.abs() < 1e-10 * (dp.abs() / (phi * phi) + 1.0) {
+                        break;
+                    }
+                    // FD for df/dphi
+                    let h = phi * 1e-5;
+                    let dls_plus = Family::Tweedie { p }.dls_dsigma2(y, phi + h);
+                    let dls_minus = Family::Tweedie { p }.dls_dsigma2(y, phi - h);
+                    let fp = dp / (phi * phi * phi)
+                        - (dls_plus - dls_minus) / (2.0 * h)
+                        + mp_f / (2.0 * phi * phi);
+                    if fp.abs() < 1e-20 {
+                        break;
+                    }
+                    let delta = -f / fp;
+                    let phi_new = (phi + delta).max(phi * 0.1).min(phi * 10.0);
+                    let converged = (phi_new - phi).abs() < 1e-12 * phi;
+                    phi = phi_new;
+                    if converged {
+                        break;
+                    }
+                }
+                phi
+            }
         }
     }
 }
@@ -388,6 +486,121 @@ fn log_gamma(x: f64) -> f64 {
     }
     let t = x + g + 0.5;
     0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+
+/// Dunn-Smyth (2005) series for the Tweedie log-density (1 < p < 2).
+///
+/// Returns `(log_W, dlog_W_drho)` per observation, where:
+/// - `log_W[i]` = log of the series sum W = Σ_j W_j for y[i]
+/// - `dlog_W_drho[i]` = d(log W)/d(rho) where rho = log(phi)
+///
+/// The series term is (Dunn & Smyth 2005, eq after eq.4):
+///   log W_j = j*(alpha*log(p-1) + rho/onep - log(2-p)) - lgamma(j+1) - lgamma(-j*alpha)
+///             - j*alpha*log(y)
+/// where alpha = (2-p)/(1-p), onep = 1-p.
+///
+/// Summation is done via log-sum-exp (wmax trick) to avoid overflow,
+/// mirroring `tweedious` in mgcv/src/misc.c:170.
+///
+/// For y=0 entries: returns (0.0, 0.0) — the density for y=0 doesn't need the series.
+fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>) {
+    let n = y.len();
+    let mut log_w_out = vec![0.0f64; n];
+    let mut dlog_w_drho_out = vec![0.0f64; n];
+
+    let onep = 1.0 - p;
+    let twop = 2.0 - p;
+    let alpha = twop / onep; // (2-p)/(1-p), negative for 1<p<2
+    let rho = phi.ln();
+
+    // w_base = j * (alpha*log(p-1) + rho/onep - log(2-p))
+    // Note: p-1 > 0 for p>1, so log(p-1) is real. (p-1) = -(onep) so log(p-1) = log(-onep).
+    // alpha*log(p-1) = ((2-p)/(1-p)) * log(p-1) — both numerator and 1-p<0, log(p-1)>0 for p>1
+    // In C: w_base = alpha * log(p-1) + rho/onep - log(2-p)
+    // p-1 > 0 (since p>1), onep = 1-p < 0 for 1<p<2, so rho/onep < 0 if phi>1
+    let log_pm1 = (p - 1.0).ln(); // log(p-1) >= 0 for p >= 2, but for 1<p<2 it's < 0 when p<2
+    let w_base = alpha * log_pm1 + rho / onep - twop.ln();
+    // wb1_base: for obs i, wb1_j = -j/onep (= j/|onep| > 0 since onep < 0)
+    let wb1_base = -1.0 / onep; // multiply by j to get wb1_j
+
+    let log_eps = f64::EPSILON * f64::EPSILON; // tolerance for convergence (~5e-32)
+
+    for i in 0..n {
+        let yi = y[i];
+        if yi <= 0.0 {
+            // y=0: no series needed
+            log_w_out[i] = 0.0;
+            dlog_w_drho_out[i] = 0.0;
+            continue;
+        }
+
+        let alogy_i = alpha * yi.ln(); // alpha * log(y_i), used as subtracted from each j*log(W_j)
+
+        // j_max: the series mode near y^(2-p) / (phi*(2-p))
+        let x = yi.powf(twop) / (phi * twop);
+        let j_max = (x.floor() as i64).max(1);
+
+        // Collect all (log W_j) terms we need, sweeping up and down from j_max.
+        // We use a bounded buffer approach: start at j_max, expand until convergence.
+        // For typical Tweedie data (p=1.5, phi~1) j_max is O(y^0.5) which is small.
+
+        // First pass: find wmax by evaluating at j_max
+        let wmax_j = j_max;
+        let wmax_val = {
+            let j = wmax_j as f64;
+            j * w_base - log_gamma(j + 1.0) - log_gamma(-j * alpha) - j * alogy_i
+        };
+
+        let wmin = wmax_val + log_eps.ln();
+
+        // Accumulate sums (scaled by exp(-wmax)):
+        // wi = Σ exp(wj - wmax) = W / exp(wmax)
+        // w1i = Σ exp(wj - wmax) * wb1_j  (for dlogW/drho numerator)
+        let mut wi = 0.0f64;
+        let mut w1i = 0.0f64;
+
+        // Upsweep from j_max upward until wj < wmin
+        let mut j = wmax_j;
+        loop {
+            let jf = j as f64;
+            let wj = jf * w_base - log_gamma(jf + 1.0) - log_gamma(-jf * alpha) - jf * alogy_i;
+            let wj_scaled = (wj - wmax_val).exp();
+            wi += wj_scaled;
+            w1i += wj_scaled * jf * wb1_base; // wb1_j = j * (-1/onep) = j * wb1_base
+            if wj < wmin {
+                break;
+            }
+            j += 1;
+            if j > 10_000_000 {
+                // Safety cap — shouldn't be reached for reasonable data
+                break;
+            }
+        }
+
+        // Downsweep from j_max-1 down to 1
+        j = wmax_j - 1;
+        while j >= 1 {
+            let jf = j as f64;
+            let wj = jf * w_base - log_gamma(jf + 1.0) - log_gamma(-jf * alpha) - jf * alogy_i;
+            let wj_scaled = (wj - wmax_val).exp();
+            wi += wj_scaled;
+            w1i += wj_scaled * jf * wb1_base;
+            if wj < wmin {
+                break;
+            }
+            j -= 1;
+        }
+
+        // log W = wmax + log(wi)
+        log_w_out[i] = wmax_val + wi.ln();
+        // d(log W)/d(rho) from C misc.c:502: w1[i] = -w1i/wi
+        // where wb1[jb] = -j/onep and w1i = sum(W_j_scaled * wb1[j]).
+        // Our w1i = sum(W_j_scaled * j * (-1/onep)) matches C's w1i,
+        // so we apply the same negation: dlogW/drho = -w1i/wi.
+        dlog_w_drho_out[i] = -w1i / wi;
+    }
+
+    (log_w_out, dlog_w_drho_out)
 }
 
 /// PiRLS fitting result
@@ -472,7 +685,7 @@ pub fn fit_pirls_cached(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::Gamma | Family::GammaLog => y[i].max(0.1),
+            Family::Poisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
             // TDist and Gaussian use identity link; initialize to y directly
             Family::Gaussian | Family::TDist { .. } => y[i],
         };
@@ -721,6 +934,21 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
             // TDist deviance: -2 * log p(y|μ,σ²,df) up to an additive constant.
             // Use the squared residual as a proxy (consistent scale comparison).
             Family::TDist { .. } => (yi - mui).powi(2),
+            // Tweedie deviance for 1 < p < 2 (log link):
+            //   d_i = 2 * [ y^(2-p)/((1-p)(2-p)) - y*μ^(1-p)/(1-p) + μ^(2-p)/(2-p) ]
+            // = 2 * [ y^(2-p) - (2-p)*y*μ^(1-p) + (1-p)*μ^(2-p) ] / ((1-p)(2-p))
+            Family::Tweedie { p } => {
+                let twop = 2.0 - p;
+                let onep = 1.0 - p;
+                if yi <= 0.0 {
+                    // For y=0: deviance = 2 * μ^(2-p) / (2-p)
+                    2.0 * mui.powf(twop) / twop
+                } else {
+                    2.0 * (yi.powf(twop) / (onep * twop)
+                        - yi * mui.powf(onep) / onep
+                        + mui.powf(twop) / twop)
+                }
+            }
         };
 
         deviance += dev_i;
@@ -1069,7 +1297,7 @@ pub fn fit_pirls_discretized(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::Gamma | Family::GammaLog => y[i].max(0.1),
+            Family::Poisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
             // TDist and Gaussian use identity link; initialize to y directly
             Family::Gaussian | Family::TDist { .. } => y[i],
         };

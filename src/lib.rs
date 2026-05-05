@@ -148,12 +148,13 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None))]
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None))]
     fn new(
         family: Option<&str>,
         mgcv_exact: Option<bool>,
         link: Option<&str>,
         df: Option<f64>,
+        p: Option<f64>,
     ) -> PyResult<Self> {
         // Validate df early if provided
         if let Some(df_val) = df {
@@ -181,17 +182,28 @@ impl PyGAM {
                 let fixed_df = df.unwrap_or(0.0); // 0.0 = profile
                 Family::TDist { df: fixed_df, sigma2: 1.0 }
             }
+            // Tweedie with log link (1 < p < 2). `p` defaults to 1.5 (fixed-p mode).
+            // Profile-p is not yet implemented; p=1.5 is used when p is not supplied.
+            (Some("tweedie"), None) | (Some("tweedie"), Some("log")) => {
+                let tweedie_p = p.unwrap_or(1.5);
+                if tweedie_p <= 1.0 || tweedie_p >= 2.0 {
+                    return Err(PyValueError::new_err(format!(
+                        "Tweedie p must be in (1, 2), got {}", tweedie_p
+                    )));
+                }
+                Family::Tweedie { p: tweedie_p }
+            }
             (Some(f), Some(l)) => {
                 return Err(PyValueError::new_err(format!(
                     "Unsupported family/link combination: {}({}). Supported: \
                      gaussian(identity), binomial(logit), poisson(log), \
-                     gamma(inverse), gamma(log), t-dist(identity).",
+                     gamma(inverse), gamma(log), t-dist(identity), tweedie(log).",
                     f, l
                 )))
             }
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
-                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', or 't-dist'",
+                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', 't-dist', or 'tweedie'",
                     f
                 )))
             }
@@ -645,6 +657,7 @@ impl PyGAM {
             Family::Gamma => "gamma",
             Family::GammaLog => "gamma",
             Family::TDist { .. } => "t-dist",
+            Family::Tweedie { .. } => "tweedie",
         }
     }
 
@@ -657,6 +670,7 @@ impl PyGAM {
             Family::Gamma => "inverse",
             Family::GammaLog => "log",
             Family::TDist { .. } => "identity",
+            Family::Tweedie { .. } => "log",
         }
     }
 

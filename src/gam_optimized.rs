@@ -526,7 +526,8 @@ impl GAM {
             crate::pirls::Family::Gaussian
             | crate::pirls::Family::Gamma
             | crate::pirls::Family::GammaLog
-            | crate::pirls::Family::TDist { .. } => None,
+            | crate::pirls::Family::TDist { .. }
+            | crate::pirls::Family::Tweedie { .. } => None,
         };
         smoothing_params.family = self.family;
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For
