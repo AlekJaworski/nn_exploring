@@ -51,6 +51,14 @@ pub enum Family {
     /// function (misc.c:170). For y=0 the density simplifies; for y>0 the
     /// series `W = Σ_j W_j` is summed using log-sum-exp to avoid overflow.
     Tweedie { p: f64 },
+    /// Quasi-Poisson: same variance V(μ)=μ and log link as Poisson, but
+    /// the dispersion φ is **estimated from data** rather than fixed at 1.
+    /// mgcv estimates φ̂ = Dp / (n − trA) (Pearson-style).
+    QuasiPoisson,
+    /// Quasi-Binomial: same variance V(μ)=μ(1-μ) and logit link as
+    /// Binomial, but the dispersion φ is **estimated from data** rather
+    /// than fixed at 1. mgcv estimates φ̂ = Dp / (n − trA).
+    QuasiBinomial,
 }
 
 impl Family {
@@ -59,8 +67,8 @@ impl Family {
     pub fn variance(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian => 1.0,
-            Family::Binomial => mu * (1.0 - mu),
-            Family::Poisson => mu,
+            Family::Binomial | Family::QuasiBinomial => mu * (1.0 - mu),
+            Family::Poisson | Family::QuasiPoisson => mu,
             Family::Gamma | Family::GammaLog => mu * mu,
             // For TDist: variance is not μ-dependent (identity link, location-scale
             // model). We return σ² here so that the standard Fisher weight formula
@@ -75,8 +83,8 @@ impl Family {
     pub fn link(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => mu,
-            Family::Binomial => (mu / (1.0 - mu)).ln(),
-            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => mu.ln(),
+            Family::Binomial | Family::QuasiBinomial => (mu / (1.0 - mu)).ln(),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => mu.ln(),
             Family::Gamma => 1.0 / mu,
         }
     }
@@ -85,11 +93,11 @@ impl Family {
     pub fn inverse_link(&self, eta: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => eta,
-            Family::Binomial => {
+            Family::Binomial | Family::QuasiBinomial => {
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
             }
-            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => {
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => {
                 let eta_safe = eta.min(20.0);
                 eta_safe.exp()
             }
@@ -104,11 +112,11 @@ impl Family {
     pub fn d_inverse_link(&self, eta: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => 1.0,
-            Family::Binomial => {
+            Family::Binomial | Family::QuasiBinomial => {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
             }
-            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => eta.exp(),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => eta.exp(),
             Family::Gamma => -1.0 / (eta * eta),
         }
     }
@@ -119,8 +127,8 @@ impl Family {
     pub fn dvar(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => 0.0,
-            Family::Binomial => 1.0 - 2.0 * mu,
-            Family::Poisson => 1.0,
+            Family::Binomial | Family::QuasiBinomial => 1.0 - 2.0 * mu,
+            Family::Poisson | Family::QuasiPoisson => 1.0,
             Family::Gamma | Family::GammaLog => 2.0 * mu,
             Family::Tweedie { p } => p * mu.powf(p - 1.0),
         }
@@ -132,8 +140,8 @@ impl Family {
     pub fn d2var(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => 0.0,
-            Family::Binomial => -2.0,
-            Family::Poisson => 0.0,
+            Family::Binomial | Family::QuasiBinomial => -2.0,
+            Family::Poisson | Family::QuasiPoisson => 0.0,
             Family::Gamma | Family::GammaLog => 2.0,
             Family::Tweedie { p } => p * (p - 1.0) * mu.powf(p - 2.0),
         }
@@ -143,11 +151,11 @@ impl Family {
     pub fn d2link(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => 0.0,
-            Family::Binomial => {
+            Family::Binomial | Family::QuasiBinomial => {
                 let one_minus = 1.0 - mu;
                 -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
             }
-            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => -1.0 / (mu * mu),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => -1.0 / (mu * mu),
             Family::Gamma => 2.0 / (mu * mu * mu),
         }
     }
@@ -156,11 +164,11 @@ impl Family {
     pub fn d3link(&self, mu: f64) -> f64 {
         match self {
             Family::Gaussian | Family::TDist { .. } => 0.0,
-            Family::Binomial => {
+            Family::Binomial | Family::QuasiBinomial => {
                 let one_minus = 1.0 - mu;
                 2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
             }
-            Family::Poisson | Family::GammaLog | Family::Tweedie { .. } => 2.0 / (mu * mu * mu),
+            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. } => 2.0 / (mu * mu * mu),
             Family::Gamma => -6.0 / (mu * mu * mu * mu),
         }
     }
@@ -173,6 +181,8 @@ impl Family {
             Family::Gaussian
             | Family::Binomial
             | Family::Poisson
+            | Family::QuasiPoisson  // log link is canonical for Poisson/QuasiPoisson
+            | Family::QuasiBinomial // logit link is canonical for Binomial/QuasiBinomial
             | Family::Gamma
             | Family::TDist { .. } => true,
             // Tweedie canonical link is μ^(1-p); log link is non-canonical → full Newton.
@@ -191,6 +201,14 @@ impl Family {
         let n = y.len() as f64;
         match self {
             Family::Gaussian => -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln(),
+            // Quasi-likelihood: no true probability density, so the saturated
+            // log-likelihood is undefined. We approximate with the Gaussian
+            // form -n/2·log(2π·φ), which matches what mgcv uses for the
+            // profiled-dispersion path. The absolute REML score differs from
+            // mgcv's by a constant, but the λ-optimum is unaffected.
+            Family::QuasiPoisson | Family::QuasiBinomial => {
+                -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
+            }
             Family::Poisson => y
                 .iter()
                 .map(|&yi| {
@@ -274,6 +292,9 @@ impl Family {
         let n = y.len() as f64;
         match self {
             Family::Gaussian => -n / (2.0 * scale),
+            // QuasiPoisson/QuasiBinomial: Gaussian-approximation ls → dls/dσ² = -n/(2σ²).
+            // σ² is profiled (free parameter), not fixed at 1.
+            Family::QuasiPoisson | Family::QuasiBinomial => -n / (2.0 * scale),
             Family::Poisson | Family::Binomial => 0.0, // scale = 1, not a free parameter
             Family::Gamma | Family::GammaLog => {
                 // ls = n·[-lgamma(1/φ) - log(φ)/φ - 1/φ] - Σlog y
@@ -390,6 +411,9 @@ impl Family {
         let mp_f = mp as f64;
         match self {
             Family::Gaussian => dp / (n - mp_f).max(1.0),
+            // QuasiPoisson/QuasiBinomial: same closed-form φ̂ = Dp/(n-Mp) as Gaussian.
+            // Dispersion is profiled, not fixed at 1.
+            Family::QuasiPoisson | Family::QuasiBinomial => dp / (n - mp_f).max(1.0),
             Family::Binomial | Family::Poisson => 1.0,
             Family::TDist { .. } => phi_init,
             Family::Gamma | Family::GammaLog => {
@@ -733,8 +757,8 @@ pub fn fit_pirls_cached(
     // Initialize eta based on family
     for i in 0..n {
         let safe_y = match family {
-            Family::Binomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
+            Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
+            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
             // TDist and Gaussian use identity link; initialize to y directly
             Family::Gaussian | Family::TDist { .. } => y[i],
         };
@@ -965,14 +989,14 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
 
         let dev_i = match family {
             Family::Gaussian => (yi - mui).powi(2),
-            Family::Binomial => {
+            Family::Binomial | Family::QuasiBinomial => {
                 if yi > 0.0 && yi < 1.0 {
                     2.0 * (yi * (yi / mui).ln() + (1.0 - yi) * ((1.0 - yi) / (1.0 - mui)).ln())
                 } else {
                     0.0
                 }
             }
-            Family::Poisson => {
+            Family::Poisson | Family::QuasiPoisson => {
                 if yi > 0.0 {
                     2.0 * (yi * (yi / mui).ln() - (yi - mui))
                 } else {
@@ -1345,8 +1369,8 @@ pub fn fit_pirls_discretized(
     // Initialize eta based on family
     for i in 0..n {
         let safe_y = match family {
-            Family::Binomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
+            Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
+            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog | Family::Tweedie { .. } => y[i].max(0.1),
             // TDist and Gaussian use identity link; initialize to y directly
             Family::Gaussian | Family::TDist { .. } => y[i],
         };

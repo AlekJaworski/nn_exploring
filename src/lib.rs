@@ -176,6 +176,10 @@ impl PyGAM {
             (Some("poisson"), None) | (Some("poisson"), Some("log")) => Family::Poisson,
             (Some("gamma"), None) | (Some("gamma"), Some("inverse")) => Family::Gamma,
             (Some("gamma"), Some("log")) => Family::GammaLog,
+            // Quasi-Poisson: same as Poisson but with profiled dispersion φ̂.
+            (Some("quasipoisson"), None) | (Some("quasipoisson"), Some("log")) => Family::QuasiPoisson,
+            // Quasi-Binomial: same as Binomial but with profiled dispersion φ̂.
+            (Some("quasibinomial"), None) | (Some("quasibinomial"), Some("logit")) => Family::QuasiBinomial,
             // Scaled t-distribution (mgcv's scat family). Identity link only.
             // df = 0.0 encodes "profile df"; df > 0 = user-fixed.
             (Some("t-dist"), None) | (Some("t-dist"), Some("identity")) => {
@@ -198,13 +202,15 @@ impl PyGAM {
                 return Err(PyValueError::new_err(format!(
                     "Unsupported family/link combination: {}({}). Supported: \
                      gaussian(identity), binomial(logit), poisson(log), \
-                     gamma(inverse), gamma(log), t-dist(identity), tweedie(log).",
+                     gamma(inverse), gamma(log), quasipoisson(log), quasibinomial(logit), \
+                     t-dist(identity), tweedie(log).",
                     f, l
                 )))
             }
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
-                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', 't-dist', or 'tweedie'",
+                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', \
+                     'quasipoisson', 'quasibinomial', 't-dist', or 'tweedie'",
                     f
                 )))
             }
@@ -663,6 +669,8 @@ impl PyGAM {
             Family::Poisson => "poisson",
             Family::Gamma => "gamma",
             Family::GammaLog => "gamma",
+            Family::QuasiPoisson => "quasipoisson",
+            Family::QuasiBinomial => "quasibinomial",
             Family::TDist { .. } => "t-dist",
             Family::Tweedie { .. } => "tweedie",
         }
@@ -676,6 +684,8 @@ impl PyGAM {
             Family::Poisson => "log",
             Family::Gamma => "inverse",
             Family::GammaLog => "log",
+            Family::QuasiPoisson => "log",
+            Family::QuasiBinomial => "logit",
             Family::TDist { .. } => "identity",
             Family::Tweedie { .. } => "log",
         }

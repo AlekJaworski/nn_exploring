@@ -523,7 +523,10 @@ impl GAM {
         // (y - Xβ)² is wrong for non-Gaussian since Xβ=η not μ.
         smoothing_params.phi_fixed = match self.family {
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => Some(1.0),
+            // QuasiPoisson/QuasiBinomial: dispersion is profiled, not fixed at 1.
             crate::pirls::Family::Gaussian
+            | crate::pirls::Family::QuasiPoisson
+            | crate::pirls::Family::QuasiBinomial
             | crate::pirls::Family::Gamma
             | crate::pirls::Family::GammaLog
             | crate::pirls::Family::TDist { .. }

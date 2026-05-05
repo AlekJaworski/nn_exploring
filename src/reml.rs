@@ -133,7 +133,7 @@ pub fn glm_deviance(
         let mui = mu[i];
         let dev_i = match family {
             Family::Gaussian => (yi - mui).powi(2),
-            Family::Binomial => {
+            Family::Binomial | Family::QuasiBinomial => {
                 // Allow y in [0,1]; clamp μ for log safety.
                 let mu_c = mui.clamp(1e-15, 1.0 - 1e-15);
                 if yi <= 0.0 {
@@ -145,7 +145,7 @@ pub fn glm_deviance(
                         + (1.0 - yi) * ((1.0 - yi) / (1.0 - mu_c)).ln())
                 }
             }
-            Family::Poisson => {
+            Family::Poisson | Family::QuasiPoisson => {
                 let mu_c = mui.max(1e-15);
                 if yi > 0.0 {
                     2.0 * (yi * (yi / mu_c).ln() - (yi - mu_c))
@@ -985,7 +985,7 @@ fn compute_sigma2_at(
     mp: usize,
 ) -> Result<f64> {
     use crate::pirls::Family;
-    // Fixed dispersion families
+    // Fixed dispersion families (Quasi variants are NOT fixed — they profile φ)
     if matches!(family, Family::Binomial | Family::Poisson) {
         return Ok(1.0);
     }

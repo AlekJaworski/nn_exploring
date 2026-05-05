@@ -38,6 +38,8 @@ _FAMILY_MAP = {
     # constructor kwarg; the profile-p case omits p (or passes None).
     "Tweedie": "tweedie",
     "tw": "tweedie",
+    "quasipoisson": "quasipoisson",
+    "quasibinomial": "quasibinomial",
 }
 
 # mgcv_rust's Family enum has no link parameter — only the canonical link
@@ -56,6 +58,8 @@ _CANONICAL_LINK = {
     # explicitly (the wrapper picks log when family="tweedie").
     "Tweedie": "log",
     "tw": "log",
+    "quasipoisson": "log",
+    "quasibinomial": "logit",
 }
 
 
