@@ -1582,6 +1582,124 @@
     "bar_a": {
       "extrap": {
         "atol": 0.001,
+        "eff_atol": 0.0012197575461504156,
+        "max_absdiff": 0.002793302195984282,
+        "max_relerr": 0.000320699453886329,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.0019880359588202454,
+        "max_absdiff": 0.004079903080198122,
+        "max_relerr": 0.0003941300409157683,
+        "n": 100,
+        "ok": true,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.0019446559274166754,
+        "max_absdiff": 0.0036822216585363776,
+        "max_relerr": 0.0004428207997939465,
+        "n": 1000,
+        "ok": true,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.0002819272592920405,
+      "beta_maxrelerr": 0.014924807048722174,
+      "beta_ok": true,
+      "deviance_actual": 34473.34566992897,
+      "deviance_expected": 1073.6135586524867,
+      "deviance_relerr": 31.109640747455853,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        88.73478724294385,
+        40870.05956798873
+      ],
+      "lambda_expected": [
+        88.4366138529068,
+        40290.77385451844
+      ],
+      "lambda_max_relerr": 0.014377626887037857,
+      "lambda_ok": true
+    },
+    "description": "negative.binomial(theta=2) log link \u2014 fixed \u03b8 overdispersed counts",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_nb_log_n1000_k10_cr_theta2.json",
+    "name": "2d_nb_log_n1000_k10_cr_theta2"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "eff_atol": 0.0012138396828950684,
+        "max_absdiff": 0.019102720094993586,
+        "max_relerr": 0.003747326515506313,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.0019890491752027413,
+        "max_absdiff": 0.015177456499349873,
+        "max_relerr": 0.0019213355484096809,
+        "n": 100,
+        "ok": false,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.0019456317675209157,
+        "max_absdiff": 0.016826069953030043,
+        "max_relerr": 0.002152802267046814,
+        "n": 1000,
+        "ok": false,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.001365488185213988,
+      "beta_maxrelerr": 0.08482918024182524,
+      "beta_ok": true,
+      "deviance_actual": 34467.843552184124,
+      "deviance_expected": 1098.7064958114865,
+      "deviance_relerr": 30.371293137505972,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        86.81900601691311,
+        32815.655480382666
+      ],
+      "lambda_expected": [
+        87.67345565269183,
+        36041.4957861641
+      ],
+      "lambda_max_relerr": 0.08950350798203545,
+      "lambda_ok": false
+    },
+    "description": "nb() profile-\u03b8 \u2014 overdispersed counts with mgcv estimating \u03b8",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_nb_profile_log_n1000_k10_cr.json",
+    "name": "2d_nb_profile_log_n1000_k10_cr"
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
         "eff_atol": 0.0013446257239198606,
         "max_absdiff": 0.00044295072953737247,
         "max_relerr": 6.598958460132848e-05,

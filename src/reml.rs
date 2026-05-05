@@ -180,14 +180,15 @@ pub fn glm_deviance(
                 let diff = yi_c - mu_c;
                 diff * diff / (mu_c * mu_c * yi_c)
             }
-            // NB deviance
+            // NB deviance (matches mgcv negbin$dev.resids at gam.fit3.r:2599-2602).
+            // y=0 form is 2θ·log((μ+θ)/θ), positive since μ>0.
             Family::NegBin { theta } => {
                 let mu_c = mui.max(1e-15);
                 if yi > 0.0 {
                     2.0 * (yi * (yi / mu_c).ln()
                         - (yi + theta) * ((yi + theta) / (mu_c + theta)).ln())
                 } else {
-                    2.0 * theta * (theta / (mu_c + theta)).ln()
+                    2.0 * theta * ((mu_c + theta) / theta).ln()
                 }
             }
         };

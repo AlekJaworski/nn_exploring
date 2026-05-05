@@ -1107,16 +1107,20 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                 let diff = yi_c - mu_c;
                 diff * diff / (mu_c * mu_c * yi_c)
             }
-            // NB deviance per obs:
-            //   if yi > 0: 2 * [yi*log(yi/μi) - (yi+θ)*log((yi+θ)/(μi+θ))]
-            //   if yi == 0: 2 * θ * log(θ/(μi+θ))
+            // NB deviance per obs (matches mgcv `negbin$dev.resids` at
+            // gam.fit3.r:2599-2602):
+            //   2 · [y · log(max(1,y)/μ) - (y+θ) · log((y+θ)/(μ+θ))]
+            // For y=0: y·log(...) → 0 (mgcv uses pmax(1, y) so log(1/μ)=-log μ
+            // is multiplied by y=0, giving 0). The (y+θ)·log((y+θ)/(μ+θ))
+            // term becomes θ·log(θ/(μ+θ)), so deviance = -2θ·log(θ/(μ+θ))
+            // = 2θ·log((μ+θ)/θ) — POSITIVE (since μ>0 ⇒ (μ+θ)/θ > 1).
             Family::NegBin { theta } => {
                 let mu_c = mui.max(1e-15);
                 if yi > 0.0 {
                     2.0 * (yi * (yi / mu_c).ln()
                         - (yi + theta) * ((yi + theta) / (mu_c + theta)).ln())
                 } else {
-                    2.0 * theta * (theta / (mu_c + theta)).ln()
+                    2.0 * theta * ((mu_c + theta) / theta).ln()
                 }
             }
         };

@@ -85,6 +85,17 @@ _BINOMIAL_LOGIT_SMALL_N_GAP_REASON = (
     "non-unique optima here. Tracked as Defer-1 (post #44 edge.correct)."
 )
 
+_NB_PROFILE_V1_REASON = (
+    "nb() profile-θ, n=1000: rust converges to θ̂ near mgcv's (mgcv "
+    "reports 2.08 for data-generating θ=2.0) and λ within ~10% in "
+    "log-space. Train absdiff ~1.7e-2, just over rtol=1e-3. Same v1 "
+    "stationary-point divergence pattern as invgauss / N-3 / "
+    "binomial_n200: our M+1 outer Newton on (ρ, log θ) lands close to "
+    "but not exactly at mgcv's joint-Newton optimum in flat REML "
+    "regions. Fixed-θ NB (negbin(theta)) passes byte-for-byte at "
+    "train absdiff <1e-3."
+)
+
 _INVGAUSS_V1_REASON = (
     "Inverse Gaussian + log link, n=800: rust λ matches mgcv to ~5% in "
     "log-space (log diff [0.04, 0.06]) and predictions match to ~1.6e-2 "
@@ -102,6 +113,7 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
         "2d_gamma_inverse_n1000_k10_cr": _GAMMA_INVERSE_GAP_REASON,
         "2d_binomial_logit_n200_k10_cr": _BINOMIAL_LOGIT_SMALL_N_GAP_REASON,
         "2d_invgauss_log_n800_k10_cr": _INVGAUSS_V1_REASON,
+        "2d_nb_profile_log_n1000_k10_cr": _NB_PROFILE_V1_REASON,
     },
 }
 
