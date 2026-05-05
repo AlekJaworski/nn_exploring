@@ -87,6 +87,29 @@ def _gen_gamma_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.nda
     return x, y
 
 
+def _gen_tweedie_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Compound Poisson-Gamma Tweedie data, p=1.5, log link, 1D smooth.
+
+    Mirrors the user's tw(link="log") use case (concession_pct ~ s(date, k=20)).
+    For 1<p<2 Tweedie is a Poisson sum of i.i.d. Gammas; mass at zero is
+    Pr[N=0] = exp(-μ^(2-p) / (φ(2-p))).
+    """
+    p, phi = 1.5, 1.0
+    x = rng.uniform(0.0, 1.0, n).reshape(-1, 1)
+    # 1D smooth on log scale, mean μ in [exp(-0.3), exp(1.3)] ≈ [0.74, 3.67]
+    eta = 0.5 + 0.8 * np.sin(2 * np.pi * x[:, 0])
+    mu = np.exp(eta)
+    y = np.zeros(n)
+    shape = (2.0 - p) / (p - 1.0)
+    for i in range(n):
+        lam = mu[i] ** (2.0 - p) / (phi * (2.0 - p))
+        ni = rng.poisson(lam)
+        if ni > 0:
+            scale_g = phi * (p - 1.0) * mu[i] ** (p - 1.0)
+            y[i] = rng.gamma(shape * ni, scale_g)
+    return x, y
+
+
 # --- Coverage-extending generators (per user ask: multi-d, in/out range) ----
 
 
@@ -798,6 +821,20 @@ CASES: list[Case] = [
         seed=132, n=2000, d=4, k=[8, 8, 8, 8], bs=["cr"] * 4,
         family="Gamma", link="log", method="REML",
         generator=_gen_4d_gamma_log,
+    ),
+    Case(
+        name="1d_tweedie_log_n400_k20_cr_p15",
+        description="Tweedie(p=1.5) log link, 1D smooth k=20 — fixed-p",
+        seed=200, n=400, d=1, k=[20], bs=["cr"],
+        family="Tweedie", link="log", method="REML",
+        generator=_gen_tweedie_log,
+    ),
+    Case(
+        name="1d_tw_log_n400_k20_cr",
+        description="tw(link='log') — Tweedie with profiled p, 1D smooth k=20",
+        seed=200, n=400, d=1, k=[20], bs=["cr"],
+        family="tw", link="log", method="REML",
+        generator=_gen_tweedie_log,
     ),
 
     # --- E. Basis variations (2 cases) -------------------------------- #

@@ -73,6 +73,12 @@ _FAMILY_BUILDERS = {
     "poisson": lambda link: ro.r(f'poisson(link="{link}")'),
     "Gamma": lambda link: ro.r(f'Gamma(link="{link}")'),
     "gamma": lambda link: ro.r(f'Gamma(link="{link}")'),
+    # Tweedie with fixed p — currently hard-codes p=1.5 to match
+    # `_gen_tweedie_log`'s data-generating p. If we add cases at other
+    # p values, generalize via a per-case `tweedie_p` field on Case.
+    "Tweedie": lambda link: ro.r(f'Tweedie(p=1.5, link="{link}")'),
+    # Profile p — mgcv's tw() over default range a=1.001..b=1.999.
+    "tw": lambda link: ro.r(f'tw(link="{link}")'),
 }
 
 
