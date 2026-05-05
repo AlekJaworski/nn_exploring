@@ -38,7 +38,7 @@ jobs:
       - name: Validate wheel
         run: |
           python -m pip install --upgrade pip numpy pytest
-          python -m pip install --find-links dist/ mgcv_rust
+          python -m pip install --no-index --find-links dist/ mgcv_rust
           python -m pytest tests/usability -q
 
       - name: Upload wheels
@@ -71,7 +71,7 @@ jobs:
       - name: Validate wheel
         run: |
           python3 -m pip install numpy pytest
-          python3 -m pip install --find-links dist/ mgcv_rust
+          python3 -m pip install --no-index --find-links dist/ mgcv_rust
           python3 -m pytest tests/usability -q
 
       - name: Upload wheels

@@ -62,7 +62,8 @@ jobs:
       - name: Test wheel
         run: |
           echo "=== Installing wheel ==="
-          python -m pip install --find-links dist/ mgcv_rust pytest
+          python -m pip install --upgrade pip numpy pytest
+          python -m pip install --no-index --find-links dist/ mgcv_rust
           echo "=== Usability smoke (multi-family fit/predict) ==="
           python -m pytest tests/usability -q
           echo "=== Checking shared library deps ==="
@@ -115,7 +116,7 @@ jobs:
         run: |
           echo "=== Installing wheel ==="
           python3 -m pip install numpy pytest
-          python3 -m pip install --find-links dist/ mgcv_rust
+          python3 -m pip install --no-index --find-links dist/ mgcv_rust
           echo "=== Usability smoke (multi-family fit/predict) ==="
           python3 -m pytest tests/usability -q
           echo "=== Checking dependencies ==="
