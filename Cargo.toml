@@ -29,8 +29,9 @@ python = ["pyo3", "numpy"]
 # - Use 'blas,blas-system' for system OpenBLAS (development, requires libopenblas-dev)
 # - Use 'blas,blas-static' for statically linked OpenBLAS (wheel distribution)
 blas = ["ndarray-linalg", "rand", "rand_chacha"]
-blas-system = ["ndarray-linalg/openblas-system"]  # Use system OpenBLAS
-blas-static = ["ndarray-linalg/openblas-static"]  # Statically link OpenBLAS (includes LAPACK)
+blas-system = ["ndarray-linalg/openblas-system"]    # Use system OpenBLAS
+blas-static = ["ndarray-linalg/openblas-static"]    # Statically link OpenBLAS (includes LAPACK)
+blas-mkl-static = ["ndarray-linalg/intel-mkl-static"]  # Windows: static Intel MKL — avoids Fortran toolchain
 
 [dev-dependencies]
 approx = "0.5"

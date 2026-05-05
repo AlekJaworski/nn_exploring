@@ -139,3 +139,41 @@ jobs:
         with:
           name: test-wheels-macos-${{ matrix.target }}
           path: dist
+
+  test-windows:
+    name: Test Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Windows uses Intel MKL static — no gfortran needed, MKL is precompiled
+      # by intel-mkl-src crate. ~80 MB wheel but reliable on Windows.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          RUST_BACKTRACE: "1"
+        with:
+          target: x86_64
+          args: --release --out dist -i python3.12 --features python,blas,blas-mkl-static
+          sccache: 'true'
+
+      - name: Test wheel
+        shell: bash
+        run: |
+          echo "=== Installing wheel ==="
+          python -m pip install --upgrade pip numpy pytest
+          python -m pip install --no-index --find-links dist/ mgcv_rust
+          echo "=== Usability smoke (multi-family fit/predict) ==="
+          python -m pytest tests/usability -q
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-wheels-windows-x86_64
+          path: dist
