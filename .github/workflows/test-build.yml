@@ -62,23 +62,9 @@ jobs:
       - name: Test wheel
         run: |
           echo "=== Installing wheel ==="
-          python -m pip install --find-links dist/ mgcv_rust
-          echo "=== Testing import ==="
-          python -c "import mgcv_rust; print('Import successful!')"
-          echo "=== Quick fit test ==="
-          python -c "
-          import numpy as np
-          import mgcv_rust
-          np.random.seed(42)
-          x = np.random.uniform(0, 1, 200).reshape(-1, 1)
-          y = np.sin(2 * np.pi * x.ravel()) + np.random.normal(0, 0.2, 200)
-          gam = mgcv_rust.GAM()
-          result = gam.fit_auto(x, y, k=[10], method='REML', bs='cr', max_iter=50)
-          print(f'Lambda: {result[\"lambda\"]}, Deviance: {result.get(\"deviance\", \"N/A\")}')
-          y_pred = gam.predict(x)
-          print(f'Predictions range: [{y_pred.min():.3f}, {y_pred.max():.3f}]')
-          print('Quick fit test PASSED')
-          "
+          python -m pip install --find-links dist/ mgcv_rust pytest
+          echo "=== Usability smoke (multi-family fit/predict) ==="
+          python -m pytest tests/usability -q
           echo "=== Checking shared library deps ==="
           ldd $(python -c "import mgcv_rust; import os; print(os.path.dirname(mgcv_rust.__file__))")/mgcv_rust*.so || true
 
@@ -128,22 +114,10 @@ jobs:
       - name: Test wheel
         run: |
           echo "=== Installing wheel ==="
-          python3 -m pip install numpy
+          python3 -m pip install numpy pytest
           python3 -m pip install --find-links dist/ mgcv_rust
-          echo "=== Testing import ==="
-          python3 -c "import mgcv_rust; print('Import successful!')"
-          echo "=== Quick fit test ==="
-          python3 -c "
-          import numpy as np
-          import mgcv_rust
-          np.random.seed(42)
-          x = np.random.uniform(0, 1, 200).reshape(-1, 1)
-          y = np.sin(2 * np.pi * x.ravel()) + np.random.normal(0, 0.2, 200)
-          gam = mgcv_rust.GAM()
-          result = gam.fit_auto(x, y, k=[10], method='REML', bs='cr', max_iter=50)
-          print(f'Lambda: {result[\"lambda\"]}')
-          print('Quick fit test PASSED')
-          "
+          echo "=== Usability smoke (multi-family fit/predict) ==="
+          python3 -m pytest tests/usability -q
           echo "=== Checking dependencies ==="
           otool -L $(python3 -c "import mgcv_rust; import os; print(os.path.dirname(mgcv_rust.__file__))")/mgcv_rust*.so || true
 
