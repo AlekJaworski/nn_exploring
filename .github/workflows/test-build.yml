@@ -108,19 +108,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install OpenBLAS
+      # For blas-static: openblas-src compiles from source, no brew openblas needed.
+      # Install only the Fortran compiler. Mirrors release.yml so test == ship.
+      - name: Install build tools
         run: |
-          brew install openblas
-          echo "OPENBLAS_DIR=$(brew --prefix openblas)" >> $GITHUB_ENV
+          brew install gcc  # provides gfortran
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+          OPENBLAS_STATIC: "1"
           RUST_BACKTRACE: "1"
         with:
           target: aarch64
-          args: --release --out dist -i python3.12 --features python,blas,blas-system
+          args: --release --out dist -i python3.12 --features python,blas,blas-static
           sccache: 'true'
 
       - name: Test wheel
