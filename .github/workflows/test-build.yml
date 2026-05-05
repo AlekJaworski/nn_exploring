@@ -85,8 +85,16 @@ jobs:
           path: dist
 
   test-macos:
-    name: Test macOS aarch64
-    runs-on: macos-latest
+    name: Test macOS ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64
+            runner: macos-latest  # Apple Silicon (M-series)
+          - target: x86_64
+            runner: macos-13      # last Intel runner image
     steps:
       - uses: actions/checkout@v4
 
@@ -108,7 +116,7 @@ jobs:
           OPENBLAS_STATIC: "1"
           RUST_BACKTRACE: "1"
         with:
-          target: aarch64
+          target: ${{ matrix.target }}
           args: --release --out dist -i python3.12 --features python,blas,blas-static
           sccache: 'true'
 
@@ -129,5 +137,5 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: test-wheels-macos-aarch64
+          name: test-wheels-macos-${{ matrix.target }}
           path: dist
