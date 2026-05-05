@@ -148,13 +148,14 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None))]
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None))]
     fn new(
         family: Option<&str>,
         mgcv_exact: Option<bool>,
         link: Option<&str>,
         df: Option<f64>,
         p: Option<f64>,
+        theta: Option<f64>,
     ) -> PyResult<Self> {
         // Validate df early if provided
         if let Some(df_val) = df {
@@ -202,19 +203,37 @@ impl PyGAM {
                 }
                 Family::Tweedie { p: tweedie_p }
             }
+            // Negative Binomial with log link.
+            // theta=Some(val) → fixed-θ mode (mgcv's negbin(theta=val)).
+            // family="nb" → profile-θ mode (mgcv's nb()), θ optimised jointly with λ.
+            (Some("negbin") | Some("negative.binomial"), Some("log") | None) => {
+                let theta_val = theta.unwrap_or(2.0);
+                if theta_val <= 0.0 {
+                    return Err(PyValueError::new_err(format!(
+                        "nb theta must be > 0, got {}", theta_val
+                    )));
+                }
+                Family::NegBin { theta: theta_val }
+            }
+            (Some("nb"), Some("log") | None) => {
+                // profile-θ mode; actual theta set by outer Newton on log(θ)
+                Family::NegBin { theta: 2.0 }
+            }
             (Some(f), Some(l)) => {
                 return Err(PyValueError::new_err(format!(
                     "Unsupported family/link combination: {}({}). Supported: \
                      gaussian(identity), binomial(logit), poisson(log), \
                      gamma(inverse), gamma(log), quasipoisson(log), quasibinomial(logit), \
-                     t-dist(identity), tweedie(log), inverse.gaussian(log).",
+                     t-dist(identity), tweedie(log), inverse.gaussian(log), \
+                     negbin(log), nb(log).",
                     f, l
                 )))
             }
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
                     "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', \
-                     'quasipoisson', 'quasibinomial', 't-dist', 'tweedie', or 'inverse.gaussian'",
+                     'quasipoisson', 'quasibinomial', 't-dist', 'tweedie', 'inverse.gaussian', \
+                     'negbin', or 'nb'",
                     f
                 )))
             }
@@ -231,6 +250,11 @@ impl PyGAM {
         let is_tweedie = matches!(fam, Family::Tweedie { .. });
         if is_tweedie && p.is_none() {
             g.tweedie_profile = true;
+        }
+        // Profile-θ for NegBin: enabled when family="nb" (mgcv's nb() extended family).
+        // Fixed-θ mode uses family="negbin" with optional theta kwarg.
+        if matches!(family, Some("nb")) {
+            g.negbin_profile = true;
         }
         Ok(PyGAM { inner: g, mgcv_exact: exact })
     }
@@ -678,6 +702,7 @@ impl PyGAM {
             Family::TDist { .. } => "t-dist",
             Family::Tweedie { .. } => "tweedie",
             Family::InverseGaussian => "inverse.gaussian",
+            Family::NegBin { .. } => "negbin",
         }
     }
 
@@ -694,6 +719,7 @@ impl PyGAM {
             Family::TDist { .. } => "identity",
             Family::Tweedie { .. } => "log",
             Family::InverseGaussian => "log",
+            Family::NegBin { .. } => "log",
         }
     }
 

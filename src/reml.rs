@@ -180,6 +180,16 @@ pub fn glm_deviance(
                 let diff = yi_c - mu_c;
                 diff * diff / (mu_c * mu_c * yi_c)
             }
+            // NB deviance
+            Family::NegBin { theta } => {
+                let mu_c = mui.max(1e-15);
+                if yi > 0.0 {
+                    2.0 * (yi * (yi / mu_c).ln()
+                        - (yi + theta) * ((yi + theta) / (mu_c + theta)).ln())
+                } else {
+                    2.0 * theta * (theta / (mu_c + theta)).ln()
+                }
+            }
         };
         dev += dev_i;
     }
@@ -537,7 +547,8 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // For non-Gaussian we evaluate at y_original (the true response).
     let y_for_ls = y_original.unwrap_or(y);
     let scale_est = match family {
-        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => 1.0,
+        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        | crate::pirls::Family::NegBin { .. } => 1.0,
         _ => {
             let phi_init = dev_numerator / n_minus_tra.max(1e-10);
             family.estimate_phi_mgcv(y_for_ls, dp, mp, 1.0, phi_init)
@@ -993,7 +1004,7 @@ fn compute_sigma2_at(
 ) -> Result<f64> {
     use crate::pirls::Family;
     // Fixed dispersion families (Quasi variants are NOT fixed — they profile φ)
-    if matches!(family, Family::Binomial | Family::Poisson) {
+    if matches!(family, Family::Binomial | Family::Poisson | Family::NegBin { .. }) {
         return Ok(1.0);
     }
     let n = y.len();
@@ -1127,7 +1138,8 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         .sum();
     let dp_for_phi = dev_numerator + bsb_total_for_phi;
     let scale_est = match family {
-        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => 1.0,
+        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        | crate::pirls::Family::NegBin { .. } => 1.0,
         _ => {
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
             family.estimate_phi_mgcv(y_for_grad, dp_for_phi, mp, 1.0, phi_init)
@@ -1264,6 +1276,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         && !matches!(
             family,
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+            | crate::pirls::Family::NegBin { .. }
         )
     {
         // Use dp_for_phi and mp already computed above.
@@ -1439,7 +1452,8 @@ pub fn reml_hessian_mgcv_exact_ift(
         .sum();
     let dp_hess = dev_numerator + bsb_hess;
     let scale_est = match family {
-        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => 1.0,
+        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        | crate::pirls::Family::NegBin { .. } => 1.0,
         _ => {
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
             family.estimate_phi_mgcv(y_for_hess, dp_hess, mp_hess, 1.0, phi_init)

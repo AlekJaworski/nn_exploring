@@ -507,6 +507,10 @@ pub struct GAM {
     /// Newton step on θ (mgcv's `tw()` family). Default false means
     /// fixed-p (`Tweedie(p=...)` family).
     pub tweedie_profile: bool,
+    /// When true, NB θ is profiled jointly with λ via an outer
+    /// Newton step on log(θ) (mgcv's `nb()` extended family). Default false
+    /// means fixed-θ (`negbin(theta=...)` family).
+    pub negbin_profile: bool,
 }
 
 impl GAM {
@@ -525,6 +529,7 @@ impl GAM {
             fitted: false,
             mgcv_exact: false,
             tweedie_profile: false,
+            negbin_profile: false,
         }
     }
 

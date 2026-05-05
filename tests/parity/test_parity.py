@@ -41,6 +41,8 @@ _FAMILY_MAP = {
     "quasipoisson": "quasipoisson",
     "quasibinomial": "quasibinomial",
     "inverse.gaussian": "inverse.gaussian",
+    "negative.binomial": "negbin",
+    "nb": "nb",
 }
 
 # mgcv_rust's Family enum has no link parameter — only the canonical link
@@ -62,6 +64,8 @@ _CANONICAL_LINK = {
     "quasipoisson": "log",
     "quasibinomial": "logit",
     "inverse.gaussian": "log",
+    "negative.binomial": "log",
+    "nb": "log",
 }
 
 
@@ -92,6 +96,9 @@ def _fit(fix: Fixture):
         if inp.family == "Tweedie":
             link_kw["p"] = 1.5
         # For inp.family == "tw": omit p → profile-p mode (p=None default)
+        if inp.family == "negative.binomial":
+            link_kw["theta"] = 2.0  # matches the fixture's mgcv::negbin(theta=2.0)
+        # For inp.family == "nb": omit theta → profile-θ mode
         try:
             gam = mgcv_rust.GAM(family, **link_kw)
         except Exception as exc:  # pragma: no cover - depends on Rust build

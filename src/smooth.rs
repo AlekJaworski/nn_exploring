@@ -271,6 +271,14 @@ pub struct SmoothingParameter {
     pub tweedie_profile: bool,
     /// Current θ for Tweedie profile-p. Updated each outer Newton iteration.
     pub tweedie_theta: f64,
+    /// Profile-θ mode for NegBin family (mgcv's `nb()` extended family).
+    ///
+    /// When `true`, the outer Newton loop optimises log(θ) jointly with ρ.
+    /// We work in log-space so θ > 0 is enforced automatically.
+    pub negbin_profile: bool,
+    /// Current log(θ) for NB profile-θ. Updated each outer Newton iteration.
+    /// Initial value: log(2.0).
+    pub negbin_log_theta: f64,
 }
 
 /// Refresh produced by an inner PIRLS run at a candidate λ during the
@@ -314,6 +322,8 @@ impl SmoothingParameter {
             y_original: None,
             tweedie_profile: false,
             tweedie_theta: 0.0,
+            negbin_profile: false,
+            negbin_log_theta: 2.0_f64.ln(),
         }
     }
 
@@ -336,6 +346,8 @@ impl SmoothingParameter {
             y_original: None,
             tweedie_profile: false,
             tweedie_theta: 0.0,
+            negbin_profile: false,
+            negbin_log_theta: 2.0_f64.ln(),
         }
     }
 
@@ -358,6 +370,8 @@ impl SmoothingParameter {
             y_original: None,
             tweedie_profile: false,
             tweedie_theta: 0.0,
+            negbin_profile: false,
+            negbin_log_theta: 2.0_f64.ln(),
         }
     }
 
@@ -1519,6 +1533,78 @@ impl SmoothingParameter {
                 }
             }
             // End of Tweedie profile-p θ step
+
+            // -----------------------------------------------------------------------
+            // NegBin profile-θ: Newton step on log(θ).
+            // After each ρ step, optimise log(θ) jointly using FD on REML score.
+            // Working in log-space enforces θ > 0 automatically.
+            // -----------------------------------------------------------------------
+            if self.negbin_profile {
+                let log_theta = self.negbin_log_theta;
+                let h_th: f64 = 1e-3;
+                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+
+                // Inline helper: evaluate REML score at trial log(θ)
+                macro_rules! nb_eval {
+                    ($lt_trial:expr) => {{
+                        let lt_trial: f64 = $lt_trial;
+                        let theta_trial = lt_trial.exp().max(0.5_f64).min(50.0_f64);
+                        let trial_fam = crate::pirls::Family::NegBin { theta: theta_trial };
+                        dispatch_reml_score_with_family(
+                            self,
+                            &y_local,
+                            x,
+                            &w_local,
+                            &current_lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            trial_fam,
+                        )
+                    }};
+                }
+
+                let reml_center = nb_eval!(log_theta);
+                let reml_plus = nb_eval!(log_theta + h_th);
+                let reml_minus = nb_eval!(log_theta - h_th);
+
+                if let (Ok(rc), Ok(rp), Ok(rm)) = (reml_center, reml_plus, reml_minus) {
+                    let dlr_dlt = (rp - rm) / (2.0 * h_th);
+                    let d2lr_dlt2 = (rp - 2.0 * rc + rm) / (h_th * h_th);
+
+                    let denom = d2lr_dlt2.abs().max(1e-4);
+                    let delta_lt = -(dlr_dlt / denom);
+                    // Clamp step to [-0.5, 0.5] per iteration
+                    let delta_lt = delta_lt.max(-0.5_f64).min(0.5_f64);
+
+                    // Line-search on log(θ)
+                    let mut accepted_lt = log_theta;
+                    let candidate = log_theta + delta_lt;
+                    if let Ok(r_new) = nb_eval!(candidate) {
+                        if r_new < rc {
+                            accepted_lt = candidate;
+                        } else {
+                            let half_cand = log_theta + delta_lt * 0.5;
+                            if let Ok(r_half) = nb_eval!(half_cand) {
+                                if r_half < rc {
+                                    accepted_lt = half_cand;
+                                }
+                            }
+                        }
+                    }
+
+                    self.negbin_log_theta = accepted_lt;
+                    let new_theta = accepted_lt.exp().max(0.5_f64).min(50.0_f64);
+                    self.family = crate::pirls::Family::NegBin { theta: new_theta };
+
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!(
+                            "[PROFILE]   NB profile-θ: log_θ {:.4}→{:.4} θ={:.4} dlr/d(log_θ)={:.4e}",
+                            log_theta, accepted_lt, new_theta, dlr_dlt
+                        );
+                    }
+                }
+            }
+            // End of NegBin profile-θ step
         }
 
         // Update final lambdas

@@ -187,6 +187,7 @@ class GAMFitter:
         link: str = "identity",
         df: Optional[float] = None,
         tweedie_p: Optional[float] = None,
+        negbin_theta: Optional[float] = None,
         term_k_mapping: Optional[dict[str, int]] = None,
         term_pc_mapping: Optional[dict[str, float]] = None,
         predictor_basis_map: Optional[dict[str, str]] = None,
@@ -203,6 +204,7 @@ class GAMFitter:
         self.max_points_to_save = max_points_to_save
         self.df = df  # degrees of freedom for t-dist family (None = profile)
         self.tweedie_p = tweedie_p  # power parameter for Tweedie family (None → default 1.5)
+        self.negbin_theta = negbin_theta  # dispersion for NegBin family (None = profile via nb())
         self.method = method
         self.family = family
         self.link = link
@@ -327,6 +329,12 @@ class GAMFitter:
         if self.family == "tweedie":
             # Pass optional p kwarg — Rust side defaults to 1.5 for fixed-p mode
             return _NativeGAM(family="tweedie", link="log", p=self.tweedie_p)
+        if self.family in ("negbin", "negative.binomial"):
+            # Fixed-θ NegBin: pass theta (defaults to 2.0 if not provided)
+            return _NativeGAM(family="negbin", link="log", theta=self.negbin_theta or 2.0)
+        if self.family == "nb":
+            # Profile-θ NegBin: omit theta so the Rust side starts at θ=2.0
+            return _NativeGAM(family="nb", link="log")
         return _NativeGAM(self.family, link=self.link)
 
     def _build_pc_values(self, predictors: list[str]) -> list[float | None] | None:

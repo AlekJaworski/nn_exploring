@@ -522,7 +522,8 @@ impl GAM {
         // The Fellner-Schall update needs the right φ; estimating it from
         // (y - Xβ)² is wrong for non-Gaussian since Xβ=η not μ.
         smoothing_params.phi_fixed = match self.family {
-            crate::pirls::Family::Binomial | crate::pirls::Family::Poisson => Some(1.0),
+            crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+            | crate::pirls::Family::NegBin { .. } => Some(1.0),
             // QuasiPoisson/QuasiBinomial: dispersion is profiled, not fixed at 1.
             crate::pirls::Family::Gaussian
             | crate::pirls::Family::QuasiPoisson
@@ -538,6 +539,14 @@ impl GAM {
         // Initial θ=0 ⟹ p=1.5 (midpoint of [1.001, 1.999]).
         smoothing_params.tweedie_profile = self.tweedie_profile;
         smoothing_params.tweedie_theta = 0.0; // start at p=1.5
+        // Profile-θ for NegBin: enable the log(θ) Newton step in the outer loop.
+        // Initial log(θ) = log(2.0) (θ=2 is a reasonable starting point).
+        smoothing_params.negbin_profile = self.negbin_profile;
+        if let crate::pirls::Family::NegBin { theta } = self.family {
+            smoothing_params.negbin_log_theta = theta.ln();
+        } else {
+            smoothing_params.negbin_log_theta = 2.0_f64.ln();
+        }
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For
         // non-Gaussian, the optimizer is called with the working response z;
         // y_original carries the true y so IFT can evaluate
