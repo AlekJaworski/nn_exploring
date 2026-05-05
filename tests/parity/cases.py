@@ -87,6 +87,69 @@ def _gen_gamma_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.nda
     return x, y
 
 
+def _gen_nb_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Negative-binomial counts with overdispersion. 2D smooth, log link.
+    True θ = 2.0 (modest overdispersion). For NB(θ, p): mean=θ(1-p)/p,
+    var=θ(1-p)/p² ⇒ p = θ/(θ+μ), so var = μ(1+μ/θ).
+    """
+    theta = 2.0
+    x = rng.uniform(0.0, 1.0, (n, 2))
+    eta = 1.5 + 0.8 * np.sin(2 * np.pi * x[:, 0]) + 0.5 * x[:, 1]
+    mu = np.exp(eta)
+    # numpy.random.negative_binomial uses (n_failures, prob_of_success)
+    # parametrisation; mean = n_failures · (1-p) / p. Match θ=n_failures.
+    p_success = theta / (theta + mu)
+    y = rng.negative_binomial(theta, p_success).astype(float)
+    return x, y
+
+
+def _gen_invgauss_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse Gaussian (Wald) with log link, 2D smooth. V(μ) = μ³.
+    Generated via scipy.stats.invgauss; shape parameter `mu` in scipy is
+    `mu_target / scale` and scale is the dispersion λ. We pick scale=1
+    so var(y) = μ³.
+    """
+    from scipy import stats as _stats
+    x = rng.uniform(0.0, 1.0, (n, 2))
+    eta = 0.5 + 0.5 * np.sin(2 * np.pi * x[:, 0]) + 0.3 * x[:, 1]
+    mu = np.exp(eta)
+    # scipy.stats.invgauss(mu=μ_scaled, scale=λ): mean = λ·μ_scaled, var = λ·μ_scaled³.
+    # We want mean = μ_target, var = μ_target³ ⇒ λ = μ_target, μ_scaled = 1.
+    # But that's a degenerate case; use λ = 1 and μ_scaled = μ_target instead.
+    y = np.empty(n)
+    for i in range(n):
+        y[i] = _stats.invgauss.rvs(mu=mu[i], scale=1.0,
+                                   random_state=rng)
+    return x, y
+
+
+def _gen_quasipoisson_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Overdispersed Poisson-like data for quasipoisson family.
+    Generate via NB(θ=2) with true overdispersion ≈ 1 + μ/θ; quasi-poisson
+    will estimate φ̂ ≈ 1.5–2 capturing the extra dispersion.
+    """
+    theta = 2.0
+    x = rng.uniform(0.0, 1.0, (n, 2))
+    eta = 1.5 + 0.8 * np.sin(2 * np.pi * x[:, 0]) + 0.5 * x[:, 1]
+    mu = np.exp(eta)
+    p_success = theta / (theta + mu)
+    y = rng.negative_binomial(theta, p_success).astype(float)
+    return x, y
+
+
+def _gen_quasibinomial_logit(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Beta-binomial-like overdispersed proportions for quasibinomial.
+    We mimic overdispersion by adding extra noise to the logit and
+    drawing from Bernoulli at the perturbed probability.
+    """
+    x = rng.uniform(0.0, 1.0, (n, 2))
+    eta = 2.0 * np.sin(2 * np.pi * x[:, 0]) + 1.5 * (x[:, 1] - 0.5)
+    eta_noisy = eta + rng.normal(0, 0.5, n)  # extra noise → overdispersion
+    p = 1.0 / (1.0 + np.exp(-eta_noisy))
+    y = rng.binomial(1, p).astype(float)
+    return x, y
+
+
 def _gen_tweedie_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
     """Compound Poisson-Gamma Tweedie data, p=1.5, log link, 1D smooth.
 
@@ -828,6 +891,41 @@ CASES: list[Case] = [
         seed=200, n=400, d=1, k=[20], bs=["cr"],
         family="Tweedie", link="log", method="REML",
         generator=_gen_tweedie_log,
+    ),
+    Case(
+        name="2d_nb_log_n1000_k10_cr_theta2",
+        description="negative.binomial(theta=2) log link — fixed θ overdispersed counts",
+        seed=210, n=1000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="negative.binomial", link="log", method="REML",
+        generator=_gen_nb_log,
+    ),
+    Case(
+        name="2d_nb_profile_log_n1000_k10_cr",
+        description="nb() profile-θ — overdispersed counts with mgcv estimating θ",
+        seed=210, n=1000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="nb", link="log", method="REML",
+        generator=_gen_nb_log,
+    ),
+    Case(
+        name="2d_invgauss_log_n800_k10_cr",
+        description="Inverse Gaussian, log link — V(μ)=μ³ positive-skewed",
+        seed=220, n=800, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="inverse.gaussian", link="log", method="REML",
+        generator=_gen_invgauss_log,
+    ),
+    Case(
+        name="2d_quasipoisson_log_n1000_k10_cr",
+        description="quasipoisson(log) — overdispersed counts; estimates φ ≠ 1",
+        seed=230, n=1000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="quasipoisson", link="log", method="REML",
+        generator=_gen_quasipoisson_log,
+    ),
+    Case(
+        name="2d_quasibinomial_logit_n1000_k10_cr",
+        description="quasibinomial(logit) — overdispersed proportions; estimates φ ≠ 1",
+        seed=240, n=1000, d=2, k=[10, 10], bs=["cr", "cr"],
+        family="quasibinomial", link="logit", method="REML",
+        generator=_gen_quasibinomial_logit,
     ),
     Case(
         name="1d_tw_log_n400_k20_cr",

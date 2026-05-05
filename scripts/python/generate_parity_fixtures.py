@@ -62,6 +62,10 @@ def _r_str(expr: str) -> str:
 # Sum-to-zero contrasts to match neighbourhoods r_model.py exactly.
 ro.r('options(contrasts = c("contr.sum", "contr.poly"))')
 ro.r("options(warn = -1)")
+# MASS provides `negative.binomial(theta, link)` for fixed-θ NB; mgcv
+# defaults to `nb(link)` for profile-θ. Load MASS so the family builder
+# can resolve `negative.binomial`.
+ro.r("suppressMessages(library(MASS))")
 
 
 # Family builder — same shape as r_model.py::r_family_builders, trimmed
@@ -79,6 +83,19 @@ _FAMILY_BUILDERS = {
     "Tweedie": lambda link: ro.r(f'Tweedie(p=1.5, link="{link}")'),
     # Profile p — mgcv's tw() over default range a=1.001..b=1.999.
     "tw": lambda link: ro.r(f'tw(link="{link}")'),
+    # Negative binomial. mgcv has its own `negbin(theta, link)` in
+    # gam.fit3.r:2564 (fixed θ, gam.fit3 pipeline) and `nb(link)` in
+    # efam.r:161 (profile θ, extended-family pipeline). MASS's
+    # negative.binomial(theta) doesn't expose getTheta() so doesn't fit
+    # mgcv's family interface — use mgcv::negbin instead.
+    "negative.binomial": lambda link: ro.r(f'mgcv::negbin(theta=2.0, link="{link}")'),
+    "nb": lambda link: ro.r(f'nb(link="{link}")'),
+    # Inverse Gaussian. Standard GLM family.
+    "inverse.gaussian": lambda link: ro.r(f'inverse.gaussian(link="{link}")'),
+    # Quasi-likelihood families: same V(μ) as the base, but φ ≠ 1
+    # is estimated. Used for overdispersed counts / proportions.
+    "quasipoisson": lambda link: ro.r(f'quasipoisson(link="{link}")'),
+    "quasibinomial": lambda link: ro.r(f'quasibinomial(link="{link}")'),
 }
 
 
