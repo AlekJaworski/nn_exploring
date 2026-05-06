@@ -160,6 +160,18 @@ pub fn glm_deviance(
             }
             // TDist: use squared residual as deviance proxy (identity link, μ = η)
             Family::TDist { .. } => (yi - mui).powi(2),
+            // Quantile/ELF: 2·(L(r) - log(2)) per obs (matches pirls.rs::compute_deviance).
+            Family::Quantile { tau, sigma } => {
+                let r = yi - mui;
+                let r_over_sigma = r / sigma;
+                let softplus = if r_over_sigma > 0.0 {
+                    r_over_sigma + (-r_over_sigma).exp().ln_1p()
+                } else {
+                    r_over_sigma.exp().ln_1p()
+                };
+                let l = -r * (1.0 - tau) / sigma + softplus;
+                2.0 * (l - 2.0_f64.ln())
+            }
             // Tweedie deviance for 1 < p < 2
             Family::Tweedie { p } => {
                 let twop = 2.0 - p;

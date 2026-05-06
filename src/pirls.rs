@@ -73,6 +73,28 @@ pub enum Family {
     /// profiled jointly with λ (mgcv's `nb()` extended family). The standard
     /// scale parameter φ is fixed at 1 for NB; θ carries all overdispersion.
     NegBin { theta: f64 },
+    /// Quantile (qgam-style) family using a smooth pinball loss.
+    ///
+    /// Implements the ELF (Extended Log-F) loss from Fasiolo et al. 2021 —
+    /// the same calibrated smoothing of the pinball loss that R's qgam
+    /// package uses on top of mgcv's basis/penalty machinery.
+    ///
+    /// For residual r = y - η (identity link), the negative log-likelihood is
+    ///   L(r; τ, σ) = (η-y)(1-τ)/σ + log(1 + exp((y-η)/σ))
+    /// which approaches the pinball loss `ρ_τ(r) = max(τ·r, (τ-1)·r)` as σ→0.
+    /// The minimizer of E[L] is the τ-quantile of y|x rather than the mean.
+    ///
+    /// PIRLS weights/working-response are derived analytically (see
+    /// `fit_pirls_quantile`):
+    ///   s_i = 1/(1 + exp(-(y_i - η_i)/σ))
+    ///   w_i = s_i(1-s_i)/σ²    (always positive, well-behaved Hessian)
+    ///   z_i = η_i - σ(1 - τ - s_i)/(s_i(1-s_i))
+    ///
+    /// `tau` ∈ (0, 1) selects the target quantile; `sigma` controls the
+    /// pinball-loss smoothing (smaller σ → sharper quantile, larger σ →
+    /// smoother loss). v1 takes σ as user-provided or a heuristic default;
+    /// full qgam-style σ calibration is a deferred followup.
+    Quantile { tau: f64, sigma: f64 },
 }
 
 impl Family {
@@ -94,13 +116,18 @@ impl Family {
             Family::InverseGaussian => mu * mu * mu,
             // NB variance: V(μ) = μ + μ²/θ
             Family::NegBin { theta } => mu + mu * mu / theta,
+            // Quantile/ELF: weights are residual-dependent, not μ-dependent.
+            // Return σ²·4 (max V = σ²/(s(1-s)) ≥ 4σ² since s(1-s) ≤ 1/4) so
+            // that any code path defaulting to V(μ) gets a finite sentinel;
+            // the actual per-obs weights are computed in `fit_pirls_quantile`.
+            Family::Quantile { sigma, .. } => 4.0 * sigma * sigma,
         }
     }
 
     /// Link function g(μ).
     pub fn link(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => mu,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => mu,
             Family::Binomial | Family::QuasiBinomial => (mu / (1.0 - mu)).ln(),
             Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
             | Family::InverseGaussian | Family::NegBin { .. } => mu.ln(),
@@ -111,7 +138,7 @@ impl Family {
     /// Inverse link function g^(-1)(η).
     pub fn inverse_link(&self, eta: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => eta,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => eta,
             Family::Binomial | Family::QuasiBinomial => {
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
@@ -131,7 +158,7 @@ impl Family {
     /// Derivative of inverse link function dμ/dη.
     pub fn d_inverse_link(&self, eta: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => 1.0,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 1.0,
             Family::Binomial | Family::QuasiBinomial => {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
@@ -147,7 +174,7 @@ impl Family {
     /// links to compute the α correction `α = 1 + (y−μ)·(V'/V + g''·dμ/dη)`.
     pub fn dvar(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => 0.0,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => 1.0 - 2.0 * mu,
             Family::Poisson | Family::QuasiPoisson => 1.0,
             Family::Gamma | Family::GammaLog => 2.0 * mu,
@@ -164,7 +191,7 @@ impl Family {
     /// weight-derivative term in the REML gradient.
     pub fn d2var(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => 0.0,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => -2.0,
             Family::Poisson | Family::QuasiPoisson => 0.0,
             Family::Gamma | Family::GammaLog => 2.0,
@@ -179,7 +206,7 @@ impl Family {
     /// Second derivative of link function: d²g/dμ².
     pub fn d2link(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => 0.0,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => {
                 let one_minus = 1.0 - mu;
                 -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
@@ -193,7 +220,7 @@ impl Family {
     /// Third derivative of link function: d³g/dμ³.
     pub fn d3link(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } => 0.0,
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => {
                 let one_minus = 1.0 - mu;
                 2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
@@ -215,7 +242,10 @@ impl Family {
             | Family::QuasiPoisson  // log link is canonical for Poisson/QuasiPoisson
             | Family::QuasiBinomial // logit link is canonical for Binomial/QuasiBinomial
             | Family::Gamma
-            | Family::TDist { .. } => true,
+            | Family::TDist { .. }
+            // Quantile family: identity link, weights derived analytically
+            // from the Hessian — no extra Newton correction needed.
+            | Family::Quantile { .. } => true,
             // Tweedie canonical link is μ^(1-p); log link is non-canonical → full Newton.
             // InverseGaussian canonical link is 1/μ²; log link is non-canonical → full Newton.
             // NB canonical link is log(μ/(μ+θ)); log link is non-canonical → full Newton.
@@ -281,6 +311,14 @@ impl Family {
             // will differ from mgcv's but the λ-optimum is unaffected.
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
+            }
+            // Quantile/ELF: at the saturated point r=0, density is 1/(2σ·B(τ,1-τ)),
+            // so log f(y;y) = -log(2) - log(σ) - log(B(τ,1-τ)) per obs.
+            // This is a constant shift in the REML criterion (β-independent),
+            // so the λ-optimum is unaffected — same approximation rationale as TDist.
+            Family::Quantile { tau, sigma } => {
+                let beta_tau = log_gamma(*tau) + log_gamma(1.0 - tau) - log_gamma(1.0);
+                n * (-2.0_f64.ln() - sigma.ln() - beta_tau)
             }
             // Inverse Gaussian saturated log-likelihood:
             // ls = -n/2 · log(2π·φ) - 3/2 · Σ log(y_i)
@@ -375,6 +413,9 @@ impl Family {
                 n * (digamma(inv_phi) + scale.ln()) / (scale * scale)
             }
             Family::TDist { .. } => -n / (2.0 * scale),
+            // Quantile: ls is independent of φ (σ is the family parameter,
+            // φ stays at 1 by convention). dls/dφ = 0 ⟹ no σ²-chain term.
+            Family::Quantile { .. } => 0.0,
             // Tweedie dls/dφ: from ldTweedie0 R code (gam.fit3.r:2799):
             //   ld[,2] = -l_base/φ + dlogW/dφ
             // where l_base is the analytic density term at μ=y, and
@@ -490,6 +531,8 @@ impl Family {
             Family::InverseGaussian => dp / (n - mp_f).max(1.0),
             Family::Binomial | Family::Poisson | Family::NegBin { .. } => 1.0,
             Family::TDist { .. } => phi_init,
+            // Quantile: σ is the family parameter; φ stays at 1 by convention.
+            Family::Quantile { .. } => 1.0,
             Family::Gamma | Family::GammaLog => {
                 // Newton-Raphson on
                 //   F(φ) = dp + 2n[ψ(1/φ) + log φ] + mp·φ
@@ -881,8 +924,8 @@ pub fn fit_pirls_cached(
             Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
             Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog
             | Family::Tweedie { .. } | Family::InverseGaussian | Family::NegBin { .. } => y[i].max(0.1),
-            // TDist and Gaussian use identity link; initialize to y directly
-            Family::Gaussian | Family::TDist { .. } => y[i],
+            // Identity-link families: initialize η = y directly.
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
         };
         eta[i] = family.link(safe_y);
     }
@@ -1169,6 +1212,24 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                 } else {
                     2.0 * theta * ((mu_c + theta) / theta).ln()
                 }
+            }
+            // Quantile/ELF deviance: 2·(L(r) - L_sat) where
+            //   L(r) = (η-y)(1-τ)/σ + log(1 + exp((y-η)/σ))
+            //   L_sat = log(2)  (at r=0)
+            // Note: mui is the prediction (η under identity link); we use
+            // (yi - mui) directly. Always non-negative by construction
+            // (ELF is convex, minimum at r=0).
+            Family::Quantile { tau, sigma } => {
+                let r = yi - mui;
+                let r_over_sigma = r / sigma;
+                // Numerically stable softplus: log(1 + exp(x))
+                let softplus = if r_over_sigma > 0.0 {
+                    r_over_sigma + (-r_over_sigma).exp().ln_1p()
+                } else {
+                    r_over_sigma.exp().ln_1p()
+                };
+                let l = -r * (1.0 - tau) / sigma + softplus;
+                2.0 * (l - 2.0_f64.ln())
             }
         };
 
@@ -1473,6 +1534,250 @@ pub fn fit_pirls_tdist(
     })
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Quantile (qgam-style) family — IRLS on ELF (Extended Log-F) loss
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Custom IRLS loop for the qgam-style Quantile family.
+///
+/// At residual r = y - η (identity link) the per-obs negative log-likelihood is
+///   L(r; τ, σ) = (η - y)(1-τ)/σ + log(1 + exp((y - η)/σ))
+/// which is a smooth approximation to the pinball loss
+///   ρ_τ(r) = max(τ·r, (τ-1)·r)
+/// (recovered as σ→0). The minimizer of E[L(y - η(x))] is the τ-quantile of
+/// y|x rather than the mean.
+///
+/// Per Fasiolo et al. 2021 the working IRLS quantities derived analytically are
+///   s_i = sigmoid((y_i - η_i)/σ)
+///   w_i = s_i(1-s_i) / σ²        (well-defined PSD Hessian)
+///   z_i = η_i - σ(1-τ-s_i)/(s_i(1-s_i))
+/// which fit cleanly into the standard PIRLS template.
+///
+/// `sigma` is taken from the family. If 0.0 (sentinel), it is auto-calibrated
+/// at fit time as a robust scale of the residuals from the unpenalised
+/// τ-quantile of y. Full qgam-style σ-calibration (cross-validated bandwidth)
+/// is a deferred followup.
+pub fn fit_pirls_quantile(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    tau: f64,
+    sigma_user: f64,
+    max_iter: usize,
+    tolerance: f64,
+) -> Result<PiRLSResult> {
+    let n = y.len();
+    let p = x.ncols();
+
+    if x.nrows() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "X has {} rows but y has {} elements", x.nrows(), n
+        )));
+    }
+    if lambda.len() != penalties.len() {
+        return Err(GAMError::DimensionMismatch(
+            "Number of lambdas must match number of penalty matrices".to_string(),
+        ));
+    }
+    if tau <= 0.0 || tau >= 1.0 {
+        return Err(GAMError::InvalidParameter(format!(
+            "quantile tau must be in (0, 1), got {}", tau
+        )));
+    }
+
+    // ── qgam-style warm-start (qgam.R::.init_gauss_fit + qgam.R:156) ──
+    //
+    // qgam first runs an unpenalised-loss Gaussian GAM, gets the residual
+    // variance σ̂², then sets per-observation initial η[i] = qnorm(τ; μ̂_gauss[i], σ̂)
+    // — the τ-quantile of N(μ̂_gauss(x), σ̂²). For us, the cleanest equivalent
+    // is to use the empirical τ-quantile of the Gaussian-fit residuals as a
+    // location shift (avoids needing a normal-quantile lookup; matches the
+    // shape of qgam's mustart).
+    //
+    // The initial σ for the ELF loss is qgam's `co = err·√(2π·σ̂²)/(2·log 2)`
+    // with err=0.05 default. This is much sharper than my earlier MAD-based
+    // heuristic but comes paired with the warm-start, which keeps weights
+    // out of saturation.
+
+    // Build penalty total once (used for both the Gaussian init and the IRLS).
+    let mut penalty_total = Array2::<f64>::zeros((p, p));
+    for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
+        penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
+    }
+
+    let num_penalties = lambda.len();
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
+
+    // Step 1: Gaussian GAM fit at the supplied λ. Solves (X'X + Σ λᵢSᵢ + ridge·I) β = X'y.
+    let xtx = crate::reml::compute_xtwx(x, &Array1::ones(n));
+    let mut a_gauss = &xtx + &penalty_total;
+    let mut max_diag_g = 1.0_f64;
+    for i in 0..p {
+        max_diag_g = max_diag_g.max(a_gauss[[i, i]].abs());
+    }
+    let ridge_g = ridge_scale * max_diag_g;
+    for i in 0..p {
+        a_gauss[[i, i]] += ridge_g;
+    }
+    let xty: Array1<f64> = x.t().dot(y);
+    let beta_gauss = solve(a_gauss.clone(), xty)?;
+
+    // Step 2: Gaussian-fit residuals + variance.
+    let mu_gauss: Array1<f64> = x.dot(&beta_gauss);
+    let r_vec: Vec<f64> = y
+        .iter()
+        .zip(mu_gauss.iter())
+        .map(|(&yi, &mi)| yi - mi)
+        .collect();
+    let sigma2_hat: f64 = r_vec.iter().map(|&ri| ri * ri).sum::<f64>() / (n as f64).max(1.0);
+
+    // Step 3: empirical τ-quantile of residuals — the per-obs shift to apply
+    // to the Gaussian fit so that the warm-start η ≈ μ̂_gauss(x) + q_τ(r).
+    let mut r_sorted = r_vec.clone();
+    r_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let qi_r = ((n as f64 - 1.0) * tau).round() as usize;
+    let q_r = r_sorted[qi_r.min(n - 1)];
+
+    // Step 4: solve for β_init s.t. X·β_init ≈ μ̂_gauss + q_r·1
+    //   = X β_gauss + q_r·1  ⟹  β_init = β_gauss + (X'X + S + ridge)⁻¹ X' (q_r·1)
+    let q_const = Array1::from_elem(n, q_r);
+    let xtq = x.t().dot(&q_const);
+    let delta_beta = solve(a_gauss, xtq)?;
+    let mut beta = &beta_gauss + &delta_beta;
+
+    // Step 5: σ for the ELF loss — qgam's co formula with err=0.05 default,
+    // bumped for extreme τ. qgam itself runs `tuneLearnFast` (cross-validated
+    // bandwidth) — out of scope for v0.1 — but for extreme τ the default σ
+    // is too sharp: most observations land well past the logit's saturation
+    // and have ~zero weight, which makes the IRLS Hessian rank-deficient.
+    // The 1/(4τ(1-τ)) factor (= 1 at τ=0.5, ≈ 5 at τ=0.05/0.95) widens σ
+    // enough to keep observations contributing through the IRLS solve.
+    // Sharper, properly-calibrated σ remains a deferred followup.
+    let sigma = if sigma_user > 0.0 {
+        sigma_user
+    } else {
+        let err = 0.05_f64;
+        let sigma2_floor = sigma2_hat.max(1e-6);
+        let co_default = err * (2.0 * std::f64::consts::PI * sigma2_floor).sqrt()
+            / (2.0 * 2.0_f64.ln());
+        let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
+        co_default * tail_scale
+    };
+    let inv_sigma = 1.0 / sigma;
+
+    // Helper: stable sigmoid
+    fn sigmoid_stable(x: f64) -> f64 {
+        if x >= 0.0 {
+            let e = (-x).exp();
+            1.0 / (1.0 + e)
+        } else {
+            let e = x.exp();
+            e / (1.0 + e)
+        }
+    }
+
+    let mut converged = false;
+    let mut iter = 0;
+
+    for outer_iter in 0..max_iter {
+        iter = outer_iter + 1;
+
+        let eta: Array1<f64> = x.dot(&beta);
+
+        // Per-obs IRLS quantities, computed in a saturation-safe way (qgam
+        // R-source pattern, elf.R:159-162):
+        //   w_i  = s_i(1-s_i)/σ²        (Dmu²/2; goes to 0 as |r/σ| → ∞ —
+        //                                that's fine, those obs just drop
+        //                                out of the IRLS solve)
+        //   The Newton step solves (X'WX + S) β = X' (W·η + g) where g_i =
+        //   (s_i - (1-τ))/σ is the "working gradient" — bounded in
+        //   [-(1-τ)/σ, τ/σ] regardless of saturation. This avoids the w·z
+        //   product blowing up when w → 0.
+        let mut w = Array1::<f64>::zeros(n);
+        let mut g = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let r = y[i] - eta[i];
+            let s = sigmoid_stable(r * inv_sigma);
+            w[i] = s * (1.0 - s) * inv_sigma * inv_sigma;
+            g[i] = (s - (1.0 - tau)) * inv_sigma;
+        }
+
+        let xtwx = crate::reml::compute_xtwx(x, &w);
+
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p {
+            max_diag = max_diag.max(xtwx[[i, i]].abs());
+        }
+
+        let mut a = xtwx + &penalty_total;
+        let ridge = ridge_scale * max_diag;
+        for i in 0..p {
+            a[[i, i]] += ridge;
+        }
+
+        // RHS = X' (W·η + g). Equivalent to X'·W·z when w_i > 0 with
+        // z_i = η_i + g_i / w_i, but well-defined at saturation.
+        let weta_plus_g: Array1<f64> = w
+            .iter()
+            .zip(eta.iter())
+            .zip(g.iter())
+            .map(|((&wi, &etai), &gi)| wi * etai + gi)
+            .collect();
+        let xt_rhs = x.t().dot(&weta_plus_g);
+
+        let beta_old = beta.clone();
+        beta = solve(a, xt_rhs)?;
+
+        let max_change = beta
+            .iter()
+            .zip(beta_old.iter())
+            .map(|(b, b_old)| (b - b_old).abs())
+            .fold(0.0f64, f64::max);
+
+        if max_change < tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    // Final quantities
+    let eta: Array1<f64> = x.dot(&beta);
+    let fitted_values = eta.clone();
+
+    let mut weights = Array1::<f64>::zeros(n);
+    let mut deviance = 0.0;
+    let log2 = 2.0_f64.ln();
+    for i in 0..n {
+        let r = y[i] - eta[i];
+        let s = sigmoid_stable(r * inv_sigma);
+        weights[i] = s * (1.0 - s) * inv_sigma * inv_sigma;
+        // Per-obs ELF deviance: 2·(L(r) - log 2)
+        let r_over_sigma = r * inv_sigma;
+        let softplus = if r_over_sigma > 0.0 {
+            r_over_sigma + (-r_over_sigma).exp().ln_1p()
+        } else {
+            r_over_sigma.exp().ln_1p()
+        };
+        let l = -r * (1.0 - tau) * inv_sigma + softplus;
+        deviance += 2.0 * (l - log2);
+    }
+
+    Ok(PiRLSResult {
+        coefficients: beta,
+        fitted_values,
+        linear_predictor: eta,
+        weights,
+        deviance,
+        iterations: iter,
+        converged,
+    })
+}
+
 /// Fit PiRLS using a discretized design for O(n*k + m*k^2) X'WX computation.
 ///
 /// This replaces the naive O(n*p^2) X'WX with scatter-gather via compressed
@@ -1520,8 +1825,8 @@ pub fn fit_pirls_discretized(
             Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
             Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog
             | Family::Tweedie { .. } | Family::InverseGaussian | Family::NegBin { .. } => y[i].max(0.1),
-            // TDist and Gaussian use identity link; initialize to y directly
-            Family::Gaussian | Family::TDist { .. } => y[i],
+            // Identity-link families: initialize η = y directly.
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
         };
         eta[i] = family.link(safe_y);
     }

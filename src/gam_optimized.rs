@@ -286,6 +286,20 @@ impl FitCache {
             );
         }
 
+        // Quantile (qgam-style) needs a specialised IRLS using ELF weights.
+        if let crate::pirls::Family::Quantile { tau, sigma } = family {
+            return crate::pirls::fit_pirls_quantile(
+                y,
+                &self.design_matrix,
+                lambda,
+                &self.penalties,
+                tau,
+                sigma,
+                max_iter,
+                tolerance,
+            );
+        }
+
         if let Some(ref disc) = self.discretized {
             fit_pirls_discretized(
                 y,
@@ -464,6 +478,12 @@ impl GAM {
         // override.
         let _ = n;
         let is_gaussian_family = matches!(self.family, crate::pirls::Family::Gaussian);
+        // Quantile (qgam-style ELF) doesn't fit the standard GLM REML
+        // machinery — the closed-form REML gradient assumes a Gaussian-like
+        // deviance + dispersion that the ELF loss doesn't have. Force FS
+        // for now; full LAML coupling (à la mgcv's extended.family Dd/ls
+        // hooks) is a deferred followup.
+        let is_quantile_family = matches!(self.family, crate::pirls::Family::Quantile { .. });
         let selected_algorithm = algorithm.unwrap_or_else(|| {
             // In mgcv_exact mode the closed-form gradient/Hessian
             // (reml_gradient_mgcv_exact_closed_form) extends to canonical-link
@@ -474,7 +494,9 @@ impl GAM {
             // The historical "Newton destabilizes IRLS for binomial" issue
             // (commit 2c) was fixed by the eigenvalue-ABS Hessian (4d) and
             // mgcv_exact's tighter convergence criteria (3i+).
-            if is_gaussian_family || self.mgcv_exact {
+            if is_quantile_family {
+                crate::smooth::REMLAlgorithm::FellnerSchall
+            } else if is_gaussian_family || self.mgcv_exact {
                 crate::smooth::REMLAlgorithm::Newton
             } else {
                 crate::smooth::REMLAlgorithm::FellnerSchall
@@ -523,7 +545,9 @@ impl GAM {
         // (y - Xβ)² is wrong for non-Gaussian since Xβ=η not μ.
         smoothing_params.phi_fixed = match self.family {
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
-            | crate::pirls::Family::NegBin { .. } => Some(1.0),
+            | crate::pirls::Family::NegBin { .. }
+            // Quantile/ELF: σ is the family parameter; φ stays at 1 by convention.
+            | crate::pirls::Family::Quantile { .. } => Some(1.0),
             // QuasiPoisson/QuasiBinomial: dispersion is profiled, not fixed at 1.
             crate::pirls::Family::Gaussian
             | crate::pirls::Family::QuasiPoisson
