@@ -24,7 +24,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pytest
@@ -48,11 +48,77 @@ def _load_budgets() -> dict[str, float]:
     return {k: float(v) for k, v in raw.items() if not k.startswith("_")}
 
 
-def _make_gam(family: str):
-    fam = family.lower()
-    if fam == "gaussian":
-        return mgcv_rust.GAM()
-    return mgcv_rust.GAM(fam if fam != "gamma" else "gamma")
+# Map fixture-side family names to mgcv_rust.GAM constructor names.
+# mgcv_rust accepts these family strings: gaussian, binomial, poisson, gamma,
+# quasipoisson, quasibinomial, t-dist, tweedie, inverse.gaussian, negbin, nb.
+_RUST_FAM = {
+    "gaussian":          "gaussian",
+    "binomial":          "binomial",
+    "poisson":           "poisson",
+    "Gamma":             "gamma",
+    "gamma":             "gamma",
+    "tw":                "tweedie",          # profile-p (p kwarg omitted)
+    "tweedie":           "tweedie",          # fixed-p (p kwarg from fixture)
+    "Tweedie":           "tweedie",
+    "inverse.gaussian":  "inverse.gaussian",
+    "negative.binomial": "negbin",           # fixed-θ (theta kwarg from fixture)
+    "nb":                "nb",               # profile-θ
+    "quasipoisson":      "quasipoisson",
+    "quasibinomial":     "quasibinomial",
+    "t-dist":            "t-dist",
+    "scat":              "t-dist",
+}
+
+
+import re as _re
+
+
+def _parse_family_param(name: str, kind: str) -> Optional[float]:
+    """Parse a family parameter encoded in the fixture name suffix.
+
+    Conventions used by the fixture generator:
+    - `_p15` → tweedie p=1.5 (last two digits are the decimal part)
+    - `_theta2` / `_theta20` → negbin theta (whole number)
+    - `_df5` → t-dist df
+
+    Returns None if no match — the fixture may simply not encode the parameter
+    (e.g. profile-p tw() and profile-θ nb() don't need one).
+    """
+    if kind == "p":
+        m = _re.search(r"_p(\d+)(?=$|[_.])", name)
+        if m:
+            digits = m.group(1)
+            return float(digits) / (10 ** (len(digits) - 1))
+    elif kind == "theta":
+        m = _re.search(r"_theta(\d+(?:\.\d+)?)(?=$|[_.])", name)
+        if m:
+            return float(m.group(1))
+    elif kind == "df":
+        m = _re.search(r"_df(\d+(?:\.\d+)?)(?=$|[_.])", name)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def _make_gam(name: str, inp: Any):
+    """Construct a fresh mgcv_rust.GAM matching the fixture family/link/kwargs."""
+    fam = _RUST_FAM.get(inp.family, inp.family)
+    kwargs: dict[str, Any] = {"link": inp.link}
+    # Family-specific parameters; omit if not encoded so rust falls back to
+    # the right default (profile mode for tw()/nb(), p=1.5 for Tweedie etc.).
+    if inp.family in ("tweedie", "Tweedie"):
+        p = _parse_family_param(name, "p")
+        if p is not None:
+            kwargs["p"] = p
+    elif inp.family == "negative.binomial":
+        theta = _parse_family_param(name, "theta")
+        if theta is not None:
+            kwargs["theta"] = theta
+    elif inp.family in ("t-dist", "scat"):
+        df = _parse_family_param(name, "df")
+        if df is not None:
+            kwargs["df"] = df
+    return mgcv_rust.GAM(fam, **kwargs)
 
 
 def _time_rust_fit(fix: Fixture) -> dict[str, Any]:
@@ -63,12 +129,12 @@ def _time_rust_fit(fix: Fixture) -> dict[str, Any]:
     bs0 = inp.bs[0]
 
     # One warmup run to amortize first-call overhead (BLAS init, etc).
-    g = _make_gam(inp.family)
+    g = _make_gam(fix.name, inp)
     g.fit(x, y, k=k, method=inp.method, bs=bs0)
 
     times_ms: list[float] = []
     for _ in range(_N_RUNS):
-        g = _make_gam(inp.family)
+        g = _make_gam(fix.name, inp)
         t0 = time.perf_counter()
         g.fit(x, y, k=k, method=inp.method, bs=bs0)
         times_ms.append((time.perf_counter() - t0) * 1000.0)
@@ -110,13 +176,32 @@ except Exception:
     _RPY2_AVAILABLE = False
 
 
+# R-side mgcv family() constructors, parameterized over (link, p, theta, df).
+# Single-arg families ignore unused kwargs via .format_map.
 _FAMILY_R = {
-    "gaussian": 'gaussian(link="{}")',
-    "binomial": 'binomial(link="{}")',
-    "poisson":  'poisson(link="{}")',
-    "Gamma":    'Gamma(link="{}")',
-    "gamma":    'Gamma(link="{}")',
+    "gaussian":          'gaussian(link="{link}")',
+    "binomial":          'binomial(link="{link}")',
+    "poisson":           'poisson(link="{link}")',
+    "Gamma":             'Gamma(link="{link}")',
+    "gamma":             'Gamma(link="{link}")',
+    "tw":                'tw(link="{link}")',                  # profile-p
+    "tweedie":           'Tweedie(p={p}, link="{link}")',      # fixed-p
+    "Tweedie":           'Tweedie(p={p}, link="{link}")',
+    "inverse.gaussian":  'inverse.gaussian(link="{link}")',
+    "negative.binomial": 'negbin(theta={theta}, link="{link}")',  # mgcv's fixed-θ
+    "nb":                'nb(link="{link}")',                  # profile-θ
+    "quasipoisson":      'quasipoisson(link="{link}")',
+    "quasibinomial":     'quasibinomial(link="{link}")',
+    "t-dist":            'scat(link="{link}")',
+    "scat":              'scat(link="{link}")',
 }
+
+
+class _Dflt(dict):
+    """Format-map helper: missing keys render as the empty string,
+    which is fine for single-arg family() templates that ignore p/theta/df."""
+    def __missing__(self, key: str) -> str:
+        return ""
 
 
 def _time_mgcv_fit(fix: Fixture) -> dict[str, Any] | None:
@@ -130,7 +215,16 @@ def _time_mgcv_fit(fix: Fixture) -> dict[str, Any] | None:
     df = pd.DataFrame({f"x{i}": x[:, i] for i in range(inp.d)})
     df["y"] = y
     rhs = " + ".join(f's(x{i}, k={inp.k[i]}, bs="{inp.bs[i]}")' for i in range(inp.d))
-    family_call = _ro.r(_FAMILY_R[inp.family].format(inp.link))
+    template = _FAMILY_R.get(inp.family)
+    if template is None:
+        return None  # silently skip cases we don't have an R-side mapping for
+    fam_args = _Dflt(
+        link=inp.link,
+        p=_parse_family_param(fix.name, "p") or 1.5,
+        theta=_parse_family_param(fix.name, "theta") or 1.0,
+        df=_parse_family_param(fix.name, "df") or 5.0,
+    )
+    family_call = _ro.r(template.format_map(fam_args))
     formula = _ro.Formula(f"y ~ {rhs}")
 
     with _localconverter(_pandas2ri.converter + _default_converter):
