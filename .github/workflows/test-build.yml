@@ -208,14 +208,19 @@ jobs:
         shell: bash
         run: |
           set -e
-          python -m pip install --upgrade pip pypiserver pytest
+          # Deps from real PyPI first (numpy is the only runtime dep).
+          python -m pip install --upgrade pip pypiserver pytest numpy
           pypi-server run -p 8080 -i 127.0.0.1 -P . -a . dist/ &
           PYPI_PID=$!
           sleep 3
           curl -fsS http://127.0.0.1:8080/simple/ > /dev/null
+          # mgcv-rust ONLY from local pypiserver. Without --no-deps and a
+          # bare --index-url (no --extra-index-url), pip can't reach PyPI
+          # and silently install the published 0.6.0 (which predates
+          # GAMFitter and would mask wheel breakage in this verification).
           python -m pip install \
             --index-url http://127.0.0.1:8080/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
+            --no-deps \
             mgcv-rust
           kill "$PYPI_PID" || true
           python -c "import mgcv_rust; print('installed at', mgcv_rust.__file__)"
@@ -239,14 +244,19 @@ jobs:
         shell: bash
         run: |
           set -e
-          python -m pip install --upgrade pip pypiserver pytest
+          # Deps from real PyPI first (numpy is the only runtime dep).
+          python -m pip install --upgrade pip pypiserver pytest numpy
           pypi-server run -p 8080 -i 127.0.0.1 -P . -a . dist/ &
           PYPI_PID=$!
           sleep 3
           curl -fsS http://127.0.0.1:8080/simple/ > /dev/null
+          # mgcv-rust ONLY from local pypiserver. Without --no-deps and a
+          # bare --index-url (no --extra-index-url), pip can't reach PyPI
+          # and silently install the published 0.6.0 (which predates
+          # GAMFitter and would mask wheel breakage in this verification).
           python -m pip install \
             --index-url http://127.0.0.1:8080/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
+            --no-deps \
             mgcv-rust
           kill "$PYPI_PID" || true
           python -c "import mgcv_rust; print('installed at', mgcv_rust.__file__)"
