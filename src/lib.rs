@@ -148,7 +148,7 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None))]
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None, tau=None, sigma=None))]
     fn new(
         family: Option<&str>,
         mgcv_exact: Option<bool>,
@@ -156,6 +156,8 @@ impl PyGAM {
         df: Option<f64>,
         p: Option<f64>,
         theta: Option<f64>,
+        tau: Option<f64>,
+        sigma: Option<f64>,
     ) -> PyResult<Self> {
         // Validate df early if provided
         if let Some(df_val) = df {
@@ -183,7 +185,9 @@ impl PyGAM {
             (Some("quasibinomial"), None) | (Some("quasibinomial"), Some("logit")) => Family::QuasiBinomial,
             // Scaled t-distribution (mgcv's scat family). Identity link only.
             // df = 0.0 encodes "profile df"; df > 0 = user-fixed.
-            (Some("t-dist"), None) | (Some("t-dist"), Some("identity")) => {
+            // scat is mgcv's name for the scaled-t family; accept both.
+            (Some("t-dist") | Some("scat"), None)
+            | (Some("t-dist") | Some("scat"), Some("identity")) => {
                 let fixed_df = df.unwrap_or(0.0); // 0.0 = profile
                 Family::TDist { df: fixed_df, sigma2: 1.0 }
             }
@@ -219,12 +223,32 @@ impl PyGAM {
                 // profile-θ mode; actual theta set by outer Newton on log(θ)
                 Family::NegBin { theta: 2.0 }
             }
+            // Quantile (qgam-style): identity link only, ELF-smoothed pinball
+            // loss. Requires `tau` ∈ (0, 1); `sigma` controls smoothness
+            // (smaller σ → sharper quantile). Default σ = 0.0 is a sentinel
+            // meaning "calibrate from data" — actual σ is set in fit().
+            (Some("quantile"), None) | (Some("quantile"), Some("identity")) => {
+                let tau_val = tau.unwrap_or(0.5);
+                if tau_val <= 0.0 || tau_val >= 1.0 {
+                    return Err(PyValueError::new_err(format!(
+                        "quantile tau must be in (0, 1), got {}", tau_val
+                    )));
+                }
+                let sigma_val = sigma.unwrap_or(0.0); // 0.0 = auto-calibrate at fit
+                if sigma_val < 0.0 {
+                    return Err(PyValueError::new_err(format!(
+                        "quantile sigma must be >= 0, got {}", sigma_val
+                    )));
+                }
+                Family::Quantile { tau: tau_val, sigma: sigma_val }
+            }
             (Some(f), Some(l)) => {
                 return Err(PyValueError::new_err(format!(
                     "Unsupported family/link combination: {}({}). Supported: \
                      gaussian(identity), binomial(logit), poisson(log), \
                      gamma(inverse), gamma(log), quasipoisson(log), quasibinomial(logit), \
-                     t-dist(identity), tweedie(log), inverse.gaussian(log), \
+                     t-dist(identity), scat(identity), quantile(identity), \
+                     tweedie(log), inverse.gaussian(log), \
                      negbin(log), nb(log).",
                     f, l
                 )))
@@ -232,7 +256,7 @@ impl PyGAM {
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
                     "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', \
-                     'quasipoisson', 'quasibinomial', 't-dist', 'tweedie', 'inverse.gaussian', \
+                     'quasipoisson', 'quasibinomial', 't-dist', 'scat', 'quantile', 'tweedie', 'inverse.gaussian', \
                      'negbin', or 'nb'",
                     f
                 )))
@@ -703,6 +727,7 @@ impl PyGAM {
             Family::Tweedie { .. } => "tweedie",
             Family::InverseGaussian => "inverse.gaussian",
             Family::NegBin { .. } => "negbin",
+            Family::Quantile { .. } => "quantile",
         }
     }
 
@@ -720,6 +745,7 @@ impl PyGAM {
             Family::Tweedie { .. } => "log",
             Family::InverseGaussian => "log",
             Family::NegBin { .. } => "log",
+            Family::Quantile { .. } => "identity",
         }
     }
 
