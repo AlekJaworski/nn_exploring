@@ -478,11 +478,11 @@ impl GAM {
         // override.
         let _ = n;
         let is_gaussian_family = matches!(self.family, crate::pirls::Family::Gaussian);
-        // Quantile (qgam-style ELF) doesn't fit the standard GLM REML
-        // machinery — the closed-form REML gradient assumes a Gaussian-like
-        // deviance + dispersion that the ELF loss doesn't have. Force FS
-        // for now; full LAML coupling (à la mgcv's extended.family Dd/ls
-        // hooks) is a deferred followup.
+        // Quantile (qgam-style ELF) doesn't fit the closed-form REML gradient
+        // — that gradient assumes Gaussian-like deviance/dispersion that
+        // ELF doesn't have. Without the LAML coupling (mgcv's extended.family
+        // Dd/ls hooks), Newton stalls at the initial λ. Use Fellner-Schall
+        // until the LAML port lands.
         let is_quantile_family = matches!(self.family, crate::pirls::Family::Quantile { .. });
         let selected_algorithm = algorithm.unwrap_or_else(|| {
             // In mgcv_exact mode the closed-form gradient/Hessian
@@ -490,10 +490,6 @@ impl GAM {
             // exponential families via the envelope theorem — Newton at
             // PiRLS-converged β converges to mgcv's λ to ~10% relerr on
             // binomial/poisson, vs FS landing ~30× off.
-            //
-            // The historical "Newton destabilizes IRLS for binomial" issue
-            // (commit 2c) was fixed by the eigenvalue-ABS Hessian (4d) and
-            // mgcv_exact's tighter convergence criteria (3i+).
             if is_quantile_family {
                 crate::smooth::REMLAlgorithm::FellnerSchall
             } else if is_gaussian_family || self.mgcv_exact {
@@ -850,9 +846,30 @@ impl GAM {
                     )?;
                     total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
+                    // Compute REML/LAML score at converged state — read by
+                    // wrapper-level σ profilers to drive Brent on σ.
+                    let final_xtwx = if let Some(ref disc) = cache.discretized {
+                        disc.compute_xtwx(&final_result.weights)
+                    } else {
+                        crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
+                    };
+                    smoothing_params.last_score =
+                        crate::reml::reml_criterion_multi_cached_mgcv_exact(
+                            y,
+                            &cache.design_matrix,
+                            &final_result.weights,
+                            &smoothing_params.lambda,
+                            &cache.penalties,
+                            Some(&final_xtwx),
+                            smoothing_params.mp,
+                            self.family,
+                            smoothing_params.y_original.as_ref(),
+                        ).ok();
+
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
                         eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+                        eprintln!("[PROFILE] REML score: {:?}", smoothing_params.last_score);
                     }
 
                     self.store_results(final_result, smoothing_params, y, &cache.design_matrix);
@@ -872,9 +889,30 @@ impl GAM {
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
+            // Score even on the no-converge fall-through so wrapper-level
+            // σ profilers (Brent on σ) always have a number to compare.
+            let final_xtwx = if let Some(ref disc) = cache.discretized {
+                disc.compute_xtwx(&final_result.weights)
+            } else {
+                crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
+            };
+            smoothing_params.last_score =
+                crate::reml::reml_criterion_multi_cached_mgcv_exact(
+                    y,
+                    &cache.design_matrix,
+                    &final_result.weights,
+                    &smoothing_params.lambda,
+                    &cache.penalties,
+                    Some(&final_xtwx),
+                    smoothing_params.mp,
+                    self.family,
+                    smoothing_params.y_original.as_ref(),
+                ).ok();
+
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
                 eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+                eprintln!("[PROFILE] REML score: {:?}", smoothing_params.last_score);
             }
 
             self.store_results(final_result, smoothing_params, y, &cache.design_matrix);

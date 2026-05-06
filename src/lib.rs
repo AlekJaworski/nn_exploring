@@ -691,6 +691,17 @@ impl PyGAM {
             .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))
     }
 
+    /// Get the REML / LAML score at the converged fit. Used by wrapper-level
+    /// σ profilers (e.g. for the Quantile family) to drive Brent on σ via
+    /// the same likelihood criterion mgcv uses.
+    fn get_reml_score(&self) -> PyResult<f64> {
+        self.inner
+            .reml_score
+            .ok_or_else(|| PyValueError::new_err(
+                "REML score not available — model not fitted, or the optimizer didn't compute it for this family/path"
+            ))
+    }
+
     /// Get all smoothing parameters (for multi-variable GAMs)
     fn get_all_lambdas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let lambdas = self

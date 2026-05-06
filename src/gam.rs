@@ -511,6 +511,10 @@ pub struct GAM {
     /// Newton step on log(θ) (mgcv's `nb()` extended family). Default false
     /// means fixed-θ (`negbin(theta=...)` family).
     pub negbin_profile: bool,
+    /// REML / LAML score at the converged fit. Populated by store_results
+    /// using the same dispatch_reml_score path that the outer optimizer
+    /// uses, so it's a consistent objective value across families.
+    pub reml_score: Option<f64>,
 }
 
 impl GAM {
@@ -530,6 +534,7 @@ impl GAM {
             mgcv_exact: false,
             tweedie_profile: false,
             negbin_profile: false,
+            reml_score: None,
         }
     }
 
@@ -863,6 +868,11 @@ impl GAM {
         }
 
         self.deviance = Some(correct_deviance);
+        // Pull the REML/LAML score off smoothing_params (set by the
+        // optimizer at convergence). This lets callers do wrapper-level
+        // σ-profiling — Brent on log σ over this score, à la mgcv's
+        // outer Newton on θ for Tweedie/NegBin.
+        self.reml_score = smoothing_params.last_score;
         self.smoothing_params = Some(smoothing_params);
         self.fitted = true;
     }

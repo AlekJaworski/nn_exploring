@@ -279,6 +279,21 @@ pub struct SmoothingParameter {
     /// Current log(θ) for NB profile-θ. Updated each outer Newton iteration.
     /// Initial value: log(2.0).
     pub negbin_log_theta: f64,
+    /// Profile-σ mode for Quantile (qgam-style ELF) family.
+    ///
+    /// When `true`, the outer optimizer also profiles log σ (the ELF
+    /// bandwidth) via the same REML score machinery — Wood-style
+    /// analytical optimization rather than qgam's bootstrap-CV
+    /// `tuneLearnFast`. Set to true when the user passed σ=0 sentinel
+    /// (the default for `mr.GAM("quantile", tau=...)`).
+    pub quantile_profile: bool,
+    /// Current log(σ) for Quantile profile-σ. Updated each outer Newton
+    /// iteration in the same FD-Newton style as Tweedie p / NegBin θ.
+    pub quantile_log_sigma: f64,
+    /// REML / LAML score at convergence. Populated by the outer optimizer
+    /// (Newton or FS) on the last iteration so callers can read it back
+    /// for σ profiling at the wrapper level.
+    pub last_score: Option<f64>,
 }
 
 /// Refresh produced by an inner PIRLS run at a candidate λ during the
@@ -324,6 +339,9 @@ impl SmoothingParameter {
             tweedie_theta: 0.0,
             negbin_profile: false,
             negbin_log_theta: 2.0_f64.ln(),
+            quantile_profile: false,
+            quantile_log_sigma: 0.0,
+            last_score: None,
         }
     }
 
@@ -348,6 +366,9 @@ impl SmoothingParameter {
             tweedie_theta: 0.0,
             negbin_profile: false,
             negbin_log_theta: 2.0_f64.ln(),
+            quantile_profile: false,
+            quantile_log_sigma: 0.0,
+            last_score: None,
         }
     }
 
@@ -372,6 +393,9 @@ impl SmoothingParameter {
             tweedie_theta: 0.0,
             negbin_profile: false,
             negbin_log_theta: 2.0_f64.ln(),
+            quantile_profile: false,
+            quantile_log_sigma: 0.0,
+            last_score: None,
         }
     }
 
