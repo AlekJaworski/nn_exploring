@@ -3,6 +3,7 @@ name: Test Build
 on:
   push:
     branches:
+      - 'master'
       - 'claude/**'
       - 'validation-framework*'
   pull_request:
@@ -179,3 +180,105 @@ jobs:
         with:
           name: test-wheels-windows-x86_64
           path: dist
+
+  # -----------------------------------------------------------------------
+  # Verify jobs: gated to master pushes. Each runs on a fresh runner of the
+  # same OS, downloads the wheel artifact, serves it via pypiserver, and
+  # tests `pip install --index-url <local>` — exercising pip's real
+  # wheel-tag matching, dep resolution, and abi3 selection. Catches things
+  # like manylinux tag mismatches and abi3 forward-compat regressions that
+  # local-file installs (`pip install ./dist/*.whl`) skip.
+  # -----------------------------------------------------------------------
+
+  verify-linux:
+    name: Verify pip install (Linux)
+    needs: test-linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-wheels-linux-x86_64
+          path: dist
+      - name: pypiserver + pip install + usability suite
+        shell: bash
+        run: |
+          set -e
+          python -m pip install --upgrade pip pypiserver pytest
+          pypi-server run -p 8080 -i 127.0.0.1 -P . -a . dist/ &
+          PYPI_PID=$!
+          sleep 3
+          curl -fsS http://127.0.0.1:8080/simple/ > /dev/null
+          python -m pip install \
+            --index-url http://127.0.0.1:8080/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            mgcv-rust
+          kill "$PYPI_PID" || true
+          python -c "import mgcv_rust; print('installed at', mgcv_rust.__file__)"
+          python -m pytest tests/usability -q
+
+  verify-macos:
+    name: Verify pip install (macOS aarch64)
+    needs: test-macos
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-wheels-macos-aarch64
+          path: dist
+      - name: pypiserver + pip install + usability suite
+        shell: bash
+        run: |
+          set -e
+          python -m pip install --upgrade pip pypiserver pytest
+          pypi-server run -p 8080 -i 127.0.0.1 -P . -a . dist/ &
+          PYPI_PID=$!
+          sleep 3
+          curl -fsS http://127.0.0.1:8080/simple/ > /dev/null
+          python -m pip install \
+            --index-url http://127.0.0.1:8080/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            mgcv-rust
+          kill "$PYPI_PID" || true
+          python -c "import mgcv_rust; print('installed at', mgcv_rust.__file__)"
+          python -m pytest tests/usability -q
+
+  verify-windows:
+    name: Verify pip install (Windows)
+    needs: test-windows
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-wheels-windows-x86_64
+          path: dist
+      - name: pypiserver + pip install + usability suite
+        shell: bash
+        run: |
+          set -e
+          python -m pip install --upgrade pip pypiserver pytest
+          pypi-server run -p 8080 -i 127.0.0.1 -P . -a . dist/ &
+          PYPI_PID=$!
+          sleep 5  # Windows process spawn is slower
+          curl -fsS http://127.0.0.1:8080/simple/ > /dev/null
+          python -m pip install \
+            --index-url http://127.0.0.1:8080/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            mgcv-rust
+          kill "$PYPI_PID" || true
+          python -c "import mgcv_rust; print('installed at', mgcv_rust.__file__)"
+          python -m pytest tests/usability -q
