@@ -636,6 +636,58 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
     let wp_base = (log_pm1 + rho) / onep2 - alpha / onep + 1.0 / twop;
 
     let log_eps = f64::EPSILON * f64::EPSILON; // tolerance for convergence (~5e-32)
+    let log_eps_ln = log_eps.ln();
+
+    // Precompute the j-only pieces of w_j and wp1_j. These depend on (p, phi)
+    // but not on the observation, so the per-(i,j) special-fn calls
+    // (`log_gamma`, `digamma`) collapse to one call per j shared across all
+    // observations. For n=400 obs each touching ~20 j values this turns
+    // ~8000 special-fn calls into ~30. Bound the cache to the maximum j
+    // any observation will need (mode = y^(2-p)/(phi·(2-p))) plus a buffer
+    // for the upsweep convergence tail.
+    let mut j_max_obs: i64 = 1;
+    for &yi in y.iter() {
+        if yi > 0.0 {
+            let xj = yi.powf(twop) / (phi * twop);
+            let j_max = (xj.floor() as i64).max(1);
+            if j_max > j_max_obs {
+                j_max_obs = j_max;
+            }
+        }
+    }
+    // Buffer of 64 covers the upsweep tail comfortably; falls back to direct
+    // computation if we ever exceed it (safety, not a hot path).
+    let j_cache_size = (j_max_obs + 64).max(64) as usize;
+    // wj0[j] = j*w_base - log_gamma(j+1) - log_gamma(-j*alpha)  (no obs dep)
+    // wp1_const[j] = j*wp_base + (j/onep2) * digamma(-j*alpha)  (no obs dep)
+    let mut wj0 = vec![0.0_f64; j_cache_size + 1];
+    let mut wp1_const = vec![0.0_f64; j_cache_size + 1];
+    for j in 1..=j_cache_size {
+        let jf = j as f64;
+        let neg_j_alpha = -jf * alpha;
+        wj0[j] = jf * w_base - log_gamma(jf + 1.0) - log_gamma(neg_j_alpha);
+        wp1_const[j] = jf * wp_base + (jf / onep2) * digamma(neg_j_alpha);
+    }
+
+    // Closures that fall back to direct evaluation past the cache (only
+    // reached if the upsweep extends more than 64 past the global j_max
+    // — unlikely for typical Tweedie data).
+    let wj0_at = |j: usize| -> f64 {
+        if j <= j_cache_size {
+            wj0[j]
+        } else {
+            let jf = j as f64;
+            jf * w_base - log_gamma(jf + 1.0) - log_gamma(-jf * alpha)
+        }
+    };
+    let wp1_const_at = |j: usize| -> f64 {
+        if j <= j_cache_size {
+            wp1_const[j]
+        } else {
+            let jf = j as f64;
+            jf * wp_base + (jf / onep2) * digamma(-jf * alpha)
+        }
+    };
 
     for i in 0..n {
         let yi = y[i];
@@ -656,13 +708,10 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
         let j_max = (x.floor() as i64).max(1);
 
         // First pass: find wmax by evaluating at j_max
-        let wmax_j = j_max;
-        let wmax_val = {
-            let j = wmax_j as f64;
-            j * w_base - log_gamma(j + 1.0) - log_gamma(-j * alpha) - j * alogy_i
-        };
+        let wmax_j = j_max as usize;
+        let wmax_val = wj0_at(wmax_j) - (j_max as f64) * alogy_i;
 
-        let wmin = wmax_val + log_eps.ln();
+        let wmin = wmax_val + log_eps_ln;
 
         // Accumulate sums (scaled by exp(-wmax)):
         // wi = Σ exp(wj - wmax) = W / exp(wmax)
@@ -672,22 +721,16 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
         let mut w1i = 0.0f64;
         let mut wdlogwdp = 0.0f64;
 
-        // Helper: compute wp1_j = j * wp_base + (j/onep2) * digamma(-j*alpha) - j * logy1p2_i
-        // This is the per-j derivative of log W_j w.r.t. p (misc.c:333).
-        let wp1_j = |jf: f64| -> f64 {
-            let dig_term = (jf / onep2) * digamma(-jf * alpha);
-            jf * wp_base + dig_term - jf * logy1p2_i
-        };
-
         // Upsweep from j_max upward until wj < wmin
         let mut j = wmax_j;
         loop {
             let jf = j as f64;
-            let wj = jf * w_base - log_gamma(jf + 1.0) - log_gamma(-jf * alpha) - jf * alogy_i;
+            let wj = wj0_at(j) - jf * alogy_i;
             let wj_scaled = (wj - wmax_val).exp();
             wi += wj_scaled;
             w1i += wj_scaled * jf * wb1_base; // wb1_j = j * (-1/onep)
-            wdlogwdp += wj_scaled * wp1_j(jf);
+            let wp1 = wp1_const_at(j) - jf * logy1p2_i;
+            wdlogwdp += wj_scaled * wp1;
             if wj < wmin {
                 break;
             }
@@ -699,18 +742,22 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
         }
 
         // Downsweep from j_max-1 down to 1
-        j = wmax_j - 1;
-        while j >= 1 {
-            let jf = j as f64;
-            let wj = jf * w_base - log_gamma(jf + 1.0) - log_gamma(-jf * alpha) - jf * alogy_i;
-            let wj_scaled = (wj - wmax_val).exp();
-            wi += wj_scaled;
-            w1i += wj_scaled * jf * wb1_base;
-            wdlogwdp += wj_scaled * wp1_j(jf);
-            if wj < wmin {
-                break;
+        if wmax_j >= 1 {
+            let mut j_ds: i64 = wmax_j as i64 - 1;
+            while j_ds >= 1 {
+                let jf = j_ds as f64;
+                let ju = j_ds as usize;
+                let wj = wj0_at(ju) - jf * alogy_i;
+                let wj_scaled = (wj - wmax_val).exp();
+                wi += wj_scaled;
+                w1i += wj_scaled * jf * wb1_base;
+                let wp1 = wp1_const_at(ju) - jf * logy1p2_i;
+                wdlogwdp += wj_scaled * wp1;
+                if wj < wmin {
+                    break;
+                }
+                j_ds -= 1;
             }
-            j -= 1;
         }
 
         // log W = wmax + log(wi)
