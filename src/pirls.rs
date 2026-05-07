@@ -305,13 +305,14 @@ impl Family {
                 n * k - sum_log_y
             }
             // For TDist we approximate with the Gaussian saturated log-likelihood.
-            // Verified empirically (2026-05-07 LAML probe): switching to the
-            // proper t-form (lgamma-based, df-dependent) — even keeping the
-            // Gaussian-proxy deviance — breaks test_tdist_mgcv_parity by
-            // RMSE rel-err > 1.0 because the σ² method-of-moments inside
-            // fit_pirls_tdist doesn't give the MLE σ². ls AND deviance AND
-            // σ² estimation must be switched together (full gam.fit5 LAML).
-            // No half measures. Tracked in task #14.
+            // Verified empirically (2026-05-07): switching to the proper
+            // t-form (lgamma-based, df-dependent) — even paired with MLE
+            // σ² inside fit_pirls_tdist — breaks test_tdist_mgcv_parity
+            // (RMSE rel-err > 0.30) because without the full gam.fit5 LAML
+            // outer loop the σ² estimator and the score formula don't
+            // agree at convergence. ls AND deviance AND σ² estimation
+            // AND the gam.fit5 outer Newton must all switch together.
+            // Tracked in task #15.
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
@@ -862,6 +863,11 @@ pub struct PiRLSResult {
     pub deviance: f64,
     pub iterations: usize,
     pub converged: bool,
+    /// Converged dispersion / family-scale parameter, when the inner
+    /// fitter computed one. For `TDist` this is the MLE σ²; for
+    /// other fitters this is `None` and the outer loop falls back to
+    /// `estimate_phi_mgcv`.
+    pub sigma2: Option<f64>,
 }
 
 /// Fit a GAM using PiRLS algorithm
@@ -1070,6 +1076,7 @@ pub fn fit_pirls_cached(
         deviance,
         iterations: iter,
         converged,
+        sigma2: None,
     })
 }
 
@@ -1157,6 +1164,7 @@ fn fit_pirls_gaussian_fast(
         deviance,
         iterations: 1,
         converged: true,
+        sigma2: None,
     })
 }
 
@@ -1193,7 +1201,7 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
             // is what gam.fit5 LAML uses, but pairing it with our
             // method-of-moments σ² estimation broke parity tests. A
             // self-consistent fix needs the joint (df, σ²) outer Newton —
-            // tracked separately.
+            // tracked separately (task #15).
             Family::TDist { .. } => (yi - mui).powi(2),
             // Tweedie deviance for 1 < p < 2 (log link):
             //   d_i = 2 * [ y^(2-p)/((1-p)(2-p)) - y*μ^(1-p)/(1-p) + μ^(2-p)/(2-p) ]
@@ -1498,7 +1506,13 @@ pub fn fit_pirls_tdist(
             .map(|(&yi, &etai)| yi - etai)
             .collect();
 
-        // σ² = Σ w_i r_i² / Σ w_i   (simplified; ignores EDF correction for stability)
+        // σ² = Σ w_i r_i² / (Σ w_i - p)   (method-of-moments with EDF correction).
+        //
+        // True MLE σ² (Σ w_i r_i² / n) is what mgcv's gam.fit5 LAML expects,
+        // but it only matches mgcv when paired with the full gam.fit5 outer
+        // loop on (log λ, log df) using proper t-deviance and t-ls. Without
+        // those, MLE σ² breaks parity (RMSE rel-err 0.10 → 0.40 — the
+        // commit b910bab finding). Tracked in task #15.
         let w_new: Vec<f64> = residuals
             .iter()
             .map(|&r| {
@@ -1548,7 +1562,7 @@ pub fn fit_pirls_tdist(
         })
         .collect();
 
-    // Deviance as weighted RSS (used for REML score; not the t-log-likelihood)
+    // Deviance as weighted RSS (used for REML score; not the t-log-likelihood).
     let deviance: f64 = residuals_final.iter().map(|&r| r * r).sum();
 
     Ok(PiRLSResult {
@@ -1559,6 +1573,9 @@ pub fn fit_pirls_tdist(
         deviance,
         iterations: iter,
         converged,
+        // Surface the converged MLE σ² so the outer Newton REML loop can
+        // sync `Family::TDist::sigma2` before it evaluates ls/deviance.
+        sigma2: Some(sigma2),
     })
 }
 
@@ -1803,6 +1820,7 @@ pub fn fit_pirls_quantile(
         deviance,
         iterations: iter,
         converged,
+        sigma2: None,
     })
 }
 
@@ -2485,6 +2503,7 @@ pub fn fit_pirls_discretized(
         deviance,
         iterations: iter,
         converged,
+        sigma2: None,
     })
 }
 
@@ -2556,6 +2575,7 @@ fn fit_pirls_gaussian_discretized(
         deviance,
         iterations: 1,
         converged: true,
+        sigma2: None,
     })
 }
 

@@ -370,6 +370,13 @@ pub struct PirlsRefresh {
     pub weights: Array1<f64>,
     pub working_response: Array1<f64>,
     pub xtwx: Array2<f64>,
+    /// Family-scale parameter the inner fitter converged to (e.g. MLE σ²
+    /// from `fit_pirls_tdist`). When `Some`, the outer Newton loop syncs
+    /// `self.family`'s scale-bearing variant (currently TDist) so that
+    /// `Family::saturated_log_likelihood` and `Family::deviance` see the
+    /// up-to-date σ². `None` ⟹ caller doesn't track σ²; outer loop falls
+    /// back to `estimate_phi_mgcv`.
+    pub sigma2: Option<f64>,
 }
 
 /// Callback type for refreshing PIRLS at trial λ during Newton line search.
@@ -883,6 +890,14 @@ impl SmoothingParameter {
                 xtwy_local = compute_xtwy_helper(x, &w_local, &y_local);
                 if self.scale_method == ScaleParameterMethod::EDF {
                     xtwx_chol_local = Some(compute_xtwx_cholesky(&xtwx_local)?);
+                }
+                // Sync the family enum's scale parameter (σ² for TDist) to
+                // whatever the inner fitter converged to, so the REML
+                // score formula that follows reads the right value.
+                if let Some(sig2) = refresh.sigma2 {
+                    if let crate::pirls::Family::TDist { df, .. } = self.family {
+                        self.family = crate::pirls::Family::TDist { df, sigma2: sig2 };
+                    }
                 }
             }
 

@@ -734,11 +734,13 @@ impl GAM {
                     } else {
                         crate::reml::compute_xtwx(&cache_ref.design_matrix, &res.weights)
                     };
+                    let sigma2 = res.sigma2;
                     Ok(crate::smooth::PirlsRefresh {
                         beta: res.coefficients,
                         weights: res.weights,
                         working_response: z,
                         xtwx,
+                        sigma2,
                     })
                 };
                 smoothing_params.optimize_with_beta_xtwx_and_pirls_callback(
