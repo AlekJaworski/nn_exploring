@@ -266,19 +266,18 @@ def test_quantile_perf_vs_qgam():
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.skip(reason="CV-tune helper deferred; LAML σ is degenerate for ELF (Fasiolo 2021), so quality match needs qgam-style CV — implementation pending")
+@pytest.mark.skipif(not _qgam_available(), reason="qgam not installed")
 def test_quantile_cv_matches_qgam_quality():
-    """With CV-tuned σ, signal-recovery RMSE matches qgam to within ~10%.
+    """With Brent-CV-tuned σ, signal-recovery RMSE matches qgam to within ~15%.
 
-    Currently skipped — the CV helper was reverted while reasoning through
-    LAML feasibility. ELF's likelihood is degenerate in σ (Fasiolo et al.
-    2021) so MLE/LAML σ doesn't work; qgam's tuneLearnFast (CV) is the
-    correct approach. A fast CV port is tracked separately.
+    Uses `mgcv_rust.fit_quantile(..., calibrate=True)` which runs a 5-fold
+    Brent search on log σ. Should be ~2× faster than qgam at quality
+    within ~15% of qgam's RMSE-vs-truth on n=1500 d=8 k=10 each.
     """
     import subprocess
     import tempfile
     import json
-    from mgcv_rust import fit_quantile  # noqa: F401  — needs the deferred helper
+    from mgcv_rust import fit_quantile
 
     rng = np.random.default_rng(11)
     n, d = 1500, 8
