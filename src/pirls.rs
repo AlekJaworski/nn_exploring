@@ -312,13 +312,23 @@ impl Family {
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
-            // Quantile/ELF: at the saturated point r=0, density is 1/(2σ·B(τ,1-τ)),
-            // so log f(y;y) = -log(2) - log(σ) - log(B(τ,1-τ)) per obs.
-            // This is a constant shift in the REML criterion (β-independent),
-            // so the λ-optimum is unaffected — same approximation rationale as TDist.
+            // Quantile/ELF saturated log-likelihood — port of qgam elf.R:204-216
+            // for the special case λ = σ (single-bandwidth parameterisation).
+            //
+            // qgam's general formula:
+            //   ls_per_obs = (1-τ)·λ·log(1-τ)/σ + λ·τ·log(τ)/σ
+            //                - log(λ) - log B(λ(1-τ)/σ, λτ/σ)
+            // With λ = σ this collapses to:
+            //   ls_per_obs = (1-τ)·log(1-τ) + τ·log(τ) - log σ - log B(1-τ, τ)
+            //              = -H(τ) - log σ - log B(τ, 1-τ)
+            // where H(τ) is the Bernoulli entropy. This differs from
+            // -log 2 - log σ - log B by an entropy-vs-log-2 constant; for
+            // τ=0.5 they coincide (H(0.5)=log 2) but for asymmetric τ the
+            // entropy version is what mgcv's LAML wants.
             Family::Quantile { tau, sigma } => {
-                let beta_tau = log_gamma(*tau) + log_gamma(1.0 - tau) - log_gamma(1.0);
-                n * (-2.0_f64.ln() - sigma.ln() - beta_tau)
+                let h_tau = -((1.0 - tau) * (1.0 - tau).ln() + tau * tau.ln());
+                let log_beta = log_gamma(*tau) + log_gamma(1.0 - tau) - log_gamma(1.0);
+                n * (-h_tau - sigma.ln() - log_beta)
             }
             // Inverse Gaussian saturated log-likelihood:
             // ls = -n/2 · log(2π·φ) - 3/2 · Σ log(y_i)
@@ -1213,23 +1223,31 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                     2.0 * theta * ((mu_c + theta) / theta).ln()
                 }
             }
-            // Quantile/ELF deviance: 2·(L(r) - L_sat) where
-            //   L(r) = (η-y)(1-τ)/σ + log(1 + exp((y-η)/σ))
-            //   L_sat = log(2)  (at r=0)
-            // Note: mui is the prediction (η under identity link); we use
-            // (yi - mui) directly. Always non-negative by construction
-            // (ELF is convex, minimum at r=0).
+            // Quantile/ELF deviance — port of qgam elf.R:122-138 with λ = σ.
+            //
+            // qgam's per-obs term:
+            //   T = (1-τ)·λ·log(1-τ) + λ·τ·log(τ)
+            //       - (1-τ)·(y-μ) + λ·log1pexp((y-μ)/λ)
+            //   dev_per_obs = 2·T/σ
+            //
+            // With λ = σ this simplifies to:
+            //   dev_per_obs = 2·[ -H(τ) - (1-τ)(y-μ)/σ + log1pexp((y-μ)/σ) ]
+            // where the constant -H(τ) is qgam's "saturation offset" — at the
+            // ELF likelihood mode (μ_max = y - σ·logit(1-τ), not μ=y) this
+            // gives dev = 0. My earlier formulation used μ=y as the
+            // saturation point which is only correct at τ=0.5; switching
+            // to qgam's convention is what makes the REML score behave
+            // sensibly (REML stops collapsing as σ→0).
             Family::Quantile { tau, sigma } => {
                 let r = yi - mui;
                 let r_over_sigma = r / sigma;
-                // Numerically stable softplus: log(1 + exp(x))
                 let softplus = if r_over_sigma > 0.0 {
                     r_over_sigma + (-r_over_sigma).exp().ln_1p()
                 } else {
                     r_over_sigma.exp().ln_1p()
                 };
-                let l = -r * (1.0 - tau) / sigma + softplus;
-                2.0 * (l - 2.0_f64.ln())
+                let h_tau = -((1.0 - tau) * (1.0 - tau).ln() + tau * tau.ln());
+                2.0 * (-h_tau - (1.0 - tau) * r / sigma + softplus)
             }
         };
 

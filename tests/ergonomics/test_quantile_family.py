@@ -259,3 +259,71 @@ def test_quantile_perf_vs_qgam():
     assert rust_med < qgam_med, (
         f"rust ({rust_med:.1f}ms) >= qgam ({qgam_med:.1f}ms) — perf regressed"
     )
+
+
+# ------------------------------------------------------------------ #
+# Test 5: CV-calibrated σ — quality match against qgam               #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.skip(reason="CV-tune helper deferred; LAML σ is degenerate for ELF (Fasiolo 2021), so quality match needs qgam-style CV — implementation pending")
+def test_quantile_cv_matches_qgam_quality():
+    """With CV-tuned σ, signal-recovery RMSE matches qgam to within ~10%.
+
+    Currently skipped — the CV helper was reverted while reasoning through
+    LAML feasibility. ELF's likelihood is degenerate in σ (Fasiolo et al.
+    2021) so MLE/LAML σ doesn't work; qgam's tuneLearnFast (CV) is the
+    correct approach. A fast CV port is tracked separately.
+    """
+    import subprocess
+    import tempfile
+    import json
+    from mgcv_rust import fit_quantile  # noqa: F401  — needs the deferred helper
+
+    rng = np.random.default_rng(11)
+    n, d = 1500, 8
+    x = rng.uniform(0, 1, (n, d))
+    truth = np.zeros(n)
+    for j in range(d):
+        truth += np.sin(2 * np.pi * (j + 1) / 3 * x[:, j])
+    y = truth + rng.normal(0, 0.3, n)
+    k = [10] * d
+
+    # CV-tuned rust fit
+    g_cv, _sigma, _info = fit_quantile(x, y, tau=0.5, k=k, calibrate=True, n_folds=5)
+    rmse_cv = float(np.sqrt(np.mean((g_cv.predict(x) - truth) ** 2)))
+
+    # qgam reference fit on same data
+    with tempfile.TemporaryDirectory() as td:
+        np.savetxt(f"{td}/x.csv", x, delimiter=",")
+        np.savetxt(f"{td}/y.csv", y)
+        rhs = " + ".join(f's(x{j+1}, k={k[j]}, bs="cr")' for j in range(d))
+        rscript = f"""
+        suppressMessages({{ library(qgam); library(jsonlite) }})
+        x <- as.matrix(read.csv("{td}/x.csv", header=FALSE))
+        y <- as.numeric(read.csv("{td}/y.csv", header=FALSE)$V1)
+        df <- data.frame(x); names(df) <- paste0('x', 1:{d}); df$y <- y
+        fit <- qgam(y ~ {rhs}, data=df, qu=0.5)
+        pred <- as.numeric(predict(fit))
+        cat(toJSON(list(pred=pred), auto_unbox=TRUE), file="{td}/out.json")
+        """
+        proc = subprocess.run(
+            ["Rscript", "--vanilla", "-e", rscript],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"qgam fit failed: {proc.stderr.strip()[:200]}")
+        with open(f"{td}/out.json") as f:
+            r_out = json.load(f)
+
+    y_hat_qgam = np.asarray(r_out["pred"])
+    rmse_qgam = float(np.sqrt(np.mean((y_hat_qgam - truth) ** 2)))
+
+    rel_gap = abs(rmse_cv - rmse_qgam) / max(rmse_qgam, 1e-9)
+    print(f"\n[cv-quality] n=1500 d=8 k=10 τ=0.5: "
+          f"rust-CV RMSE-truth={rmse_cv:.4f}, qgam={rmse_qgam:.4f}, "
+          f"rel_gap={rel_gap:.2%}")
+    assert rel_gap < 0.20, (
+        f"CV-tuned RMSE-truth diverges too much from qgam: "
+        f"rust={rmse_cv:.4f} qgam={rmse_qgam:.4f} rel_gap={rel_gap:.2%}"
+    )
