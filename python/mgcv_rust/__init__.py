@@ -20,10 +20,14 @@ you need direct control over the fit.
 from .mgcv_rust import *  # compiled Rust extension — exposes GAM and helpers
 from .mgcv_rust import GAM as _NativeGAM
 from ._fitter import GAMFitter
-from ._quantile import tune_quantile_sigma, fit_quantile
+from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, QuantileLSSFit
 
 # Keep the native GAM accessible as `GAM` so existing scripts that import
 # `mgcv_rust.GAM` continue to work unchanged.
 GAM = _NativeGAM
 
-__all__ = ["GAM", "GAMFitter", "tune_quantile_sigma", "fit_quantile"]
+__all__ = [
+    "GAM", "GAMFitter",
+    "tune_quantile_sigma", "fit_quantile",
+    "fit_quantile_lss", "QuantileLSSFit",
+]

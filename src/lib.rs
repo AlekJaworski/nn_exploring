@@ -1660,6 +1660,56 @@ fn newton_pirls_py<'py>(
     ))
 }
 
+/// Per-obs-σ ELF quantile fit — location-only stage of qgam's
+/// (post-1.3) gaulss-then-ELF pipeline for heteroskedastic τ-quantile
+/// regression.
+///
+/// Takes σ_G(x) — the Gaussian conditional SD at each training row,
+/// from Python-side gaulss preprocessing. Computes the ELF per-obs σ,
+/// the qgam-heuristic σ_global (when `sigma_global` is None), and runs
+/// the IRLS internally — Python is just orchestration.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (x_loc, y, s_loc_total, sigma_g_per_obs, tau, sigma_global=None, max_iter=None, tolerance=None))]
+fn fit_quantile_lss_raw_py<'py>(
+    py: Python<'py>,
+    x_loc: PyReadonlyArray2<f64>,
+    y: PyReadonlyArray1<f64>,
+    s_loc_total: PyReadonlyArray2<f64>,
+    sigma_g_per_obs: PyReadonlyArray1<f64>,
+    tau: f64,
+    sigma_global: Option<f64>,
+    max_iter: Option<usize>,
+    tolerance: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    let x_loc_arr = x_loc.as_array().to_owned();
+    let y_arr = y.as_array().to_owned();
+    let s_loc_arr = s_loc_total.as_array().to_owned();
+    let sigma_g_arr = sigma_g_per_obs.as_array().to_owned();
+
+    let (res, sigma_global_used) = crate::pirls::fit_pirls_quantile_lss(
+        &y_arr,
+        &x_loc_arr,
+        &s_loc_arr,
+        &sigma_g_arr,
+        sigma_global,
+        tau,
+        max_iter.unwrap_or(50),
+        tolerance.unwrap_or(1e-6),
+    )
+    .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+    let result = pyo3::types::PyDict::new(py);
+    result.set_item("beta_loc", PyArray1::from_vec(py, res.coefficients_loc.to_vec()))?;
+    result.set_item("eta_loc", PyArray1::from_vec(py, res.eta_loc.to_vec()))?;
+    result.set_item("sigma", PyArray1::from_vec(py, res.sigma.to_vec()))?;
+    result.set_item("sigma_global", sigma_global_used)?;
+    result.set_item("deviance", res.deviance)?;
+    result.set_item("iterations", res.iterations)?;
+    result.set_item("converged", res.converged)?;
+    Ok(result.into())
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1670,5 +1720,6 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
     #[cfg(feature = "blas")]
     m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_quantile_lss_raw_py, m)?)?;
     Ok(())
 }

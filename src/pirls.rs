@@ -1806,6 +1806,308 @@ pub fn fit_pirls_quantile(
     })
 }
 
+/// Result of joint location-scale ELF (`elflss`) fit.
+pub struct PiRLSResultLSS {
+    pub coefficients_loc: Array1<f64>,
+    pub coefficients_scale: Array1<f64>,
+    pub eta_loc: Array1<f64>,
+    pub eta_scale: Array1<f64>,
+    /// σ(x) = exp(η_scale) at training rows.
+    pub sigma: Array1<f64>,
+    pub deviance: f64,
+    pub iterations: usize,
+    pub converged: bool,
+}
+
+/// ELF (Extended Log-F) quantile IRLS with PER-OBSERVATION σ. Mirrors
+/// `fit_pirls_quantile` but with σ as a vector and an Armijo backtracking
+/// line search on the penalised ELF deviance, which keeps the IRLS stable
+/// when per-obs σ varies widely (low-σ regions tend to dominate the
+/// gradient and trigger overshoot without damping).
+///
+/// Penalised objective: D = Σ 2[-r·(1-τ)/σ + log(1+exp(r/σ)) - log 2]
+///                          + β'·S_total·β.
+///
+/// Returns (β, fitted η, deviance, iterations, converged).
+fn fit_pirls_quantile_perobs_sigma(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    s_total: &Array2<f64>,
+    sigma_per: &Array1<f64>,
+    tau: f64,
+    beta_init: &Array1<f64>,
+    max_iter: usize,
+    tolerance: f64,
+) -> Result<(Array1<f64>, Array1<f64>, f64, usize, bool)> {
+    let n = y.len();
+    let p = x.ncols();
+
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5
+    };
+
+    fn sigmoid_stable(x: f64) -> f64 {
+        if x >= 0.0 {
+            let e = (-x).exp();
+            1.0 / (1.0 + e)
+        } else {
+            let e = x.exp();
+            e / (1.0 + e)
+        }
+    }
+
+    let log2 = 2.0_f64.ln();
+    let elf_deviance = |b: &Array1<f64>| -> f64 {
+        let eta_t = x.dot(b);
+        let mut total = 0.0_f64;
+        for i in 0..n {
+            let inv_si = 1.0 / sigma_per[i];
+            let r = y[i] - eta_t[i];
+            let u = r * inv_si;
+            // Stable softplus.
+            let sp = if u > 0.0 { u + (-u).exp().ln_1p() } else { u.exp().ln_1p() };
+            let l = -r * (1.0 - tau) * inv_si + sp;
+            if !l.is_finite() {
+                return f64::INFINITY;
+            }
+            total += 2.0 * (l - log2);
+        }
+        let sb = s_total.dot(b);
+        let pen: f64 = b.iter().zip(sb.iter()).map(|(&a, &v)| a * v).sum();
+        total + pen
+    };
+
+    let mut beta = beta_init.clone();
+    let mut obj_cur = elf_deviance(&beta);
+    let mut converged = false;
+    let mut iter = 0;
+
+    for outer in 0..max_iter {
+        iter = outer + 1;
+        let eta: Array1<f64> = x.dot(&beta);
+
+        let mut w = Array1::<f64>::zeros(n);
+        let mut g = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let inv_si = 1.0 / sigma_per[i];
+            let r = y[i] - eta[i];
+            let s = sigmoid_stable(r * inv_si);
+            w[i] = s * (1.0 - s) * inv_si * inv_si;
+            g[i] = (s - (1.0 - tau)) * inv_si;
+        }
+
+        let xtwx = compute_xtwx(x, &w);
+        let mut a = &xtwx + s_total;
+        let mut md: f64 = 1.0;
+        for i in 0..p { md = md.max(a[[i, i]].abs()); }
+        for i in 0..p { a[[i, i]] += ridge_scale * md; }
+        // X' (W·η + g) — well-defined at saturation.
+        let rhs_pt: Array1<f64> = w.iter().zip(eta.iter()).zip(g.iter())
+            .map(|((&wi, &ei), &gi)| wi * ei + gi).collect();
+        let rhs = x.t().dot(&rhs_pt);
+        let beta_proposed = solve(a, rhs)?;
+
+        // Armijo backtracking on the penalised ELF deviance. The full
+        // Newton step (α=1) is nearly always accepted, but at sharp σ_i
+        // (especially when σ varies widely per-obs), a smaller step
+        // prevents the diverge-to-extreme failure mode where weights
+        // collapse near the new η and β explodes on the next iter.
+        let direction: Array1<f64> = beta_proposed.iter().zip(beta.iter())
+            .map(|(&bn, &bo)| bn - bo).collect();
+        let mut alpha = 1.0_f64;
+        let mut accepted = false;
+        let mut beta_new = beta.clone();
+        let mut obj_new = obj_cur;
+        for _ in 0..20 {
+            for j in 0..p { beta_new[j] = beta[j] + alpha * direction[j]; }
+            obj_new = elf_deviance(&beta_new);
+            if obj_new.is_finite() && obj_new <= obj_cur + 1e-10 {
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if !accepted {
+            // No descent direction found — declare convergence by stagnation.
+            converged = true;
+            break;
+        }
+
+        let max_change = beta_new.iter().zip(beta.iter())
+            .map(|(b, b_old)| (b - b_old).abs()).fold(0.0_f64, f64::max);
+        beta = beta_new;
+        obj_cur = obj_new;
+
+        if max_change < tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    let eta: Array1<f64> = x.dot(&beta);
+    let mut deviance = 0.0;
+    for i in 0..n {
+        let inv_si = 1.0 / sigma_per[i];
+        let r = y[i] - eta[i];
+        let u = r * inv_si;
+        let softplus = if u > 0.0 { u + (-u).exp().ln_1p() } else { u.exp().ln_1p() };
+        let l = -r * (1.0 - tau) * inv_si + softplus;
+        deviance += 2.0 * (l - log2);
+    }
+
+    Ok((beta, eta, deviance, iter, converged))
+}
+
+/// Per-observation-σ ELF quantile fit — the location-only stage of the
+/// gaulss-then-ELF qgam (≥1.3) pipeline for heteroskedastic τ-quantile
+/// regression.
+///
+/// Takes σ_G(x) — the Gaussian conditional SD at each training row,
+/// from a Python-side gaulss preprocessing (two REML-tuned Gaussian
+/// GAMs: one on y for μ_G, one on log|y - μ_G| + 0.6351 for log σ_G).
+/// Internally computes the per-obs σ used in the ELF IRLS via qgam's
+/// rescaling: `σ_i = σ_global · σ_G(x_i) / mean(σ_G(x))` (qgam
+/// elf.R:151), preserving σ_G's heteroskedastic shape while normalising
+/// the global bandwidth.
+///
+/// `sigma_global` controls the σ scale:
+/// - `Some(v)`: use that scalar directly (e.g. from K-fold CV).
+/// - `None`: qgam's `err · sqrt(2π · varHat) / (2·log 2)` heuristic
+///   with `varHat = mean(σ_G)²` and tail-widening
+///   `max(1, 1/(4τ(1-τ)))` for extreme τ.
+///
+/// Why qgam ≥1.3 went this way: the Beta-normalised elflss likelihood
+/// theoretically identifies σ via joint MLE, but in finite samples
+/// joint (μ, σ) MLE biases σ̂ small at extreme τ, breaking calibration.
+/// Externalising σ̂(x) to gaulss (well-behaved Gaussian MLE) and using
+/// ELF only for the location avoids the degeneracy.
+///
+/// `s_loc_total` is the pre-summed location penalty Σ λ_i S_i at the
+/// full design size; Python builds it from the per-smooth blocks and
+/// REML-fitted lambdas of the location GAM.
+///
+/// Returns σ_global used (auto-computed if None passed) so Python can
+/// surface it in the info dict.
+pub fn fit_pirls_quantile_lss(
+    y: &Array1<f64>,
+    x_loc: &Array2<f64>,
+    s_loc_total: &Array2<f64>,
+    sigma_g_per_obs: &Array1<f64>,
+    sigma_global: Option<f64>,
+    tau: f64,
+    max_iter: usize,
+    tolerance: f64,
+) -> Result<(PiRLSResultLSS, f64)> {
+    let n = y.len();
+    let p_loc = x_loc.ncols();
+
+    if x_loc.nrows() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "X_loc has {} rows but y has {} elements", x_loc.nrows(), n
+        )));
+    }
+    if sigma_g_per_obs.len() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "sigma_g_per_obs has {} elements but y has {} elements",
+            sigma_g_per_obs.len(), n
+        )));
+    }
+    if tau <= 0.0 || tau >= 1.0 {
+        return Err(GAMError::InvalidParameter(format!(
+            "quantile tau must be in (0, 1), got {}", tau
+        )));
+    }
+    if s_loc_total.nrows() != p_loc || s_loc_total.ncols() != p_loc {
+        return Err(GAMError::DimensionMismatch(format!(
+            "s_loc_total must be ({0}, {0}), got ({1}, {2})",
+            p_loc, s_loc_total.nrows(), s_loc_total.ncols()
+        )));
+    }
+
+    // ── Compute σ_global if not user-supplied. ──
+    // qgam heuristic: σ_global = err · √(2π · varHat) / (2·log 2),
+    // with varHat ≡ mean(σ_G)² (qgam.R:156, varHat from gaulss σ̂_G²).
+    // Tail widening at extreme τ — matches fit_pirls_quantile's scalar
+    // default to keep IRLS weights well-conditioned.
+    let sigma_g_mean: f64 = sigma_g_per_obs.iter().copied().sum::<f64>()
+        / (n as f64).max(1.0);
+    let sigma_g_mean = sigma_g_mean.max(1e-8);
+    let sigma_global = sigma_global.unwrap_or_else(|| {
+        let err = 0.05_f64;
+        let var_hat = sigma_g_mean * sigma_g_mean;
+        let base = err * (2.0 * std::f64::consts::PI * var_hat).sqrt()
+            / (2.0 * 2.0_f64.ln());
+        let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
+        base * tail_scale
+    });
+
+    // Per-obs σ used in ELF: qgam's rescaling preserves heteroskedastic
+    // shape, normalises mean to σ_global. σ_G floor of 1e-8 prevents
+    // division by zero; no upper floor needed since the IRLS line
+    // search handles the upper end via deviance check.
+    let sigma_per_obs: Array1<f64> = sigma_g_per_obs.iter()
+        .map(|&sg| sigma_global * sg.max(1e-8) / sigma_g_mean)
+        .collect();
+
+    // Match fit_pirls_quantile's ridge_scale formula.
+    let num_penalties_proxy = (s_loc_total.diag().iter()
+        .filter(|&&v| v.abs() > 0.0).count() as f64).max(1.0);
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + num_penalties_proxy.sqrt())
+    };
+
+    // ── β_loc warm-start: β_init = β_gauss + δ where δ is the
+    // per-obs τ-quantile shift in coefficient space (the σ-aware analogue
+    // of fit_pirls_quantile's q_r·1 shift). ──
+    let xtx = compute_xtwx(x_loc, &Array1::ones(n));
+    let mut a_init = &xtx + s_loc_total;
+    let mut md: f64 = 1.0;
+    for i in 0..p_loc { md = md.max(a_init[[i, i]].abs()); }
+    for i in 0..p_loc { a_init[[i, i]] += ridge_scale * md; }
+    let xty = x_loc.t().dot(y);
+    let beta_gauss = solve(a_init.clone(), xty)?;
+
+    let mu: Array1<f64> = x_loc.dot(&beta_gauss);
+    let mut r_over_sigma: Vec<f64> = y.iter().zip(mu.iter()).zip(sigma_per_obs.iter())
+        .map(|((&yi, &mi), &si)| (yi - mi) / si).collect();
+    r_over_sigma.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let qi = ((n as f64 - 1.0) * tau).round() as usize;
+    let q_z = r_over_sigma[qi.min(n - 1)];
+
+    let shift: Array1<f64> = sigma_per_obs.iter().map(|&si| si * q_z).collect();
+    let xt_shift = x_loc.t().dot(&shift);
+    let delta_beta = solve(a_init, xt_shift)?;
+    let beta_loc_init = &beta_gauss + &delta_beta;
+
+    // ── Per-obs-σ ELF IRLS for β_loc. ──
+    let (beta_loc, eta_loc, deviance, iter, converged) =
+        fit_pirls_quantile_perobs_sigma(
+            y, x_loc, s_loc_total, &sigma_per_obs, tau,
+            &beta_loc_init, max_iter, tolerance,
+        )?;
+
+    let eta_scale: Array1<f64> = sigma_per_obs.iter().map(|&s| s.ln()).collect();
+
+    // β_scale not estimated here — the σ comes from the external gaulss
+    // preprocessing in Python. Return an empty β_scale; Python keeps the
+    // gaulss GAM around for prediction.
+    let result = PiRLSResultLSS {
+        coefficients_loc: beta_loc,
+        coefficients_scale: Array1::zeros(0),
+        eta_loc,
+        eta_scale,
+        sigma: sigma_per_obs,
+        deviance,
+        iterations: iter,
+        converged,
+    };
+    Ok((result, sigma_global))
+}
+
 /// Fit PiRLS using a discretized design for O(n*k + m*k^2) X'WX computation.
 ///
 /// This replaces the naive O(n*p^2) X'WX with scatter-gather via compressed

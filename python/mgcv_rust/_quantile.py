@@ -295,6 +295,231 @@ def tune_quantile_sigma(
     }
 
 
+def _build_total_penalty(g: "GAM", lambdas: Sequence[float]) -> np.ndarray:
+    """Construct Σ λ_i S_i at the full design size (p × p), embedded
+    at intercept-aware offsets.
+
+    `g.get_smooth_penalties()` returns per-smooth (n_basis_i, n_basis_i)
+    blocks; the intercept lives at column 0 and each smooth block i
+    occupies columns [start_i, start_i + n_basis_i). We zero-pad each
+    block into the full design matrix and accumulate.
+    """
+    per_smooth = g.get_smooth_penalties()
+    p = int(np.asarray(g.get_design_matrix()).shape[1])
+    s_total = np.zeros((p, p))
+    col = 1  # skip the intercept
+    for blk, lam in zip(per_smooth, lambdas):
+        blk = np.asarray(blk)
+        nb = blk.shape[0]
+        s_total[col : col + nb, col : col + nb] += float(lam) * blk
+        col += nb
+    return s_total
+
+
+class QuantileLSSFit:
+    """Result of a joint location-scale qgam fit.
+
+    Holds two Gaussian-init `GAM` objects (`_g_loc`, `_g_scale`) for their
+    basis machinery and the LSS-refit β coefficients. `predict_loc(x)`
+    returns the τ-quantile estimate η̂_loc(x); `predict_sigma(x)` returns
+    the per-observation σ̂(x) = exp(η̂_scale(x)).
+    """
+
+    def __init__(self, g_loc, g_scale, beta_loc, beta_scale, tau):
+        self._g_loc = g_loc
+        self._g_scale = g_scale
+        self.beta_loc = np.asarray(beta_loc)
+        self.beta_scale = np.asarray(beta_scale)
+        self.tau = float(tau)
+
+    def predict_loc(self, X: np.ndarray) -> np.ndarray:
+        L = np.asarray(self._g_loc.evaluate_lpmatrix(np.atleast_2d(X)))
+        return L @ self.beta_loc
+
+    def predict_sigma(self, X: np.ndarray) -> np.ndarray:
+        L = np.asarray(self._g_scale.evaluate_lpmatrix(np.atleast_2d(X)))
+        return np.exp(L @ self.beta_scale)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Alias for `predict_loc` — the τ-quantile estimate."""
+        return self.predict_loc(X)
+
+
+# E[log|Z|] for Z ~ N(0, 1) = -½·digamma(½) - ½·log 2 = -γ/2 - log 2 ≈ -0.6351.
+# Adding this constant to log|y - μ̂| gives an unbiased estimator of log σ.
+_E_LOG_ABS_NORMAL = -0.6351814227307388
+
+
+def fit_quantile_lss(
+    X: np.ndarray,
+    y: np.ndarray,
+    tau: float,
+    k_loc: Sequence[int],
+    k_scale: Optional[Sequence[int]] = None,
+    bs: str = "cr",
+    method: str = "REML",
+    max_iter: int = 30,
+    tolerance: float = 1e-6,
+    sigma_scale: Optional[float] = None,
+    calibrate: bool = False,
+    n_folds: int = 3,
+    seed: int = 0,
+) -> tuple[QuantileLSSFit, dict[str, Any]]:
+    """Heteroskedastic τ-quantile fit — port of qgam's (≥1.3) "parametric
+    location-scale model" for the case where σ varies with x.
+
+    The scalar-σ `fit_quantile` compromises between sharp regions (low σ)
+    and dispersed regions (high σ); calibration drifts at the tails when
+    that compromise can't be made. `fit_quantile_lss` models σ(x) as a
+    smooth function of x in addition to the τ-quantile location η_loc(x),
+    closing the heteroskedastic gap.
+
+    Algorithm — qgam ≥1.3:
+    1. **gaulss preprocessing** (two REML-tuned Gaussian GAMs):
+       a. Fit μ_G(x) on y → Gaussian conditional mean.
+       b. Fit ν(x) on log|y - μ_G| with the Euler-Mascheroni bias correction
+          E[log|N(0, 1)|] = -0.6351 → unbiased log σ_G(x).
+       c. σ_G(x) = exp(ν(x) + 0.6351).
+    2. **Per-obs-σ ELF IRLS** (Rust): set σ_i = σ_G(x_i) per-observation,
+       run the standard ELF location-only fit. Penalty is the REML-tuned
+       λ_loc · S from step 1a.
+
+    Why NOT joint elflss MLE: the Beta-normalised elflss likelihood
+    theoretically identifies σ via joint MLE, but in finite samples joint
+    (μ, σ) MLE biases σ̂ small at extreme τ, breaking calibration. qgam
+    moved away from joint elflss MLE post-1.3 for this reason.
+
+    Returns (fit, info) — `fit.predict_loc(X)` for the τ-quantile,
+    `fit.predict_sigma(X)` for σ̂(x).
+    """
+    from . import GAM as _GAM
+
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if X.ndim == 1:
+        X = X[:, None]
+    if k_scale is None:
+        # Half-k for scale by default — σ(x) is usually a flatter function
+        # than the location, and lower k_scale guards against overfitting
+        # log|residuals|.
+        k_scale = [max(3, ki // 2) for ki in k_loc]
+
+    # ── Stage 1: gaulss-equivalent via two Gaussian GAMs. ──
+    # 1a: μ_G(x) — Gaussian conditional mean.
+    g_loc = _GAM("gaussian")
+    g_loc.fit(X, y, k=list(k_loc), method=method, bs=bs)
+    mu_g = np.asarray(g_loc.predict(X))
+
+    # 1b: log σ(x) via Gaussian fit on log|y - μ_G| + Euler correction.
+    # The Gaussian's REML auto-tunes λ_scale to balance fit-vs-smoothness
+    # for log|residuals|, which has variance π²/8 ≈ 1.23 — a well-defined
+    # likelihood scale, so the auto-λ is meaningful here.
+    floor = 1e-3 * float(np.std(y) or 1.0)
+    log_abs_r = np.log(np.maximum(np.abs(y - mu_g), floor)) - _E_LOG_ABS_NORMAL
+    g_scale = _GAM("gaussian")
+    g_scale.fit(X, log_abs_r, k=list(k_scale), method=method, bs=bs)
+    sigma_g_per_obs = np.exp(np.asarray(g_scale.predict(X)))
+
+    # ── Stage 2: per-obs-σ ELF IRLS in Rust. ──
+    # The qgam-elf σ rescaling (σ_i = σ_global · σ_G / mean(σ_G)) and the
+    # σ_global heuristic both happen INSIDE the Rust call — pass σ_G(x)
+    # and let Rust do the math. Python is just orchestration here.
+    X_loc = np.asarray(g_loc.evaluate_lpmatrix(X))
+    lambda_loc = np.asarray(g_loc.get_all_lambdas())
+    s_loc_total = _build_total_penalty(g_loc, lambda_loc)
+
+    from . import mgcv_rust as _rust
+
+    # ── Optional: calibrate σ_global via K-fold pinball-CV. ──
+    # The CV loop is in Python because it's high-level orchestration
+    # (fold splits + Brent on a single scalar); each fold's heavy compute
+    # goes into the Rust LSS path via the recursive call.
+    info_calibration = None
+    if calibrate:
+        try:
+            from scipy.optimize import minimize_scalar
+        except ImportError as _imp_err:
+            raise ImportError(
+                "calibrate=True requires scipy (`pip install scipy`)."
+            ) from _imp_err
+
+        rng_cal = np.random.default_rng(seed)
+        perm = rng_cal.permutation(len(y))
+        fold_size = len(y) // n_folds
+        folds = []
+        for i in range(n_folds):
+            test_idx = perm[i * fold_size : (i + 1) * fold_size]
+            train_mask = np.ones(len(y), dtype=bool)
+            train_mask[test_idx] = False
+            folds.append((test_idx, np.where(train_mask)[0]))
+
+        def cv_loss_at(sg: float) -> float:
+            losses = []
+            for test_idx, train_idx in folds:
+                try:
+                    fit_cv, _ = fit_quantile_lss(
+                        X[train_idx], y[train_idx], tau=tau,
+                        k_loc=k_loc, k_scale=k_scale, bs=bs, method=method,
+                        max_iter=max_iter, tolerance=tolerance,
+                        sigma_scale=sg, calibrate=False,
+                    )
+                    yhat_te = fit_cv.predict_loc(X[test_idx])
+                    r_te = y[test_idx] - yhat_te
+                    losses.append(float(np.maximum(tau * r_te, (tau - 1) * r_te).mean()))
+                except Exception:
+                    losses.append(np.inf)
+            return float(np.mean(losses))
+
+        y_sd = float(np.std(y) or 1.0)
+        bracket = (np.log(0.05 * y_sd), np.log(5.0 * y_sd))
+        result = minimize_scalar(
+            lambda lsg: cv_loss_at(float(np.exp(lsg))),
+            bounds=bracket, method="bounded", options={"xatol": 0.05},
+        )
+        sigma_scale = float(np.exp(result.x))
+        info_calibration = {
+            "calibration_loss": float(result.fun),
+            "n_brent_evals": int(result.nfev),
+            "n_folds": n_folds,
+            "log_sigma_bracket": list(bracket),
+        }
+
+    res = _rust.fit_quantile_lss_raw_py(
+        x_loc=X_loc, y=y,
+        s_loc_total=s_loc_total,
+        sigma_g_per_obs=sigma_g_per_obs,
+        sigma_global=(float(sigma_scale) if sigma_scale is not None else None),
+        tau=float(tau), max_iter=max_iter, tolerance=tolerance,
+    )
+    sigma_per_obs = np.asarray(res["sigma"])  # σ used in ELF (Rust returns it)
+    sigma_global_used = float(res["sigma_global"])
+
+    # We don't have refined β_scale (gaulss did the σ-side), so just hold
+    # g_scale's predictions as the σ̂(x) source. β_scale stays as an
+    # implementation detail; predict_sigma(X) goes through g_scale directly.
+    fit = QuantileLSSFit(
+        g_loc=g_loc, g_scale=g_scale,
+        beta_loc=res["beta_loc"],
+        beta_scale=np.asarray(g_scale.get_coefficients()),
+        tau=tau,
+    )
+    info = {
+        "iterations": res["iterations"],
+        "converged": res["converged"],
+        "deviance": res["deviance"],
+        "lambda_loc": lambda_loc.tolist(),
+        "lambda_scale": np.asarray(g_scale.get_all_lambdas()).tolist(),
+        "k_loc": list(k_loc),
+        "k_scale": list(k_scale),
+        "tau": float(tau),
+        "sigma_train": sigma_per_obs,        # σ used in ELF (per-obs)
+        "sigma_g_train": sigma_g_per_obs,    # σ̂_G(x) from gaulss step
+        "sigma_global": sigma_global_used,    # the scalar bandwidth (auto or user)
+        "calibration": info_calibration,
+    }
+    return fit, info
+
+
 def fit_quantile(
     X: np.ndarray,
     y: np.ndarray,
