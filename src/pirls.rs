@@ -2245,18 +2245,9 @@ pub fn fit_pirls_quantile_lss_fs_tune(
     // ── FS outer loop. ──
     //
     // Each sweep: (1) IRLS at the current λ to convergence; (2) FS update
-    // at the converged β. Step clamp ±3 in log-space matches the scalar
-    // FS used elsewhere (smooth.rs::optimize_reml_fellner_schall_with_xtwx).
-    let log2 = 2.0_f64.ln();
-    let fs_tolerance = 1e-3_f64; // log-λ tolerance
-    let fs_step_clamp = 3.0_f64;
-    let fs_lambda_min = 1e-9_f64;
-    let fs_lambda_max = 1e7_f64;
-
-    let mut last_iter = 0;
-    let mut last_converged = false;
-    let mut last_eta = Array1::<f64>::zeros(n);
-    let mut last_dev = 0.0_f64;
+    // at the converged β via the shared `smooth::fellner_schall_step`
+    // helper (same formula as the GAM outer loop's FS path).
+    let fs_tolerance = 1e-3_f64; // log-λ tolerance for outer convergence
     let mut fs_iter = 0usize;
 
     for outer in 0..max_outer.max(1) {
@@ -2268,25 +2259,20 @@ pub fn fit_pirls_quantile_lss_fs_tune(
             pen.scaled_add_to(&mut s_cur, *lam);
         }
 
-        let (beta_new, eta_new, dev_new, iter_n, conv_n) =
+        let (beta_new, eta_new, _dev_new, _iter_n, _conv_n) =
             fit_pirls_quantile_perobs_sigma(
                 y, x_loc, &s_cur, &sigma_per_obs, tau,
                 &beta_loc, max_inner, tolerance,
             )?;
         beta_loc = beta_new;
-        last_iter = iter_n;
-        last_converged = conv_n;
-        last_eta = eta_new;
-        last_dev = dev_new;
 
-        // Compute IRLS weights at the converged β.
+        // IRLS weights at converged β: w_i = s(1-s)/σ², σ = sigma_per_obs[i].
         let mut w = Array1::<f64>::zeros(n);
         for i in 0..n {
             let inv_si = 1.0 / sigma_per_obs[i];
-            let r = y[i] - last_eta[i];
+            let r = y[i] - eta_new[i];
             let s = if r * inv_si >= 0.0 {
-                let e = (-r * inv_si).exp();
-                1.0 / (1.0 + e)
+                1.0 / (1.0 + (-r * inv_si).exp())
             } else {
                 let e = (r * inv_si).exp();
                 e / (1.0 + e)
@@ -2295,14 +2281,12 @@ pub fn fit_pirls_quantile_lss_fs_tune(
         }
         let xtwx = compute_xtwx(x_loc, &w);
 
-        // Build A = X'WX + Σ λ_j S_j + ridge.
+        // A = X'WX + Σ λ_j S_j + ridge ⇒ Cholesky ⇒ A⁻¹.
         let mut a = &xtwx + &s_cur;
         let mut max_diag: f64 = 1.0;
         for i in 0..p_loc { max_diag = max_diag.max(a[[i, i]].abs()); }
         let ridge = ridge_scale * max_diag;
         for i in 0..p_loc { a[[i, i]] += ridge; }
-
-        // Cholesky → A⁻¹. Fall back to a larger ridge once if needed.
         let chol = match a.cholesky(UPLO::Lower) {
             Ok(l) => l,
             Err(_) => {
@@ -2313,22 +2297,18 @@ pub fn fit_pirls_quantile_lss_fs_tune(
         };
         let a_inv = chol.inv_into().map_err(|_| GAMError::SingularMatrix)?;
 
-        // Per-smooth FS update; track max log-λ step.
-        let mut max_log_step = 0.0_f64;
-        for (i, pen) in penalties_loc.iter().enumerate() {
-            let lam_old = lambdas[i].max(fs_lambda_min);
-            let rank_i = penalty_ranks[i];
-            let tr_vs = pen.trace_product(&a_inv);
-            let bsb = pen.quadratic_form(&beta_loc).max(1e-10);
-            // φ = 1 for ELF (σ is the family parameter, dispersion fixed).
-            let numerator = (rank_i / lam_old - tr_vs).max(1e-10);
-            let ratio = numerator / bsb;
-            let log_ratio = ratio.ln().clamp(-fs_step_clamp, fs_step_clamp);
-            let log_lam_new = (lam_old.ln() + log_ratio)
-                .clamp(fs_lambda_min.ln(), fs_lambda_max.ln());
-            lambdas[i] = log_lam_new.exp();
-            max_log_step = max_log_step.max(log_ratio.abs());
-        }
+        // φ = 1 for ELF (σ is the family parameter, dispersion fixed at 1).
+        let new_lambdas = crate::smooth::fellner_schall_step(
+            penalties_loc, &penalty_ranks, &lambdas,
+            &a_inv, &beta_loc, /*phi=*/ 1.0,
+            /*log_step_clamp=*/ 3.0, /*lambda_bounds=*/ (1e-9, 1e7),
+        );
+
+        // Track max |Δlog λ| for the convergence check.
+        let max_log_step = lambdas.iter().zip(new_lambdas.iter())
+            .map(|(&old, &new_lam)| (new_lam.ln() - old.ln()).abs())
+            .fold(0.0_f64, f64::max);
+        lambdas = new_lambdas;
 
         if max_log_step < fs_tolerance {
             break;
@@ -2345,7 +2325,6 @@ pub fn fit_pirls_quantile_lss_fs_tune(
             y, x_loc, &s_final, &sigma_per_obs, tau,
             &beta_loc, max_inner, tolerance,
         )?;
-    let _ = (last_iter, last_converged, last_eta, last_dev, log2);
 
     let eta_scale: Array1<f64> = sigma_per_obs.iter().map(|&s| s.ln()).collect();
     let result = PiRLSResultLSS {

@@ -206,6 +206,54 @@ fn compute_xtwy_helper(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Arr
     x_w.t().dot(&y_weighted)
 }
 
+/// One Fellner-Schall update for the per-smooth penalty parameters.
+///
+/// Wood & Fasiolo (2017): at the converged β,
+///   `λ_new[i] = λ[i] · phi · max(rank[i]/λ[i] − tr(A⁻¹ S_i), ε) / (β' S_i β)`
+/// where `A = X' W X + Σ λ_j S_j` is the IRLS-Hessian (already inverted),
+/// `phi` is the dispersion (1 for ELF / Binomial / Poisson; profiled
+/// otherwise), and the step is taken in log-space with a clamp.
+///
+/// Used by:
+/// - `SmoothingParameter::optimize_reml_fellner_schall_with_xtwx` (the
+///   GAM outer loop's FS path).
+/// - `pirls::fit_pirls_quantile_lss_fs_tune` (per-obs-σ ELF λ retuning).
+///
+/// `lambda_bounds = (1e-9, 1e7)` and `log_step_clamp = 3.0` are the
+/// historic defaults — kept as parameters so callers can tighten them
+/// if needed without diverging implementations.
+pub fn fellner_schall_step(
+    penalties: &[BlockPenalty],
+    penalty_ranks: &[f64],
+    lambdas: &[f64],
+    a_inv: &Array2<f64>,
+    beta: &Array1<f64>,
+    phi: f64,
+    log_step_clamp: f64,
+    lambda_bounds: (f64, f64),
+) -> Vec<f64> {
+    debug_assert_eq!(penalties.len(), penalty_ranks.len());
+    debug_assert_eq!(penalties.len(), lambdas.len());
+    let tiny = 1e-10_f64;
+    let mut new_lambdas = Vec::with_capacity(penalties.len());
+    for i in 0..penalties.len() {
+        let pen = &penalties[i];
+        let rank_i = penalty_ranks[i];
+        let lambda_i = lambdas[i];
+
+        let tr_vs = pen.trace_product(a_inv);
+        let bsb = pen.quadratic_form(beta).max(tiny);
+        let numerator = (rank_i / lambda_i.max(1e-20) - tr_vs).max(tiny);
+
+        let log_ratio = (phi * numerator / bsb).ln().clamp(-log_step_clamp, log_step_clamp);
+        let log_lambda_new = (lambda_i.ln() + log_ratio)
+            .max(lambda_bounds.0.ln())
+            .min(lambda_bounds.1.ln());
+        new_lambdas.push(log_lambda_new.exp());
+    }
+    new_lambdas
+}
+
 /// Smoothing parameter optimization method
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OptimizationMethod {
@@ -1922,61 +1970,27 @@ impl SmoothingParameter {
             );
         }
 
-        // Fellner-Schall update for each smoothing parameter
+        // Wood & Fasiolo (2017) Fellner-Schall update via shared helper.
+        // For non-overlapping penalties, ldetS1[i] · exp(-rho_i) reduces
+        // to rank_i / λ_i, so the update is
+        // λ_new = λ · phi · max(rank/λ − tr(A⁻¹S), ε) / (β'Sβ).
+        let ranks_f64: Vec<f64> = penalty_ranks.iter().map(|&r| r as f64).collect();
+        let new_lambdas = fellner_schall_step(
+            penalties, &ranks_f64, &lambdas, &a_inv, beta,
+            phi, /*log_step_clamp=*/ 3.0, /*lambda_bounds=*/ (1e-9, 1e7),
+        );
         for i in 0..m {
-            let penalty_i = &penalties[i];
-            let rank_i = penalty_ranks[i] as f64;
-            let lambda_i = lambdas[i];
-
-            // Compute trVS_i = tr(A^{-1} * S_i)
-            // Use optimized block trace computation
-            let tr_vs_i = penalty_i.trace_product(&a_inv);
-
-            // Compute β'·S_i·β (penalty quadratic form)
-            // Use optimized block quadratic form
-            let bsb = penalty_i.quadratic_form(beta);
-
-            // Wood & Fasiolo (2017) Fellner-Schall update:
-            //   a = max(0, ldetS1 * exp(-rho) - trVS)
-            //   r = phi * a / bSb
-            //   log(lambda_new) = log(lambda_old) + log(r)
-            //
-            // For non-overlapping penalties:
-            //   ldetS1[j] = d/d(rho_j) log|S_total|_+ = rank_j
-            //   ldetS1 * exp(-rho_j) = rank_j / lambda_j
-            //
-            // So: a = rank_j / lambda_j - tr(A^{-1} * S_j)
-            // And: lambda_new = lambda * phi * a / bSb
-            //                 = phi * (rank_j - lambda_j * tr(A^{-1} * S_j)) / bSb
-
-            let numerator = rank_i / lambda_i.max(1e-20) - tr_vs_i;
-
-            // Clamp numerator to be non-negative (following R's pmax(0, ...))
-            let tiny = 1e-10;
-            let numerator_safe = numerator.max(tiny);
-            let bsb_safe = bsb.max(tiny);
-
-            let ratio = phi * numerator_safe / bsb_safe;
-
-            // Update in log space
-            let log_ratio = ratio.ln();
-            // Clamp step to prevent too-extreme changes per iteration
-            let clamped_log_ratio = log_ratio.clamp(-3.0, 3.0); // at most exp(±3) ≈ 20× change
-
-            let old_log_lambda = lambda_i.ln();
-            let new_log_lambda = old_log_lambda + clamped_log_ratio;
-
-            // Enforce bounds: λ ∈ [1e-9, 1e7]
-            let bounded_log_lambda = new_log_lambda.max((1e-9f64).ln()).min((1e7f64).ln());
-
-            self.lambda[i] = bounded_log_lambda.exp();
-
             if std::env::var("MGCV_PROFILE").is_ok() {
+                let pen = &penalties[i];
+                let tr_vs = pen.trace_product(&a_inv);
+                let bsb = pen.quadratic_form(beta);
                 eprintln!(
-                    "[PROFILE] FS smooth {}: λ={:.6e} → {:.6e}, rank/λ={:.4}, trVS={:.4}, bSb={:.6}, phi={:.6}, num={:.4}, ratio={:.6}",
-                    i, lambda_i, self.lambda[i], rank_i / lambda_i.max(1e-20), tr_vs_i, bsb, phi, numerator, ratio
+                    "[PROFILE] FS smooth {}: λ={:.6e} → {:.6e}, rank/λ={:.4}, trVS={:.4}, bSb={:.6}, phi={:.6}",
+                    i, lambdas[i], new_lambdas[i],
+                    ranks_f64[i] / lambdas[i].max(1e-20), tr_vs, bsb, phi
                 );
             }
+            self.lambda[i] = new_lambdas[i];
         }
 
         Ok(())
