@@ -127,6 +127,27 @@ def test_sigma_scale_override(hetero_data):
     assert abs(info["sigma_global"] - user_sigma) < 1e-9
 
 
+@pytest.mark.parametrize("tau", [0.1, 0.5, 0.9])
+def test_retune_lambda_runs_and_calibrates(hetero_data, tau):
+    """`retune_lambda=True` runs a Fellner-Schall outer loop on λ_loc under
+    the per-obs-σ ELF likelihood. It should still converge and stay within
+    0.05 of τ on coverage, with `info['fs_iterations'] >= 1` reported and
+    a length-len(k_loc) λ vector returned.
+    """
+    X, y, _ = hetero_data
+    fit, info = fit_quantile_lss(
+        X, y, tau=tau, k_loc=[10, 10], k_scale=[5, 5],
+        retune_lambda=True, fs_max_outer=20,
+    )
+    assert info["converged"], f"τ={tau} did not converge"
+    assert info["fs_iterations"] >= 1
+    assert len(info["lambda_loc"]) == 2
+    cov = _empirical_coverage(y, fit.predict_loc(X))
+    assert abs(cov - tau) < 0.05, (
+        f"τ={tau}: cal_err={abs(cov-tau):.4f} > 0.05 (cov={cov:.4f})"
+    )
+
+
 def test_lss_beats_single_sigma_at_extreme_tau(hetero_data):
     """Sanity: on the canonical heteroskedastic scenario, LSS hits cal_err
     at least as good as the calibrated single-σ baseline at τ=0.1 — this

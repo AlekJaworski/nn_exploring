@@ -1817,6 +1817,14 @@ pub struct PiRLSResultLSS {
     pub deviance: f64,
     pub iterations: usize,
     pub converged: bool,
+    /// Per-location-smooth λ at the end of the fit. When the caller passed
+    /// `s_loc_total` directly (fixed-λ path) this stays empty; when they
+    /// went through `fit_pirls_quantile_lss_fs_tune` it holds the final
+    /// FS-tuned λs.
+    pub lambda_loc: Vec<f64>,
+    /// Number of Fellner-Schall outer iterations actually performed
+    /// (0 when no λ tuning was requested).
+    pub fs_iterations: usize,
 }
 
 /// ELF (Extended Log-F) quantile IRLS with PER-OBSERVATION σ. Mirrors
@@ -2104,6 +2112,253 @@ pub fn fit_pirls_quantile_lss(
         deviance,
         iterations: iter,
         converged,
+        lambda_loc: Vec::new(),
+        fs_iterations: 0,
+    };
+    Ok((result, sigma_global))
+}
+
+/// Fit `fit_pirls_quantile_lss` with a Fellner-Schall outer loop that
+/// re-tunes per-smooth λ_loc under the per-obs-σ ELF likelihood, instead
+/// of inheriting the lambdas from the Gaussian-init GAM.
+///
+/// The outer loop alternates:
+///   - **Inner IRLS** at fixed λ via [`fit_pirls_quantile_perobs_sigma`].
+///   - **FS update** (Wood & Fasiolo 2017) at the converged β:
+///     `λ_new = λ · φ · max(rank_i / λ_i − tr(A⁻¹ S_i), ε) / (β' S_i β)`
+///     with `A = X' W X + Σ λ_j S_j` and `W` the per-obs ELF IRLS weights
+///     `s(1−s)/σ²` from the inner converged state. φ = 1 (ELF dispersion
+///     is fixed, σ is the family parameter).
+///
+/// The per-obs σ rescaling is identical to the fixed-λ path — the σ_global
+/// auto-heuristic still uses `varHat = mean(σ_G)²` and tail widening at
+/// extreme τ.
+///
+/// When the FS gradient stagnates (max log-λ change < `fs_tolerance`) the
+/// outer loop exits early. A final IRLS pass at the tuned λs guarantees
+/// `(β, η, σ̂)` are consistent with the returned `lambda_loc`.
+///
+/// Returns `(result, sigma_global_used)` like the fixed-λ entry point;
+/// `result.lambda_loc` carries the tuned per-smooth λs and
+/// `result.fs_iterations` the number of FS sweeps actually run.
+pub fn fit_pirls_quantile_lss_fs_tune(
+    y: &Array1<f64>,
+    x_loc: &Array2<f64>,
+    penalties_loc: &[BlockPenalty],
+    lambda_init: &[f64],
+    sigma_g_per_obs: &Array1<f64>,
+    sigma_global: Option<f64>,
+    tau: f64,
+    max_outer: usize,
+    max_inner: usize,
+    tolerance: f64,
+) -> Result<(PiRLSResultLSS, f64)> {
+    use ndarray_linalg::{Cholesky, InverseInto, UPLO};
+
+    let n = y.len();
+    let p_loc = x_loc.ncols();
+
+    if x_loc.nrows() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "X_loc has {} rows but y has {} elements", x_loc.nrows(), n
+        )));
+    }
+    if sigma_g_per_obs.len() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "sigma_g_per_obs has {} elements but y has {} elements",
+            sigma_g_per_obs.len(), n
+        )));
+    }
+    if tau <= 0.0 || tau >= 1.0 {
+        return Err(GAMError::InvalidParameter(format!(
+            "quantile tau must be in (0, 1), got {}", tau
+        )));
+    }
+    if penalties_loc.len() != lambda_init.len() {
+        return Err(GAMError::DimensionMismatch(format!(
+            "penalties_loc has {} entries but lambda_init has {}",
+            penalties_loc.len(), lambda_init.len()
+        )));
+    }
+    for pen in penalties_loc {
+        if pen.total_size != p_loc {
+            return Err(GAMError::DimensionMismatch(format!(
+                "BlockPenalty.total_size={} != p_loc={}",
+                pen.total_size, p_loc
+            )));
+        }
+    }
+
+    // ── σ_global + per-obs σ — identical to the fixed-λ path. ──
+    let sigma_g_mean: f64 = sigma_g_per_obs.iter().copied().sum::<f64>()
+        / (n as f64).max(1.0);
+    let sigma_g_mean = sigma_g_mean.max(1e-8);
+    let sigma_global = sigma_global.unwrap_or_else(|| {
+        let err = 0.05_f64;
+        let var_hat = sigma_g_mean * sigma_g_mean;
+        let base = err * (2.0 * std::f64::consts::PI * var_hat).sqrt()
+            / (2.0 * 2.0_f64.ln());
+        let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
+        base * tail_scale
+    });
+    let sigma_per_obs: Array1<f64> = sigma_g_per_obs.iter()
+        .map(|&sg| sigma_global * sg.max(1e-8) / sigma_g_mean)
+        .collect();
+
+    // Precompute penalty ranks (used in FS rank/λ term).
+    let mut penalty_ranks = Vec::with_capacity(penalties_loc.len());
+    for pen in penalties_loc {
+        let r = crate::reml::estimate_rank_eigen(pen) as f64;
+        penalty_ranks.push(r.max(1.0));
+    }
+
+    let num_penalties_proxy = (penalties_loc.len() as f64).max(1.0);
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + num_penalties_proxy.sqrt())
+    };
+
+    // ── Initial β via Gaussian-then-quantile-shift warm start at λ_init. ──
+    let mut lambdas = lambda_init.to_vec();
+    let mut s_total = Array2::<f64>::zeros((p_loc, p_loc));
+    for (lam, pen) in lambdas.iter().zip(penalties_loc.iter()) {
+        pen.scaled_add_to(&mut s_total, *lam);
+    }
+
+    let xtx = compute_xtwx(x_loc, &Array1::ones(n));
+    let mut a_init = &xtx + &s_total;
+    let mut md: f64 = 1.0;
+    for i in 0..p_loc { md = md.max(a_init[[i, i]].abs()); }
+    for i in 0..p_loc { a_init[[i, i]] += ridge_scale * md; }
+    let beta_gauss = solve(a_init.clone(), x_loc.t().dot(y))?;
+    let mu: Array1<f64> = x_loc.dot(&beta_gauss);
+    let mut r_over_sigma: Vec<f64> = y.iter().zip(mu.iter()).zip(sigma_per_obs.iter())
+        .map(|((&yi, &mi), &si)| (yi - mi) / si).collect();
+    r_over_sigma.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let qi = ((n as f64 - 1.0) * tau).round() as usize;
+    let q_z = r_over_sigma[qi.min(n - 1)];
+    let shift: Array1<f64> = sigma_per_obs.iter().map(|&si| si * q_z).collect();
+    let delta_beta = solve(a_init, x_loc.t().dot(&shift))?;
+    let mut beta_loc = &beta_gauss + &delta_beta;
+
+    // ── FS outer loop. ──
+    //
+    // Each sweep: (1) IRLS at the current λ to convergence; (2) FS update
+    // at the converged β. Step clamp ±3 in log-space matches the scalar
+    // FS used elsewhere (smooth.rs::optimize_reml_fellner_schall_with_xtwx).
+    let log2 = 2.0_f64.ln();
+    let fs_tolerance = 1e-3_f64; // log-λ tolerance
+    let fs_step_clamp = 3.0_f64;
+    let fs_lambda_min = 1e-9_f64;
+    let fs_lambda_max = 1e7_f64;
+
+    let mut last_iter = 0;
+    let mut last_converged = false;
+    let mut last_eta = Array1::<f64>::zeros(n);
+    let mut last_dev = 0.0_f64;
+    let mut fs_iter = 0usize;
+
+    for outer in 0..max_outer.max(1) {
+        fs_iter = outer + 1;
+
+        // Build penalty total at current λ.
+        let mut s_cur = Array2::<f64>::zeros((p_loc, p_loc));
+        for (lam, pen) in lambdas.iter().zip(penalties_loc.iter()) {
+            pen.scaled_add_to(&mut s_cur, *lam);
+        }
+
+        let (beta_new, eta_new, dev_new, iter_n, conv_n) =
+            fit_pirls_quantile_perobs_sigma(
+                y, x_loc, &s_cur, &sigma_per_obs, tau,
+                &beta_loc, max_inner, tolerance,
+            )?;
+        beta_loc = beta_new;
+        last_iter = iter_n;
+        last_converged = conv_n;
+        last_eta = eta_new;
+        last_dev = dev_new;
+
+        // Compute IRLS weights at the converged β.
+        let mut w = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let inv_si = 1.0 / sigma_per_obs[i];
+            let r = y[i] - last_eta[i];
+            let s = if r * inv_si >= 0.0 {
+                let e = (-r * inv_si).exp();
+                1.0 / (1.0 + e)
+            } else {
+                let e = (r * inv_si).exp();
+                e / (1.0 + e)
+            };
+            w[i] = s * (1.0 - s) * inv_si * inv_si;
+        }
+        let xtwx = compute_xtwx(x_loc, &w);
+
+        // Build A = X'WX + Σ λ_j S_j + ridge.
+        let mut a = &xtwx + &s_cur;
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p_loc { max_diag = max_diag.max(a[[i, i]].abs()); }
+        let ridge = ridge_scale * max_diag;
+        for i in 0..p_loc { a[[i, i]] += ridge; }
+
+        // Cholesky → A⁻¹. Fall back to a larger ridge once if needed.
+        let chol = match a.cholesky(UPLO::Lower) {
+            Ok(l) => l,
+            Err(_) => {
+                let extra = 1e-3 * max_diag;
+                for i in 0..p_loc { a[[i, i]] += extra; }
+                a.cholesky(UPLO::Lower).map_err(|_| GAMError::SingularMatrix)?
+            }
+        };
+        let a_inv = chol.inv_into().map_err(|_| GAMError::SingularMatrix)?;
+
+        // Per-smooth FS update; track max log-λ step.
+        let mut max_log_step = 0.0_f64;
+        for (i, pen) in penalties_loc.iter().enumerate() {
+            let lam_old = lambdas[i].max(fs_lambda_min);
+            let rank_i = penalty_ranks[i];
+            let tr_vs = pen.trace_product(&a_inv);
+            let bsb = pen.quadratic_form(&beta_loc).max(1e-10);
+            // φ = 1 for ELF (σ is the family parameter, dispersion fixed).
+            let numerator = (rank_i / lam_old - tr_vs).max(1e-10);
+            let ratio = numerator / bsb;
+            let log_ratio = ratio.ln().clamp(-fs_step_clamp, fs_step_clamp);
+            let log_lam_new = (lam_old.ln() + log_ratio)
+                .clamp(fs_lambda_min.ln(), fs_lambda_max.ln());
+            lambdas[i] = log_lam_new.exp();
+            max_log_step = max_log_step.max(log_ratio.abs());
+        }
+
+        if max_log_step < fs_tolerance {
+            break;
+        }
+    }
+
+    // ── Final IRLS at tuned λ, so β / η / dev are consistent with lambda_loc. ──
+    let mut s_final = Array2::<f64>::zeros((p_loc, p_loc));
+    for (lam, pen) in lambdas.iter().zip(penalties_loc.iter()) {
+        pen.scaled_add_to(&mut s_final, *lam);
+    }
+    let (beta_loc, eta_loc, deviance, iter_final, converged_final) =
+        fit_pirls_quantile_perobs_sigma(
+            y, x_loc, &s_final, &sigma_per_obs, tau,
+            &beta_loc, max_inner, tolerance,
+        )?;
+    let _ = (last_iter, last_converged, last_eta, last_dev, log2);
+
+    let eta_scale: Array1<f64> = sigma_per_obs.iter().map(|&s| s.ln()).collect();
+    let result = PiRLSResultLSS {
+        coefficients_loc: beta_loc,
+        coefficients_scale: Array1::zeros(0),
+        eta_loc,
+        eta_scale,
+        sigma: sigma_per_obs,
+        deviance,
+        iterations: iter_final,
+        converged: converged_final,
+        lambda_loc: lambdas,
+        fs_iterations: fs_iter,
     };
     Ok((result, sigma_global))
 }

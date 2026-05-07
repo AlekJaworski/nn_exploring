@@ -316,6 +316,25 @@ def _build_total_penalty(g: "GAM", lambdas: Sequence[float]) -> np.ndarray:
     return s_total
 
 
+def _build_per_smooth_blocks(g: "GAM") -> list[np.ndarray]:
+    """One full-design (p × p) zero-padded penalty per smooth. Used by the
+    Fellner-Schall λ re-tuning path, which needs each S_i separately
+    rather than the summed Σ λ_i S_i.
+    """
+    per_smooth = g.get_smooth_penalties()
+    p = int(np.asarray(g.get_design_matrix()).shape[1])
+    blocks: list[np.ndarray] = []
+    col = 1
+    for blk in per_smooth:
+        blk = np.asarray(blk)
+        nb = blk.shape[0]
+        full = np.zeros((p, p))
+        full[col : col + nb, col : col + nb] = blk
+        blocks.append(full)
+        col += nb
+    return blocks
+
+
 class QuantileLSSFit:
     """Result of a joint location-scale qgam fit.
 
@@ -364,6 +383,8 @@ def fit_quantile_lss(
     calibrate: bool = False,
     n_folds: int = 3,
     seed: int = 0,
+    retune_lambda: bool = False,
+    fs_max_outer: int = 20,
 ) -> tuple[QuantileLSSFit, dict[str, Any]]:
     """Heteroskedastic τ-quantile fit — port of qgam's (≥1.3) "parametric
     location-scale model" for the case where σ varies with x.
@@ -484,13 +505,33 @@ def fit_quantile_lss(
             "log_sigma_bracket": list(bracket),
         }
 
-    res = _rust.fit_quantile_lss_raw_py(
-        x_loc=X_loc, y=y,
-        s_loc_total=s_loc_total,
-        sigma_g_per_obs=sigma_g_per_obs,
-        sigma_global=(float(sigma_scale) if sigma_scale is not None else None),
-        tau=float(tau), max_iter=max_iter, tolerance=tolerance,
-    )
+    if retune_lambda:
+        # FS outer loop tunes λ_loc under the per-obs-σ ELF likelihood
+        # rather than inheriting it from the Gaussian-init GAM. Closes the
+        # corr-with-qgam gap at extreme τ (parity test 2026-05-07).
+        per_smooth_blocks = _build_per_smooth_blocks(g_loc)
+        res = _rust.fit_quantile_lss_retune_py(
+            x_loc=X_loc, y=y,
+            penalty_blocks=per_smooth_blocks,
+            lambda_init=lambda_loc.astype(np.float64),
+            sigma_g_per_obs=sigma_g_per_obs,
+            sigma_global=(float(sigma_scale) if sigma_scale is not None else None),
+            tau=float(tau),
+            max_outer=fs_max_outer,
+            max_inner=max_iter,
+            tolerance=tolerance,
+        )
+        # Override the Gaussian-init lambdas with the FS-tuned values for
+        # downstream reporting.
+        lambda_loc = np.asarray(res["lambda_loc"])
+    else:
+        res = _rust.fit_quantile_lss_raw_py(
+            x_loc=X_loc, y=y,
+            s_loc_total=s_loc_total,
+            sigma_g_per_obs=sigma_g_per_obs,
+            sigma_global=(float(sigma_scale) if sigma_scale is not None else None),
+            tau=float(tau), max_iter=max_iter, tolerance=tolerance,
+        )
     sigma_per_obs = np.asarray(res["sigma"])  # σ used in ELF (Rust returns it)
     sigma_global_used = float(res["sigma_global"])
 
@@ -508,6 +549,7 @@ def fit_quantile_lss(
         "converged": res["converged"],
         "deviance": res["deviance"],
         "lambda_loc": lambda_loc.tolist(),
+        "fs_iterations": int(res.get("fs_iterations", 0)) if retune_lambda else 0,
         "lambda_scale": np.asarray(g_scale.get_all_lambdas()).tolist(),
         "k_loc": list(k_loc),
         "k_scale": list(k_scale),

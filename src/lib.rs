@@ -1710,6 +1710,112 @@ fn fit_quantile_lss_raw_py<'py>(
     Ok(result.into())
 }
 
+/// Re-tune per-location-smooth λ under the per-obs-σ ELF likelihood via
+/// a Fellner-Schall outer loop. `penalty_blocks` is a list of full-design
+/// (p × p) penalty matrices, one per location smooth, each with non-zeros
+/// only in the smooth's coefficient block. `lambda_init` is the matching
+/// per-smooth initial λ vector (typically the lambdas from the location
+/// Gaussian GAM).
+///
+/// Returns a dict matching `fit_quantile_lss_raw_py` plus `lambda_loc`
+/// (final tuned λs) and `fs_iterations` (FS sweep count).
+#[pyfunction]
+#[pyo3(signature = (x_loc, y, penalty_blocks, lambda_init, sigma_g_per_obs, tau, sigma_global=None, max_outer=None, max_inner=None, tolerance=None))]
+fn fit_quantile_lss_retune_py<'py>(
+    py: Python<'py>,
+    x_loc: PyReadonlyArray2<f64>,
+    y: PyReadonlyArray1<f64>,
+    penalty_blocks: Vec<PyReadonlyArray2<f64>>,
+    lambda_init: PyReadonlyArray1<f64>,
+    sigma_g_per_obs: PyReadonlyArray1<f64>,
+    tau: f64,
+    sigma_global: Option<f64>,
+    max_outer: Option<usize>,
+    max_inner: Option<usize>,
+    tolerance: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    use crate::block_penalty::BlockPenalty;
+    let x_loc_arr = x_loc.as_array().to_owned();
+    let y_arr = y.as_array().to_owned();
+    let sigma_g_arr = sigma_g_per_obs.as_array().to_owned();
+    let lambda_init_vec: Vec<f64> = lambda_init.as_array().iter().copied().collect();
+    let p_loc = x_loc_arr.ncols();
+
+    if penalty_blocks.len() != lambda_init_vec.len() {
+        return Err(PyValueError::new_err(format!(
+            "penalty_blocks has {} entries but lambda_init has {}",
+            penalty_blocks.len(), lambda_init_vec.len()
+        )));
+    }
+
+    // Each input penalty is the full p×p matrix with only one smooth's
+    // block populated. Collapse it to BlockPenalty by finding the
+    // diagonal extent of nonzeros — Python builds these via
+    // _build_per_smooth_blocks where the offset is known, but we don't
+    // need to trust it: scan for the first/last nonzero row/col.
+    let mut block_penalties = Vec::with_capacity(penalty_blocks.len());
+    for pen_full in &penalty_blocks {
+        let arr = pen_full.as_array();
+        if arr.nrows() != p_loc || arr.ncols() != p_loc {
+            return Err(PyValueError::new_err(format!(
+                "penalty block has shape ({}, {}); expected ({}, {})",
+                arr.nrows(), arr.ncols(), p_loc, p_loc
+            )));
+        }
+        // Find the bounding box of nonzeros.
+        let mut lo = p_loc;
+        let mut hi = 0usize;
+        for i in 0..p_loc {
+            for j in 0..p_loc {
+                if arr[[i, j]].abs() > 0.0 {
+                    if i < lo { lo = i; }
+                    if i > hi { hi = i; }
+                    if j < lo { lo = j; }
+                    if j > hi { hi = j; }
+                }
+            }
+        }
+        if lo > hi {
+            // All-zero penalty (e.g. for a smooth with no penalty). Use a
+            // 1×1 zero block at offset 0 so trace_product/quadratic_form
+            // contribute nothing.
+            block_penalties.push(BlockPenalty::new(
+                ndarray::Array2::<f64>::zeros((1, 1)), 0, p_loc,
+            ));
+        } else {
+            let k = hi - lo + 1;
+            let block = arr.slice(ndarray::s![lo..=hi, lo..=hi]).to_owned();
+            block_penalties.push(BlockPenalty::new(block, lo, p_loc));
+        }
+    }
+
+    let (res, sigma_global_used) = crate::pirls::fit_pirls_quantile_lss_fs_tune(
+        &y_arr,
+        &x_loc_arr,
+        &block_penalties,
+        &lambda_init_vec,
+        &sigma_g_arr,
+        sigma_global,
+        tau,
+        max_outer.unwrap_or(20),
+        max_inner.unwrap_or(50),
+        tolerance.unwrap_or(1e-6),
+    )
+    .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+    let result = pyo3::types::PyDict::new(py);
+    result.set_item("beta_loc", PyArray1::from_vec(py, res.coefficients_loc.to_vec()))?;
+    result.set_item("eta_loc", PyArray1::from_vec(py, res.eta_loc.to_vec()))?;
+    result.set_item("sigma", PyArray1::from_vec(py, res.sigma.to_vec()))?;
+    result.set_item("sigma_global", sigma_global_used)?;
+    result.set_item("deviance", res.deviance)?;
+    result.set_item("iterations", res.iterations)?;
+    result.set_item("converged", res.converged)?;
+    result.set_item("lambda_loc", PyArray1::from_vec(py, res.lambda_loc))?;
+    result.set_item("fs_iterations", res.fs_iterations)?;
+    Ok(result.into())
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1721,5 +1827,6 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "blas")]
     m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_raw_py, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_quantile_lss_retune_py, m)?)?;
     Ok(())
 }

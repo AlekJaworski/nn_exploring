@@ -150,6 +150,36 @@ def test_lss_parity_vs_qgam(hetero_data, tau):
 
 @pytest.mark.skipif(not _qgam_available(), reason="qgam not installed")
 @pytest.mark.parametrize("tau", [0.1, 0.5, 0.9])
+def test_lss_retuned_parity_vs_qgam(hetero_data, tau):
+    """With `retune_lambda=True`, the FS outer loop re-fits λ_loc under
+    the per-obs-σ ELF likelihood. The predictions should match qgam
+    extremely tightly (corr > 0.99) at every τ — this is the gap the
+    default heuristic leaves at extreme τ (corr ~0.91-0.93), closed by
+    re-tuning λ instead of inheriting it from the Gaussian-init GAM.
+    """
+    X, y, _ = hetero_data
+    fit, info = fit_quantile_lss(
+        X, y, tau=tau, k_loc=[10, 10], k_scale=[5, 5],
+        retune_lambda=True, fs_max_outer=20,
+    )
+    yhat_rust = fit.predict_loc(X)
+
+    r_out = _fit_qgam_lss(X, y, tau)
+    yhat_qgam = np.asarray(r_out["pred"])
+
+    if yhat_rust.std() > 1e-6 and yhat_qgam.std() > 1e-6:
+        corr = float(np.corrcoef(yhat_rust, yhat_qgam)[0, 1])
+        assert corr > 0.99, f"retuned τ={tau}: corr={corr:.4f} < 0.99"
+
+    # Coverage stays within 0.05 of τ.
+    cov_rust = float((y < yhat_rust).mean())
+    assert abs(cov_rust - tau) < 0.05, (
+        f"retuned τ={tau}: cal_err={abs(cov_rust-tau):.4f} > 0.05"
+    )
+
+
+@pytest.mark.skipif(not _qgam_available(), reason="qgam not installed")
+@pytest.mark.parametrize("tau", [0.1, 0.5, 0.9])
 def test_lss_calibrated_parity_vs_qgam(hetero_data, tau):
     """With calibrate=True (pinball-CV), the τ-quantile surface should
     match qgam tightly (corr > 0.95) at every τ — qgam also calibrates
