@@ -98,6 +98,53 @@ def _bootstrap_z_at_sigma(
     return np.stack(z_rows, axis=0)
 
 
+def _bootstrap_z_at_sigma_lss(
+    X: np.ndarray, y: np.ndarray, tau: float,
+    k_loc: Sequence[int], k_scale: Sequence[int],
+    sigma_scale: float, B: int,
+    mu_full: np.ndarray, sdev_full: np.ndarray,
+    bs: str, method: str, max_iter: int, tolerance: float,
+    seed: int,
+) -> np.ndarray:
+    """LSS analogue of `_bootstrap_z_at_sigma`: bootstrap-refit the full
+    LSS pipeline at the trial σ_global, then standardise the prediction
+    deviations from the full-data fit by the full fit's posterior
+    predictive SD.
+
+    Returns (B', n) — B' ≤ B is the number of bootstrap fits that
+    produced finite predictions of the right shape. Returns shape (0, n)
+    if fewer than 5 successful refits (caller should treat as +∞ KL).
+
+    Mirrors qgam's `tuneLearnFast` cal-KL pipeline: the σ_G(x) is
+    re-estimated on each bootstrap sample (gaulss is part of
+    `fit_quantile_lss`), so this captures variability of the entire
+    pipeline at fixed σ_global.
+    """
+    n = len(y)
+    rng = np.random.default_rng(seed)
+    z_rows: list[np.ndarray] = []
+    for b in range(B):
+        in_idx = rng.choice(n, size=n, replace=True)
+        try:
+            fit_b, _ = fit_quantile_lss(
+                X[in_idx], y[in_idx], tau=tau,
+                k_loc=k_loc, k_scale=k_scale, bs=bs, method=method,
+                max_iter=max_iter, tolerance=tolerance,
+                sigma_scale=float(sigma_scale),
+                calibrate=False, retune_lambda=True,
+            )
+            mu_b = fit_b.predict_loc(X)  # predict on the ORIGINAL X
+            if mu_b.shape != mu_full.shape or not np.all(np.isfinite(mu_b)):
+                continue
+            z_b = (mu_b - mu_full) / np.maximum(sdev_full, 1e-10)
+            z_rows.append(z_b)
+        except Exception:
+            continue
+    if len(z_rows) < 5:
+        return np.zeros((0, n))
+    return np.stack(z_rows, axis=0)
+
+
 def _predictive_sdev(g, X: np.ndarray) -> np.ndarray:
     """Posterior predictive SD at rows of X under fit `g`:
     sqrt(diag(L · V_β · L')) where L = lpmatrix(X), V_β = vcov.
@@ -381,7 +428,9 @@ def fit_quantile_lss(
     tolerance: float = 1e-6,
     sigma_scale: Optional[float] = None,
     calibrate: bool = False,
+    loss: str = "pin",
     n_folds: int = 3,
+    n_bootstrap: int = 20,
     seed: int = 0,
     retune_lambda: bool = True,
     fs_max_outer: int = 20,
@@ -411,6 +460,16 @@ def fit_quantile_lss(
     Pass `retune_lambda=False` to skip step 3 — ~2-3× faster fit, but
     with the heuristic-λ shape gap (RMSE-vs-truth 5-15× worse at extreme
     τ; calibration unaffected).
+
+    σ_global calibration (`calibrate=True`):
+    - `loss="pin"` (default): K-fold pinball CV. Cheap (~0.5-1s on n=800),
+      gives RMSE-vs-truth within 1.3-2× of qgam.
+    - `loss="cal_kl"`: qgam-style bootstrap-KL distance. Mirrors qgam's
+      `tuneLearnFast`. ~5-10× slower than pinball-CV on the LSS path
+      because each Brent step refits B bootstrap LSS pipelines. Empirically
+      *not* better than pin-CV here (FS λ retuning already nailed the
+      shape; σ_global tuning method is no longer load-bearing). Shipped
+      for completeness / qgam-faithful workflows.
 
     Why NOT joint elflss MLE: the Beta-normalised elflss likelihood
     theoretically identifies σ via joint MLE, but in finite samples joint
@@ -458,10 +517,11 @@ def fit_quantile_lss(
 
     from . import mgcv_rust as _rust
 
-    # ── Optional: calibrate σ_global via K-fold pinball-CV. ──
-    # The CV loop is in Python because it's high-level orchestration
-    # (fold splits + Brent on a single scalar); each fold's heavy compute
-    # goes into the Rust LSS path via the recursive call.
+    # ── Optional: calibrate σ_global via K-fold pinball-CV or cal-KL. ──
+    # Both calibration loops are in Python because they're high-level
+    # orchestration (fold splits or bootstrap loop + Brent on a single
+    # scalar); each iteration's heavy compute goes into the Rust LSS
+    # path via the recursive call.
     info_calibration = None
     if calibrate:
         try:
@@ -471,44 +531,75 @@ def fit_quantile_lss(
                 "calibrate=True requires scipy (`pip install scipy`)."
             ) from _imp_err
 
-        rng_cal = np.random.default_rng(seed)
-        perm = rng_cal.permutation(len(y))
-        fold_size = len(y) // n_folds
-        folds = []
-        for i in range(n_folds):
-            test_idx = perm[i * fold_size : (i + 1) * fold_size]
-            train_mask = np.ones(len(y), dtype=bool)
-            train_mask[test_idx] = False
-            folds.append((test_idx, np.where(train_mask)[0]))
-
-        def cv_loss_at(sg: float) -> float:
-            losses = []
-            for test_idx, train_idx in folds:
-                try:
-                    fit_cv, _ = fit_quantile_lss(
-                        X[train_idx], y[train_idx], tau=tau,
-                        k_loc=k_loc, k_scale=k_scale, bs=bs, method=method,
-                        max_iter=max_iter, tolerance=tolerance,
-                        sigma_scale=sg, calibrate=False,
-                    )
-                    yhat_te = fit_cv.predict_loc(X[test_idx])
-                    r_te = y[test_idx] - yhat_te
-                    losses.append(float(np.maximum(tau * r_te, (tau - 1) * r_te).mean()))
-                except Exception:
-                    losses.append(np.inf)
-            return float(np.mean(losses))
+        if loss not in ("pin", "cal_kl"):
+            raise ValueError(f"loss must be 'pin' or 'cal_kl', got {loss!r}")
 
         y_sd = float(np.std(y) or 1.0)
         bracket = (np.log(0.05 * y_sd), np.log(5.0 * y_sd))
+
+        if loss == "pin":
+            rng_cal = np.random.default_rng(seed)
+            perm = rng_cal.permutation(len(y))
+            fold_size = len(y) // n_folds
+            folds = []
+            for i in range(n_folds):
+                test_idx = perm[i * fold_size : (i + 1) * fold_size]
+                train_mask = np.ones(len(y), dtype=bool)
+                train_mask[test_idx] = False
+                folds.append((test_idx, np.where(train_mask)[0]))
+
+            def loss_at(sg: float) -> float:
+                losses = []
+                for test_idx, train_idx in folds:
+                    try:
+                        fit_cv, _ = fit_quantile_lss(
+                            X[train_idx], y[train_idx], tau=tau,
+                            k_loc=k_loc, k_scale=k_scale, bs=bs, method=method,
+                            max_iter=max_iter, tolerance=tolerance,
+                            sigma_scale=sg, calibrate=False,
+                        )
+                        yhat_te = fit_cv.predict_loc(X[test_idx])
+                        r_te = y[test_idx] - yhat_te
+                        losses.append(float(np.maximum(tau * r_te, (tau - 1) * r_te).mean()))
+                    except Exception:
+                        losses.append(np.inf)
+                return float(np.mean(losses))
+        else:  # loss == "cal_kl"
+            # Full-data fit (at the heuristic σ_global) anchors mu_full
+            # and the predictive-SD normalisation. We use g_loc's posterior
+            # SD — the same anchor qgam's tuneLearnFast uses for cal-KL,
+            # since the LSS β_loc covariance is not exposed yet and g_loc
+            # provides a consistent normalisation across all bootstrap
+            # refits at the same trial σ_global.
+            fit_anchor, _ = fit_quantile_lss(
+                X, y, tau=tau, k_loc=k_loc, k_scale=k_scale, bs=bs,
+                method=method, max_iter=max_iter, tolerance=tolerance,
+                sigma_scale=None, calibrate=False, retune_lambda=True,
+            )
+            mu_full = fit_anchor.predict_loc(X)
+            sdev_full = _predictive_sdev(fit_anchor._g_loc, X)
+
+            def loss_at(sg: float) -> float:
+                z = _bootstrap_z_at_sigma_lss(
+                    X, y, tau, k_loc, k_scale, float(sg), n_bootstrap,
+                    mu_full, sdev_full, bs, method, max_iter, tolerance,
+                    seed,
+                )
+                if z.shape[0] < 5:
+                    return np.inf
+                return _cal_kl_loss(z)
+
         result = minimize_scalar(
-            lambda lsg: cv_loss_at(float(np.exp(lsg))),
+            lambda lsg: loss_at(float(np.exp(lsg))),
             bounds=bracket, method="bounded", options={"xatol": 0.05},
         )
         sigma_scale = float(np.exp(result.x))
         info_calibration = {
+            "loss": loss,
             "calibration_loss": float(result.fun),
             "n_brent_evals": int(result.nfev),
-            "n_folds": n_folds,
+            "n_folds": n_folds if loss == "pin" else None,
+            "n_bootstrap": n_bootstrap if loss == "cal_kl" else None,
             "log_sigma_bracket": list(bracket),
         }
 

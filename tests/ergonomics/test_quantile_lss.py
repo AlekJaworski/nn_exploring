@@ -108,12 +108,41 @@ def test_calibration_runs(hetero_data):
     X, y, _ = hetero_data
     fit, info = fit_quantile_lss(
         X, y, tau=0.5, k_loc=[8, 8], k_scale=[4, 4],
-        calibrate=True, n_folds=3, seed=0,
+        calibrate=True, loss="pin", n_folds=3, seed=0,
     )
     assert info["calibration"] is not None
+    assert info["calibration"]["loss"] == "pin"
     assert info["calibration"]["n_brent_evals"] > 0
     cov = _empirical_coverage(y, fit.predict_loc(X))
     assert abs(cov - 0.5) < 0.05
+
+
+def test_calibration_cal_kl_runs(hetero_data):
+    """`calibrate=True, loss="cal_kl"` runs the qgam-style bootstrap-KL
+    σ_global tuning and converges with sensible coverage. Slower than
+    pin-CV on the LSS path because it refits B≈20 bootstrap fits per
+    Brent evaluation; documenting that it works is the point.
+    """
+    X, y, _ = hetero_data
+    fit, info = fit_quantile_lss(
+        X, y, tau=0.5, k_loc=[8, 8], k_scale=[4, 4],
+        calibrate=True, loss="cal_kl", n_bootstrap=10, seed=0,
+    )
+    assert info["calibration"] is not None
+    assert info["calibration"]["loss"] == "cal_kl"
+    assert info["calibration"]["n_bootstrap"] == 10
+    assert info["calibration"]["n_brent_evals"] > 0
+    cov = _empirical_coverage(y, fit.predict_loc(X))
+    assert abs(cov - 0.5) < 0.05
+
+
+def test_calibration_rejects_unknown_loss(hetero_data):
+    X, y, _ = hetero_data
+    with pytest.raises(ValueError, match="loss must be"):
+        fit_quantile_lss(
+            X, y, tau=0.5, k_loc=[8, 8], k_scale=[4, 4],
+            calibrate=True, loss="unknown",
+        )
 
 
 def test_sigma_scale_override(hetero_data):
