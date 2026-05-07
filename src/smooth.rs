@@ -290,6 +290,17 @@ pub struct SmoothingParameter {
     /// Current log(σ) for Quantile profile-σ. Updated each outer Newton
     /// iteration in the same FD-Newton style as Tweedie p / NegBin θ.
     pub quantile_log_sigma: f64,
+    /// Profile-df mode for the scat (TDist) family at the *outer* Newton
+    /// level — joint with ρ, à la Tweedie p / NegBin θ. When true, the
+    /// outer Newton FD-steps on log(df) after each ρ step using the
+    /// same REML score machinery; PIRLS receives the current df as
+    /// fixed (so the inner Brent on df doesn't compete with the outer
+    /// Newton). Set true when the user passed df=0 sentinel (the
+    /// default for `mr.GAM("t-dist")`).
+    pub tdist_profile: bool,
+    /// Current log(df) for TDist profile-df. Updated each outer Newton
+    /// iteration. Initial value: log(5).
+    pub tdist_log_df: f64,
     /// REML / LAML score at convergence. Populated by the outer optimizer
     /// (Newton or FS) on the last iteration so callers can read it back
     /// for σ profiling at the wrapper level.
@@ -341,6 +352,8 @@ impl SmoothingParameter {
             negbin_log_theta: 2.0_f64.ln(),
             quantile_profile: false,
             quantile_log_sigma: 0.0,
+            tdist_profile: false,
+            tdist_log_df: 5.0_f64.ln(),
             last_score: None,
         }
     }
@@ -368,6 +381,8 @@ impl SmoothingParameter {
             negbin_log_theta: 2.0_f64.ln(),
             quantile_profile: false,
             quantile_log_sigma: 0.0,
+            tdist_profile: false,
+            tdist_log_df: 5.0_f64.ln(),
             last_score: None,
         }
     }
@@ -395,6 +410,8 @@ impl SmoothingParameter {
             negbin_log_theta: 2.0_f64.ln(),
             quantile_profile: false,
             quantile_log_sigma: 0.0,
+            tdist_profile: false,
+            tdist_log_df: 5.0_f64.ln(),
             last_score: None,
         }
     }
@@ -1629,6 +1646,99 @@ impl SmoothingParameter {
                 }
             }
             // End of NegBin profile-θ step
+
+            // -----------------------------------------------------------------------
+            // scat (TDist) profile-df: Newton step on log(df) at the OUTER level,
+            // joint with ρ. Mirrors the Tweedie p / NegBin θ pattern. PIRLS keeps
+            // its inner σ² profiling (method-of-moments at converged β) — only
+            // df is moved here.
+            //
+            // Currently df is profiled INSIDE fit_pirls_tdist via 1D Brent on
+            // the profile log-likelihood. That's a partial LAML — joint with
+            // λ via the inner-loop coupling, but not with the closed-form REML
+            // gradient the outer Newton uses. Profiling at the outer level
+            // (this block) closes that gap, mirroring how Tweedie p closes the
+            // analogous gap there.
+            // -----------------------------------------------------------------------
+            if self.tdist_profile {
+                let log_df = self.tdist_log_df;
+                let h_th: f64 = 1e-3;
+                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+
+                // Helper: σ² at the family — read it back so trial REML score
+                // sees the same σ² the inner PIRLS just landed on.
+                let current_sigma2 = match self.family {
+                    crate::pirls::Family::TDist { sigma2, .. } => sigma2,
+                    _ => 1.0,
+                };
+
+                macro_rules! tdist_eval {
+                    ($lt_trial:expr) => {{
+                        let lt_trial: f64 = $lt_trial;
+                        let df_trial = lt_trial.exp().max(2.0_f64).min(100.0_f64);
+                        let trial_fam = crate::pirls::Family::TDist {
+                            df: df_trial,
+                            sigma2: current_sigma2,
+                        };
+                        dispatch_reml_score_with_family(
+                            self,
+                            &y_local,
+                            x,
+                            &w_local,
+                            &current_lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            trial_fam,
+                        )
+                    }};
+                }
+
+                let reml_center = tdist_eval!(log_df);
+                let reml_plus = tdist_eval!(log_df + h_th);
+                let reml_minus = tdist_eval!(log_df - h_th);
+
+                if let (Ok(rc), Ok(rp), Ok(rm)) = (reml_center, reml_plus, reml_minus) {
+                    let dlr_dlt = (rp - rm) / (2.0 * h_th);
+                    let d2lr_dlt2 = (rp - 2.0 * rc + rm) / (h_th * h_th);
+
+                    let denom = d2lr_dlt2.abs().max(1e-4);
+                    let delta_lt = -(dlr_dlt / denom);
+                    // Wider clamp than NegBin's [-0.5, 0.5] since df can move
+                    // through 1-2 decades during convergence on heavy-tailed
+                    // data; bound to [-1, 1] (≈ 2.7× per iteration max).
+                    let delta_lt = delta_lt.max(-1.0_f64).min(1.0_f64);
+
+                    let mut accepted_lt = log_df;
+                    let candidate = log_df + delta_lt;
+                    if let Ok(r_new) = tdist_eval!(candidate) {
+                        if r_new < rc {
+                            accepted_lt = candidate;
+                        } else {
+                            let half_cand = log_df + delta_lt * 0.5;
+                            if let Ok(r_half) = tdist_eval!(half_cand) {
+                                if r_half < rc {
+                                    accepted_lt = half_cand;
+                                }
+                            }
+                        }
+                    }
+
+                    self.tdist_log_df = accepted_lt;
+                    let new_df = accepted_lt.exp().max(2.0_f64).min(100.0_f64);
+                    self.family = crate::pirls::Family::TDist {
+                        df: new_df,
+                        sigma2: current_sigma2,
+                    };
+
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!(
+                            "[PROFILE]   scat profile-df: log_df {:.4}→{:.4} df={:.4} dlr/d(log_df)={:.4e}",
+                            log_df, accepted_lt, new_df, dlr_dlt
+                        );
+                    }
+                }
+            }
+            // End of scat (TDist) profile-df step
         }
 
         // Update final lambdas

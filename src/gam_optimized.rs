@@ -567,6 +567,15 @@ impl GAM {
         } else {
             smoothing_params.negbin_log_theta = 2.0_f64.ln();
         }
+        // Profile-df for scat (TDist) — DORMANT until the joint (df, σ²)
+        // outer Newton lands. The infrastructure (tdist_profile flag, the
+        // FD-Newton block in smooth.rs) is ready, but with the current
+        // Gaussian-proxy deviance + ls the FD gradient w.r.t. df is
+        // structurally zero. Switching to proper t-deviance/ls breaks
+        // parity until σ² is also moved into the outer Newton. Tracked
+        // in task #14.
+        smoothing_params.tdist_profile = false;
+        smoothing_params.tdist_log_df = 5.0_f64.ln();
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For
         // non-Gaussian, the optimizer is called with the working response z;
         // y_original carries the true y so IFT can evaluate
@@ -754,9 +763,12 @@ impl GAM {
                 );
             }
 
-            // Propagate the converged p back to self.family so that the
-            // final PIRLS below uses the correct p.
-            if self.tweedie_profile {
+            // Propagate the converged family params (Tweedie p, NegBin θ,
+            // scat df) back to self.family so the final PIRLS uses them.
+            if self.tweedie_profile
+                || self.negbin_profile
+                || smoothing_params.tdist_profile
+            {
                 self.family = smoothing_params.family;
             }
 

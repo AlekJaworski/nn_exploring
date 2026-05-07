@@ -158,7 +158,8 @@ pub fn glm_deviance(
                 let yi_c = yi.max(1e-15);
                 2.0 * ((yi_c - mu_c) / mu_c - (yi_c / mu_c).ln())
             }
-            // TDist: use squared residual as deviance proxy (identity link, μ = η)
+            // TDist: use squared residual as deviance proxy (identity link, μ = η).
+            // Proper t-deviance needs joint (df, σ²) Newton — see pirls.rs note.
             Family::TDist { .. } => (yi - mui).powi(2),
             // Quantile/ELF deviance per qgam elf.R:122-138 with λ = σ
             // (matches pirls.rs::compute_deviance).

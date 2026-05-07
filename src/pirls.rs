@@ -309,6 +309,15 @@ impl Family {
             // (doesn't depend on β), so its effect on the REML optimum is a constant
             // shift — acceptable for v1 λ-selection. The REML score absolute value
             // will differ from mgcv's but the λ-optimum is unaffected.
+            //
+            // Note (2026-05-07 LAML probe): switching to the proper t-form
+            //   ls = n·[lgamma((ν+1)/2) - lgamma(ν/2) - ½·log(νπ) - ½·log σ²]
+            // restores the df-dependence of REML, BUT the σ² method-of-moments
+            // inside fit_pirls_tdist doesn't agree with this — the resulting
+            // outer-Newton on df pulls σ² to a stationary point that the
+            // Gaussian-style proxy didn't, breaking test_tdist_mgcv_parity.
+            // Closing this needs the joint (df, σ²) outer Newton (gam.fit5
+            // pattern) — tracked in task #14.
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
@@ -1184,6 +1193,13 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
             Family::Gamma | Family::GammaLog => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
             // TDist deviance: -2 * log p(y|μ,σ²,df) up to an additive constant.
             // Use the squared residual as a proxy (consistent scale comparison).
+            //
+            // Note (2026-05-07 LAML probe): the proper t-deviance
+            //   (df+1) · log(1 + (y-μ)²/(df·σ²))
+            // is what gam.fit5 LAML uses, but pairing it with our
+            // method-of-moments σ² estimation broke parity tests. A
+            // self-consistent fix needs the joint (df, σ²) outer Newton —
+            // tracked separately.
             Family::TDist { .. } => (yi - mui).powi(2),
             // Tweedie deviance for 1 < p < 2 (log link):
             //   d_i = 2 * [ y^(2-p)/((1-p)(2-p)) - y*μ^(1-p)/(1-p) + μ^(2-p)/(2-p) ]
