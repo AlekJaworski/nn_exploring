@@ -383,7 +383,7 @@ def fit_quantile_lss(
     calibrate: bool = False,
     n_folds: int = 3,
     seed: int = 0,
-    retune_lambda: bool = False,
+    retune_lambda: bool = True,
     fs_max_outer: int = 20,
 ) -> tuple[QuantileLSSFit, dict[str, Any]]:
     """Heteroskedastic τ-quantile fit — port of qgam's (≥1.3) "parametric
@@ -402,8 +402,15 @@ def fit_quantile_lss(
           E[log|N(0, 1)|] = -0.6351 → unbiased log σ_G(x).
        c. σ_G(x) = exp(ν(x) + 0.6351).
     2. **Per-obs-σ ELF IRLS** (Rust): set σ_i = σ_G(x_i) per-observation,
-       run the standard ELF location-only fit. Penalty is the REML-tuned
-       λ_loc · S from step 1a.
+       run the standard ELF location-only fit.
+    3. **Fellner-Schall λ_loc retuning** (Rust, default ON via `retune_lambda=True`):
+       outer FS loop re-tunes λ_loc under the per-obs-σ ELF likelihood
+       rather than inheriting it from the Gaussian-init GAM. Closes the
+       shape-mismatch gap with qgam at extreme τ (corr 0.91-0.93 → 0.999).
+
+    Pass `retune_lambda=False` to skip step 3 — ~2-3× faster fit, but
+    with the heuristic-λ shape gap (RMSE-vs-truth 5-15× worse at extreme
+    τ; calibration unaffected).
 
     Why NOT joint elflss MLE: the Beta-normalised elflss likelihood
     theoretically identifies σ via joint MLE, but in finite samples joint

@@ -1,21 +1,25 @@
 """Parity test for `fit_quantile_lss` against R's qgam ≥ 1.3 location-scale path.
 
-qgam ≥ 1.3, when given a formula list (location + scale), uses the same
-"parametric location-scale model" we implement: a Gaussian-init + per-obs-σ
-ELF on the location predictor. The σ_global is tuned via `tuneLearnFast`
-cross-validation on qgam's side; we use the qgam heuristic by default and
-optionally pinball-CV with `calibrate=True`.
+qgam ≥ 1.3, given a formula list (location + scale), runs a "parametric
+location-scale model": Gaussian preprocessing for σ̂(x), per-obs-σ ELF for
+the location, plus internal λ_loc retuning under the ELF likelihood via
+mgcv's `gam.fit5` LAML. We mirror the same pipeline; the default path
+runs Fellner-Schall λ_loc retuning (the FS analogue of qgam's LAML step).
+
+The two methods still differ on **σ_global tuning**: qgam runs the
+cross-validated `tuneLearnFast`; we use either the analytical heuristic
+`err·sqrt(2π·varHat)/(2·log 2)·tail_scale` (default) or pinball-CV
+(`calibrate=True`).
 
 This test verifies that on the canonical heteroskedastic scenario,
 `fit_quantile_lss` and `qgam(list(loc_form, scale_form), qu=tau)` agree
 on:
     1. Empirical coverage (frac y < ŷ) — both within 0.05 of τ, and within
        0.05 of each other.
-    2. Prediction correlation across observations — both recover the same
-       smooth τ-quantile surface. corr > 0.97 at τ=0.5; corr > 0.90 at
-       extreme τ (the gap at extreme τ traces to qgam's σ_global tuning
-       via tuneLearnFast vs our heuristic — calibrate=True tightens it
-       to ~0.96 but is asserted separately).
+    2. Prediction correlation across observations — corr > 0.99 at every
+       τ with the default (FS-retuned) path. Without retuning the corr
+       drops to ~0.91-0.93 at extreme τ (asserted separately in the
+       no-retune test).
     3. σ_global / log learning rate ballpark — within ~3 orders of magnitude
        (we use a heuristic; qgam tunes via cv, sharper σ ⟹ different λ).
 
@@ -102,10 +106,11 @@ def _fit_qgam_lss(X: np.ndarray, y: np.ndarray, tau: float) -> dict:
 @pytest.mark.skipif(not _qgam_available(), reason="qgam not installed")
 @pytest.mark.parametrize("tau", [0.1, 0.5, 0.9])
 def test_lss_parity_vs_qgam(hetero_data, tau):
-    """fit_quantile_lss vs qgam(list(...)): coverage, prediction corr, σ ballpark."""
+    """Default `fit_quantile_lss` (FS-retuned λ) vs qgam: coverage, prediction
+    corr > 0.99 at every τ, σ_global ballpark.
+    """
     X, y, _sigma_true = hetero_data
 
-    # Rust LSS — default qgam heuristic σ_global.
     fit, info = fit_quantile_lss(X, y, tau=tau, k_loc=[10, 10], k_scale=[5, 5])
     yhat_rust = fit.predict_loc(X)
     sigma_global_rust = float(info["sigma_global"])
@@ -125,17 +130,11 @@ def test_lss_parity_vs_qgam(hetero_data, tau):
         f"τ={tau}: cov diverges — rust={cov_rust:.4f} qgam={cov_qgam:.4f}"
     )
 
-    # 2. Prediction correlation across the n=800 observations. Both should
-    # recover the same smooth τ-quantile surface up to noise in σ̂(x).
-    # At τ=0.5 the surfaces match tightly (~0.99); at extreme τ the heuristic
-    # σ_global drifts from qgam's cv-tuned lsig and the curves diverge in
-    # local wiggle (~0.91-0.93). calibrate=True closes that gap to ~0.96.
-    corr_min = 0.97 if tau == 0.5 else 0.90
+    # 2. Prediction correlation. With FS λ retuning (default), corr is
+    # essentially 1 at every τ — the curves match qgam's gam.fit5 LAML output.
     if yhat_rust.std() > 1e-6 and yhat_qgam.std() > 1e-6:
         corr = float(np.corrcoef(yhat_rust, yhat_qgam)[0, 1])
-        assert corr > corr_min, (
-            f"τ={tau}: rust/qgam prediction corr={corr:.4f} < {corr_min}"
-        )
+        assert corr > 0.99, f"τ={tau}: rust/qgam prediction corr={corr:.4f} < 0.99"
 
     # 3. σ_global ballpark. qgam tunes lsig via cross-validation, we use the
     # err·sqrt(2π·varHat)/(2·log 2)·tail_scale heuristic; expect agreement
@@ -149,33 +148,35 @@ def test_lss_parity_vs_qgam(hetero_data, tau):
 
 
 @pytest.mark.skipif(not _qgam_available(), reason="qgam not installed")
-@pytest.mark.parametrize("tau", [0.1, 0.5, 0.9])
-def test_lss_retuned_parity_vs_qgam(hetero_data, tau):
-    """With `retune_lambda=True`, the FS outer loop re-fits λ_loc under
-    the per-obs-σ ELF likelihood. The predictions should match qgam
-    extremely tightly (corr > 0.99) at every τ — this is the gap the
-    default heuristic leaves at extreme τ (corr ~0.91-0.93), closed by
-    re-tuning λ instead of inheriting it from the Gaussian-init GAM.
+@pytest.mark.parametrize("tau", [0.1, 0.9])
+def test_lss_no_retune_documents_heuristic_gap(hetero_data, tau):
+    """Pinned regression: with `retune_lambda=False`, the heuristic-λ path
+    leaves a corr-with-qgam gap at extreme τ (~0.91-0.93). Coverage still
+    matches within 0.05, but the curve shape diverges locally because
+    λ_loc is the Gaussian-fit auto-tune, wrong for the ELF likelihood.
+    Documenting the cost of opting out of the FS retune.
     """
     X, y, _ = hetero_data
-    fit, info = fit_quantile_lss(
+    fit, _ = fit_quantile_lss(
         X, y, tau=tau, k_loc=[10, 10], k_scale=[5, 5],
-        retune_lambda=True, fs_max_outer=20,
+        retune_lambda=False,
     )
     yhat_rust = fit.predict_loc(X)
-
     r_out = _fit_qgam_lss(X, y, tau)
     yhat_qgam = np.asarray(r_out["pred"])
 
-    if yhat_rust.std() > 1e-6 and yhat_qgam.std() > 1e-6:
-        corr = float(np.corrcoef(yhat_rust, yhat_qgam)[0, 1])
-        assert corr > 0.99, f"retuned τ={tau}: corr={corr:.4f} < 0.99"
-
-    # Coverage stays within 0.05 of τ.
     cov_rust = float((y < yhat_rust).mean())
     assert abs(cov_rust - tau) < 0.05, (
-        f"retuned τ={tau}: cal_err={abs(cov_rust-tau):.4f} > 0.05"
+        f"no-retune τ={tau}: cal_err={abs(cov_rust-tau):.4f} > 0.05"
     )
+    # Wide envelope; the test exists to flag if heuristic-λ behaviour
+    # changes drastically (e.g. drops below 0.85 — would be a regression).
+    if yhat_rust.std() > 1e-6 and yhat_qgam.std() > 1e-6:
+        corr = float(np.corrcoef(yhat_rust, yhat_qgam)[0, 1])
+        assert 0.85 < corr < 0.999, (
+            f"no-retune τ={tau}: corr={corr:.4f} outside [0.85, 0.999); "
+            "if corr ≥ 0.999, retune is being applied accidentally"
+        )
 
 
 @pytest.mark.skipif(not _qgam_available(), reason="qgam not installed")
