@@ -772,9 +772,45 @@ impl GAM {
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
+            // Compute REML/LAML score at converged Newton state — used by
+            // wrapper-level θ-profilers / parity probes for true-likelihood
+            // extended families (scat, Tweedie, NegBin).
+            let final_xtwx = if let Some(ref disc) = cache.discretized {
+                disc.compute_xtwx(&final_result.weights)
+            } else {
+                crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
+            };
+            // Use the working response z = η + (y-μ)/dμdη for non-Gaussian
+            // (matches what the optimizer's score saw); for Gaussian z = y.
+            let z_score: Array1<f64> = if matches!(self.family, crate::pirls::Family::Gaussian) {
+                y.clone()
+            } else {
+                let mut z = final_result.linear_predictor.clone();
+                for i in 0..z.len() {
+                    let dmu_deta = self.family.d_inverse_link(final_result.linear_predictor[i]);
+                    if dmu_deta.abs() > 1e-10 {
+                        z[i] += (y[i] - final_result.fitted_values[i]) / dmu_deta;
+                    }
+                }
+                z
+            };
+            smoothing_params.last_score =
+                crate::reml::reml_criterion_multi_cached_mgcv_exact(
+                    &z_score,
+                    &cache.design_matrix,
+                    &final_result.weights,
+                    &smoothing_params.lambda,
+                    &cache.penalties,
+                    Some(&final_xtwx),
+                    smoothing_params.mp,
+                    self.family,
+                    smoothing_params.y_original.as_ref(),
+                ).ok();
+
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
                 eprintln!("[PROFILE] REML optimization: {:.2}ms", total_reml_time);
+                eprintln!("[PROFILE] REML score: {:?}", smoothing_params.last_score);
             }
 
             self.store_results(final_result, smoothing_params, y, &cache.design_matrix);

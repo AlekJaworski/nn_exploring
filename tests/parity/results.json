@@ -72,7 +72,22 @@
     },
     "description": "High-d additive: 10 smooths in one model",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/10d_gaussian_n3000_k8_cr.json",
-    "name": "10d_gaussian_n3000_k8_cr"
+    "name": "10d_gaussian_n3000_k8_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 276.2358559994027,
+        "median_ms": 268.3619810268283,
+        "min_ms": 259.5037669525482,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 82.20418699784204,
+        "median_ms": 78.68472201516852,
+        "min_ms": 74.6726889628917,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.29320368598450003
+    }
   },
   {
     "bar_a": {
@@ -129,7 +144,22 @@
     },
     "description": "Low SNR (~0.1) \u2014 should saturate \u03bb \u2192 \u221e",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_low_signal_n1000_k10_cr.json",
-    "name": "1d_gaussian_low_signal_n1000_k10_cr"
+    "name": "1d_gaussian_low_signal_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 43.19936997490004,
+        "median_ms": 37.1713190106675,
+        "min_ms": 33.63205399364233,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 2.447940001729876,
+        "median_ms": 1.6978249768726528,
+        "min_ms": 1.6857259906828403,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.04567567205203042
+    }
   },
   {
     "bar_a": {
@@ -186,7 +216,22 @@
     },
     "description": "Linear-with-noise; tests very-high-lambda regime",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_near_linear_n500_k10_cr.json",
-    "name": "1d_gaussian_near_linear_n500_k10_cr"
+    "name": "1d_gaussian_near_linear_n500_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 29.559062037151307,
+        "median_ms": 23.16608198452741,
+        "min_ms": 21.40610700007528,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 1.8595309811644256,
+        "median_ms": 1.745518995448947,
+        "min_ms": 1.702632987871766,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.0753480453282854
+    }
   },
   {
     "bar_a": {
@@ -243,7 +288,22 @@
     },
     "description": "Logistic shape \u2014 flat-sharp-flat dose-response curve",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_sigmoid_n300_k10_cr.json",
-    "name": "1d_gaussian_sigmoid_n300_k10_cr"
+    "name": "1d_gaussian_sigmoid_n300_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 18.208517984021455,
+        "median_ms": 15.92250302201137,
+        "min_ms": 14.298307010903955,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 0.6902019958943129,
+        "median_ms": 0.6147160311229527,
+        "min_ms": 0.6028610514476895,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.03860674607963116
+    }
   },
   {
     "bar_a": {
@@ -300,7 +360,22 @@
     },
     "description": "Extreme over-parameterisation: k=50 with n=1000",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n1000_k50_cr.json",
-    "name": "1d_gaussian_smooth_n1000_k50_cr"
+    "name": "1d_gaussian_smooth_n1000_k50_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 56.35919299675152,
+        "median_ms": 54.971726960502565,
+        "min_ms": 50.19953695591539,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 19.94472398655489,
+        "median_ms": 19.794347987044603,
+        "min_ms": 19.171992025803775,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.3600823383494379
+    }
   },
   {
     "bar_a": {
@@ -357,7 +432,22 @@
     },
     "description": "Small-n version of smooth 1D",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n100_k10_cr.json",
-    "name": "1d_gaussian_smooth_n100_k10_cr"
+    "name": "1d_gaussian_smooth_n100_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 19.355197029653937,
+        "median_ms": 15.002978034317493,
+        "min_ms": 13.665048987604678,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 0.8279599715024233,
+        "median_ms": 0.8082690183073282,
+        "min_ms": 0.7482400396838784,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.05387390533122896
+    }
   },
   {
     "bar_a": {
@@ -414,7 +504,22 @@
     },
     "description": "Large 1d with k=30 (over-parameterised 1D)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n2000_k30_cr.json",
-    "name": "1d_gaussian_smooth_n2000_k30_cr"
+    "name": "1d_gaussian_smooth_n2000_k30_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 33.60361902741715,
+        "median_ms": 28.66427501430735,
+        "min_ms": 28.046338993590325,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 12.11781898746267,
+        "median_ms": 10.817099013365805,
+        "min_ms": 9.274823998566717,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.3773721473146141
+    }
   },
   {
     "bar_a": {
@@ -471,7 +576,22 @@
     },
     "description": "Smooth 1D sin curve, Gaussian noise, k=10 cr-spline",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n500_k10_cr.json",
-    "name": "1d_gaussian_smooth_n500_k10_cr"
+    "name": "1d_gaussian_smooth_n500_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 19.984107988420874,
+        "median_ms": 17.330699018202722,
+        "min_ms": 15.589747054036707,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 0.9200810454785824,
+        "median_ms": 0.8802670054137707,
+        "min_ms": 0.8554120431654155,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.05079235433546053
+    }
   },
   {
     "bar_a": {
@@ -528,7 +648,22 @@
     },
     "description": "Same data, k=20 B-spline (overparameterized)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n500_k20_bs.json",
-    "name": "1d_gaussian_smooth_n500_k20_bs"
+    "name": "1d_gaussian_smooth_n500_k20_bs",
+    "perf": {
+      "mgcv": {
+        "max_ms": 28.361079981550574,
+        "median_ms": 23.912480974104255,
+        "min_ms": 23.34546303609386,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 4.117776989005506,
+        "median_ms": 3.8530619931407273,
+        "min_ms": 2.499979978892952,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.16113183727415636
+    }
   },
   {
     "bar_a": {
@@ -585,7 +720,22 @@
     },
     "description": "Minimal data: n=50, tests degenerate small-n behavior",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_smooth_n50_k10_cr.json",
-    "name": "1d_gaussian_smooth_n50_k10_cr"
+    "name": "1d_gaussian_smooth_n50_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 21.145156992133707,
+        "median_ms": 18.333114043343812,
+        "min_ms": 15.84207999985665,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 0.7652839994989336,
+        "median_ms": 0.4969730507582426,
+        "min_ms": 0.4781989846378565,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.027107945195959667
+    }
   },
   {
     "bar_a": {
@@ -642,7 +792,22 @@
     },
     "description": "Sparse data near x=0 and x=1 \u2014 stresses extrap",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_sparse_edges_n400_k10_cr.json",
-    "name": "1d_gaussian_sparse_edges_n400_k10_cr"
+    "name": "1d_gaussian_sparse_edges_n400_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 18.26938596786931,
+        "median_ms": 17.774751991964877,
+        "min_ms": 15.937927993945777,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 0.8200819720514119,
+        "median_ms": 0.7977559580467641,
+        "min_ms": 0.7834819843992591,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.04488141147664911
+    }
   },
   {
     "bar_a": {
@@ -699,7 +864,22 @@
     },
     "description": "Step discontinuity at x=0.5 \u2014 pathological for splines",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_step_n500_k10_cr.json",
-    "name": "1d_gaussian_step_n500_k10_cr"
+    "name": "1d_gaussian_step_n500_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 20.202871004585177,
+        "median_ms": 16.710946976672858,
+        "min_ms": 16.039809037465602,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 0.7627570303156972,
+        "median_ms": 0.7565499981865287,
+        "min_ms": 0.7462110370397568,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.04527271849061647
+    }
   },
   {
     "bar_a": {
@@ -756,7 +936,22 @@
     },
     "description": "Higher-frequency 1D, k=20 cr",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_gaussian_wiggly_n500_k20_cr.json",
-    "name": "1d_gaussian_wiggly_n500_k20_cr"
+    "name": "1d_gaussian_wiggly_n500_k20_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 27.584305964410305,
+        "median_ms": 21.153069043066353,
+        "min_ms": 18.210094014648348,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 2.555218990892172,
+        "median_ms": 2.4160589673556387,
+        "min_ms": 2.3272200487554073,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.114217892563802
+    }
   },
   {
     "bar_a": {
@@ -813,7 +1008,22 @@
     },
     "description": "1d poisson (existing battery had no 1d non-Gaussian)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_poisson_log_n500_k10_cr.json",
-    "name": "1d_poisson_log_n500_k10_cr"
+    "name": "1d_poisson_log_n500_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 56.949516001623124,
+        "median_ms": 53.269981988705695,
+        "min_ms": 50.26607296895236,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 3.9055239758454263,
+        "median_ms": 3.7476170109584928,
+        "min_ms": 3.523444989696145,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.07035138498363042
+    }
   },
   {
     "bar_a": {
@@ -870,7 +1080,22 @@
     },
     "description": "tw(link='log') \u2014 Tweedie with profiled p, 1D smooth k=20",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_tw_log_n400_k20_cr.json",
-    "name": "1d_tw_log_n400_k20_cr"
+    "name": "1d_tw_log_n400_k20_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 207.7462010201998,
+        "median_ms": 206.1889689648524,
+        "min_ms": 201.61527901655063,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 132.26499396841973,
+        "median_ms": 122.42019199766219,
+        "min_ms": 121.60387198673561,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.5937281349834497
+    }
   },
   {
     "bar_a": {
@@ -927,7 +1152,22 @@
     },
     "description": "Tweedie(p=1.5) log link, 1D smooth k=20 \u2014 fixed-p",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_tweedie_log_n400_k20_cr_p15.json",
-    "name": "1d_tweedie_log_n400_k20_cr_p15"
+    "name": "1d_tweedie_log_n400_k20_cr_p15",
+    "perf": {
+      "mgcv": {
+        "max_ms": 92.75746200000867,
+        "median_ms": 77.55266700405627,
+        "min_ms": 70.13850699877366,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 79.91145498817787,
+        "median_ms": 73.95209703827277,
+        "min_ms": 70.26203698478639,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.9535725835760724
+    }
   },
   {
     "bar_a": {
@@ -986,7 +1226,22 @@
     },
     "description": "Binomial logit, 2D additive",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_binomial_logit_n1000_k10_cr.json",
-    "name": "2d_binomial_logit_n1000_k10_cr"
+    "name": "2d_binomial_logit_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 88.72730797156692,
+        "median_ms": 82.06138195237145,
+        "min_ms": 76.69122901279479,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 31.16176597541198,
+        "median_ms": 30.303952051326632,
+        "min_ms": 29.107686947099864,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.3692839595233126
+    }
   },
   {
     "bar_a": {
@@ -1045,7 +1300,22 @@
     },
     "description": "Small binomial: tests behaviour near the n=p boundary",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_binomial_logit_n200_k10_cr.json",
-    "name": "2d_binomial_logit_n200_k10_cr"
+    "name": "2d_binomial_logit_n200_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 262.07689597504213,
+        "median_ms": 129.2910209740512,
+        "min_ms": 125.40108303073794,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 10.433079965878278,
+        "median_ms": 9.112533996813,
+        "min_ms": 8.378354017622769,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.07048079540374184
+    }
   },
   {
     "bar_a": {
@@ -1104,7 +1374,22 @@
     },
     "description": "Large binomial: tests perf scaling of PIRLS-in-line-search",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_binomial_logit_n5000_k10_cr.json",
-    "name": "2d_binomial_logit_n5000_k10_cr"
+    "name": "2d_binomial_logit_n5000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 164.96619099052623,
+        "median_ms": 145.04083199426532,
+        "min_ms": 143.12511798925698,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 650.0723279896192,
+        "median_ms": 630.8878409909084,
+        "min_ms": 617.951734981034,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 4.349725744925765
+    }
   },
   {
     "bar_a": {
@@ -1163,7 +1448,22 @@
     },
     "description": "Gamma with canonical inverse link (NEW link coverage)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gamma_inverse_n1000_k10_cr.json",
-    "name": "2d_gamma_inverse_n1000_k10_cr"
+    "name": "2d_gamma_inverse_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 218.97591301240027,
+        "median_ms": 207.09237200208008,
+        "min_ms": 186.89925799844787,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 35.05564900115132,
+        "median_ms": 27.712365030311048,
+        "min_ms": 25.70113103138283,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.13381644510804433
+    }
   },
   {
     "bar_a": {
@@ -1222,7 +1522,22 @@
     },
     "description": "Gamma log, 2D additive",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gamma_log_n1000_k10_cr.json",
-    "name": "2d_gamma_log_n1000_k10_cr"
+    "name": "2d_gamma_log_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 139.08024603733793,
+        "median_ms": 137.1763880015351,
+        "min_ms": 135.55075600743294,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 27.131182956509292,
+        "median_ms": 24.782340973615646,
+        "min_ms": 23.992050962988287,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.18066039888248345
+    }
   },
   {
     "bar_a": {
@@ -1281,7 +1596,22 @@
     },
     "description": "Small gamma(log)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gamma_log_n200_k10_cr.json",
-    "name": "2d_gamma_log_n200_k10_cr"
+    "name": "2d_gamma_log_n200_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 165.79524299595505,
+        "median_ms": 147.9736359906383,
+        "min_ms": 131.98383402777836,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 4.973342001903802,
+        "median_ms": 4.722543002571911,
+        "min_ms": 4.5019940007478,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.0319147594837143
+    }
   },
   {
     "bar_a": {
@@ -1340,7 +1670,22 @@
     },
     "description": "Larger n, finer basis",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n2000_k15_cr.json",
-    "name": "2d_gaussian_additive_n2000_k15_cr"
+    "name": "2d_gaussian_additive_n2000_k15_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 41.6442760033533,
+        "median_ms": 35.15961003722623,
+        "min_ms": 32.63286600122228,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 8.078700047917664,
+        "median_ms": 7.111437967978418,
+        "min_ms": 6.448319996707141,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.2022615711735421
+    }
   },
   {
     "bar_a": {
@@ -1399,7 +1744,22 @@
     },
     "description": "Large-n stress: n=50k with k=15 per smooth",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n50000_k15_cr.json",
-    "name": "2d_gaussian_additive_n50000_k15_cr"
+    "name": "2d_gaussian_additive_n50000_k15_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 369.7147489874624,
+        "median_ms": 228.8771810126491,
+        "min_ms": 225.3968759905547,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 377.6479660300538,
+        "median_ms": 327.3674419615418,
+        "min_ms": 323.00503400620073,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 1.4303192677973848
+    }
   },
   {
     "bar_a": {
@@ -1458,7 +1818,22 @@
     },
     "description": "2D additive sin/cos, k=10 cr per smooth",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_additive_n500_k10_cr.json",
-    "name": "2d_gaussian_additive_n500_k10_cr"
+    "name": "2d_gaussian_additive_n500_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 24.34671198716387,
+        "median_ms": 23.25028902851045,
+        "min_ms": 21.159316005650908,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 1.8938719877041876,
+        "median_ms": 1.8687989795580506,
+        "min_ms": 1.8431729986332357,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.08037745153475095
+    }
   },
   {
     "bar_a": {
@@ -1517,7 +1892,22 @@
     },
     "description": "2d with bs='bs' B-spline basis (de Boor coverage in 2d)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_gaussian_bs_n1500_k15.json",
-    "name": "2d_gaussian_bs_n1500_k15"
+    "name": "2d_gaussian_bs_n1500_k15",
+    "perf": {
+      "mgcv": {
+        "max_ms": 34.44434201810509,
+        "median_ms": 31.730176007840782,
+        "min_ms": 28.311179019510746,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 9.000085003208369,
+        "median_ms": 6.964670028537512,
+        "min_ms": 6.071609037462622,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.2194967348058985
+    }
   },
   {
     "bar_a": {
@@ -1576,7 +1966,22 @@
     },
     "description": "Inverse Gaussian, log link \u2014 V(\u03bc)=\u03bc\u00b3 positive-skewed",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_invgauss_log_n800_k10_cr.json",
-    "name": "2d_invgauss_log_n800_k10_cr"
+    "name": "2d_invgauss_log_n800_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 195.26165397837758,
+        "median_ms": 171.97480599861592,
+        "min_ms": 169.83842302579433,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 27.686170011293143,
+        "median_ms": 26.21732500847429,
+        "min_ms": 25.548428995534778,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.15244863837023484
+    }
   },
   {
     "bar_a": {
@@ -1635,7 +2040,22 @@
     },
     "description": "negative.binomial(theta=2) log link \u2014 fixed \u03b8 overdispersed counts",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_nb_log_n1000_k10_cr_theta2.json",
-    "name": "2d_nb_log_n1000_k10_cr_theta2"
+    "name": "2d_nb_log_n1000_k10_cr_theta2",
+    "perf": {
+      "mgcv": {
+        "max_ms": 127.66431097406894,
+        "median_ms": 123.02549794549122,
+        "min_ms": 114.06376300146803,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 25.666660047136247,
+        "median_ms": 21.003855974413455,
+        "min_ms": 19.163599994499236,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.17072766479449333
+    }
   },
   {
     "bar_a": {
@@ -1694,7 +2114,22 @@
     },
     "description": "nb() profile-\u03b8 \u2014 overdispersed counts with mgcv estimating \u03b8",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_nb_profile_log_n1000_k10_cr.json",
-    "name": "2d_nb_profile_log_n1000_k10_cr"
+    "name": "2d_nb_profile_log_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 162.70595998503268,
+        "median_ms": 143.12229596544057,
+        "min_ms": 138.373407011386,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 30.947013990953565,
+        "median_ms": 28.732289967592806,
+        "min_ms": 24.31879797950387,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.2007534170254698
+    }
   },
   {
     "bar_a": {
@@ -1753,7 +2188,22 @@
     },
     "description": "Poisson log, 2D additive",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_poisson_log_n1000_k10_cr.json",
-    "name": "2d_poisson_log_n1000_k10_cr"
+    "name": "2d_poisson_log_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 99.45509699173272,
+        "median_ms": 93.2123429956846,
+        "min_ms": 87.32392400270328,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 26.919108990114182,
+        "median_ms": 24.357310961931944,
+        "min_ms": 23.21141102584079,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.261309931486859
+    }
   },
   {
     "bar_a": {
@@ -1812,7 +2262,22 @@
     },
     "description": "Small poisson",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_poisson_log_n200_k10_cr.json",
-    "name": "2d_poisson_log_n200_k10_cr"
+    "name": "2d_poisson_log_n200_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 113.24055102886632,
+        "median_ms": 105.02567200455815,
+        "min_ms": 93.08670001337305,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 9.883374033961445,
+        "median_ms": 8.214228029828519,
+        "min_ms": 7.379182032309473,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.07821162076898702
+    }
   },
   {
     "bar_a": {
@@ -1871,7 +2336,22 @@
     },
     "description": "Large poisson",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_poisson_log_n5000_k10_cr.json",
-    "name": "2d_poisson_log_n5000_k10_cr"
+    "name": "2d_poisson_log_n5000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 143.01144698401913,
+        "median_ms": 135.12049696873873,
+        "min_ms": 131.8038909812458,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 109.64836098719388,
+        "median_ms": 107.67768899677321,
+        "min_ms": 102.54645597888157,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.7969012208538973
+    }
   },
   {
     "bar_a": {
@@ -1930,7 +2410,22 @@
     },
     "description": "quasibinomial(logit) \u2014 overdispersed proportions; estimates \u03c6 \u2260 1",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_quasibinomial_logit_n1000_k10_cr.json",
-    "name": "2d_quasibinomial_logit_n1000_k10_cr"
+    "name": "2d_quasibinomial_logit_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 113.39798796689138,
+        "median_ms": 103.17976702935994,
+        "min_ms": 92.14300196617842,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 36.8325529852882,
+        "median_ms": 34.34725198894739,
+        "min_ms": 33.99058699142188,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.3328874737541696
+    }
   },
   {
     "bar_a": {
@@ -1989,7 +2484,22 @@
     },
     "description": "quasipoisson(log) \u2014 overdispersed counts; estimates \u03c6 \u2260 1",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/2d_quasipoisson_log_n1000_k10_cr.json",
-    "name": "2d_quasipoisson_log_n1000_k10_cr"
+    "name": "2d_quasipoisson_log_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 120.04710198380053,
+        "median_ms": 110.05730798933655,
+        "min_ms": 106.2635260168463,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 22.530344023834914,
+        "median_ms": 22.056970978155732,
+        "min_ms": 20.13287099543959,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.20041350620980872
+    }
   },
   {
     "bar_a": {
@@ -2050,7 +2560,22 @@
     },
     "description": "3D additive: sinusoidal + quadratic + near-linear",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/3d_gaussian_mixed_n800_k10_cr.json",
-    "name": "3d_gaussian_mixed_n800_k10_cr"
+    "name": "3d_gaussian_mixed_n800_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 50.80521001946181,
+        "median_ms": 39.60768395336345,
+        "min_ms": 38.39311300544068,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 6.237822992261499,
+        "median_ms": 5.2883230382576585,
+        "min_ms": 4.991625028196722,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.13351760341464194
+    }
   },
   {
     "bar_a": {
@@ -2111,7 +2636,22 @@
     },
     "description": "Poisson in 3d",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/3d_poisson_log_n2000_k10_cr.json",
-    "name": "3d_poisson_log_n2000_k10_cr"
+    "name": "3d_poisson_log_n2000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 148.35499902255833,
+        "median_ms": 137.3615239863284,
+        "min_ms": 134.37223801156506,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 73.59911303501576,
+        "median_ms": 70.69611898623407,
+        "min_ms": 66.40859501203522,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.5146719178310111
+    }
   },
   {
     "bar_a": {
@@ -2174,7 +2714,22 @@
     },
     "description": "Binomial in 4d \u2014 tests PIRLS-in-line-search at higher d",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_binomial_logit_n2000_k8_cr.json",
-    "name": "4d_binomial_logit_n2000_k8_cr"
+    "name": "4d_binomial_logit_n2000_k8_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 195.1147000072524,
+        "median_ms": 148.08591397013515,
+        "min_ms": 140.7113600289449,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 84.71656899200752,
+        "median_ms": 80.7557679945603,
+        "min_ms": 76.60729001509026,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.545330516789372
+    }
   },
   {
     "bar_a": {
@@ -2237,7 +2792,22 @@
     },
     "description": "Gamma(log) in 4d",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_gamma_log_n2000_k8_cr.json",
-    "name": "4d_gamma_log_n2000_k8_cr"
+    "name": "4d_gamma_log_n2000_k8_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 248.1675100279972,
+        "median_ms": 217.5991209805943,
+        "min_ms": 207.50008500181139,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 59.38927398528904,
+        "median_ms": 56.476600002497435,
+        "min_ms": 51.69940704945475,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.25954424699874623
+    }
   },
   {
     "bar_a": {
@@ -2300,7 +2870,22 @@
     },
     "description": "4d B-spline \u2014 tests de Boor at higher d",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_gaussian_bs_n2000_k10.json",
-    "name": "4d_gaussian_bs_n2000_k10"
+    "name": "4d_gaussian_bs_n2000_k10",
+    "perf": {
+      "mgcv": {
+        "max_ms": 81.24908799072728,
+        "median_ms": 73.44171701697633,
+        "min_ms": 63.166873005684465,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 25.954367010854185,
+        "median_ms": 21.04709600098431,
+        "min_ms": 20.378903951495886,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.2865822975805317
+    }
   },
   {
     "bar_a": {
@@ -2363,7 +2948,22 @@
     },
     "description": "4D additive mixing wiggly, smooth, quadratic, near-linear",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_gaussian_mixed_n1000_k10_cr.json",
-    "name": "4d_gaussian_mixed_n1000_k10_cr"
+    "name": "4d_gaussian_mixed_n1000_k10_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 65.74801995884627,
+        "median_ms": 53.384898987133056,
+        "min_ms": 48.739651043433696,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 16.15916402079165,
+        "median_ms": 14.148437010589987,
+        "min_ms": 12.019497982691973,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.26502695104846175
+    }
   },
   {
     "bar_a": {
@@ -2426,7 +3026,22 @@
     },
     "description": "Edge case: sparse neighborhood (n just above MIN_PROPERTIES)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/4d_small_neighbourhood_n300.json",
-    "name": "4d_small_neighbourhood_n300"
+    "name": "4d_small_neighbourhood_n300",
+    "perf": {
+      "mgcv": {
+        "max_ms": 51.23986100079492,
+        "median_ms": 42.86630399292335,
+        "min_ms": 38.2330710417591,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 6.359500985126942,
+        "median_ms": 5.388844001572579,
+        "min_ms": 5.168191972188652,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.12571282101816394
+    }
   },
   {
     "bar_a": {
@@ -2491,7 +3106,22 @@
     },
     "description": "5D mixed with one null dimension \u2014 infinite-\u03bb stress",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/5d_gaussian_mixed_n1500_k8_cr.json",
-    "name": "5d_gaussian_mixed_n1500_k8_cr"
+    "name": "5d_gaussian_mixed_n1500_k8_cr",
+    "perf": {
+      "mgcv": {
+        "max_ms": 88.6490800185129,
+        "median_ms": 79.85331199597567,
+        "min_ms": 64.21571795362979,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 12.87913101259619,
+        "median_ms": 11.387633043341339,
+        "min_ms": 10.226567042991519,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.14260689705538118
+    }
   },
   {
     "bar_a": {
@@ -2556,7 +3186,22 @@
     },
     "description": "Production-realistic skewed feature distributions",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/5d_skewed_features_n5000.json",
-    "name": "5d_skewed_features_n5000"
+    "name": "5d_skewed_features_n5000",
+    "perf": {
+      "mgcv": {
+        "max_ms": 106.4968149876222,
+        "median_ms": 100.16329505015165,
+        "min_ms": 94.42336804931983,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 54.49446401325986,
+        "median_ms": 53.17566299345344,
+        "min_ms": 51.63820501184091,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.5308897133109334
+    }
   },
   {
     "bar_a": {
@@ -2623,7 +3268,22 @@
     },
     "description": "Heatmap pricing model proxy (lat/lon + features)",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/6d_heatmap_pricing_n8000.json",
-    "name": "6d_heatmap_pricing_n8000"
+    "name": "6d_heatmap_pricing_n8000",
+    "perf": {
+      "mgcv": {
+        "max_ms": 183.58520697802305,
+        "median_ms": 176.05328903300688,
+        "min_ms": 168.78795699449256,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 108.35732100531459,
+        "median_ms": 105.18945404328406,
+        "min_ms": 100.82754399627447,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.5974864464109096
+    }
   },
   {
     "bar_a": {
@@ -2692,7 +3352,22 @@
     },
     "description": "Production-shape, smaller n: 7 features, k=8 across",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/7d_neighbourhoods_compact_n3000.json",
-    "name": "7d_neighbourhoods_compact_n3000"
+    "name": "7d_neighbourhoods_compact_n3000",
+    "perf": {
+      "mgcv": {
+        "max_ms": 116.96009198203683,
+        "median_ms": 107.61628299951553,
+        "min_ms": 103.40228397399187,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 34.60055199684575,
+        "median_ms": 33.623963012360036,
+        "min_ms": 32.045117986854166,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 0.3124430808719848
+    }
   },
   {
     "bar_a": {
@@ -2763,6 +3438,21 @@
     },
     "description": "Production GAM call: 8 features, 15k rows, mixed k",
     "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/8d_neighbourhoods_like_n15000.json",
-    "name": "8d_neighbourhoods_like_n15000"
+    "name": "8d_neighbourhoods_like_n15000",
+    "perf": {
+      "mgcv": {
+        "max_ms": 695.089832006488,
+        "median_ms": 563.0115020321682,
+        "min_ms": 535.3150810115039,
+        "n_runs": 5
+      },
+      "rust": {
+        "max_ms": 621.3113200501539,
+        "median_ms": 571.7134570004418,
+        "min_ms": 548.6170229851268,
+        "n_runs": 5
+      },
+      "rust_over_mgcv": 1.0154560873745284
+    }
   }
 ]
