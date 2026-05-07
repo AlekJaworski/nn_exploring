@@ -517,8 +517,11 @@ impl Family {
     /// `gam.fit3.r:630` via Newton-Raphson in F(φ) = dp + 2n[ψ(1/φ)+log φ] + mp·φ.
     /// For Gaussian, uses the closed form φ = dp/(n-mp).
     /// For Poisson/Binomial, returns 1.0 (fixed dispersion).
-    /// For TDist, returns phi_init unchanged (Gaussian-approximation σ̂²; no
-    /// digamma-style fix for t-dist in v1).
+    /// For TDist, returns the enum-stored σ² (synced from `fit_pirls_tdist`'s
+    /// converged value via `PirlsRefresh.sigma2` → smooth.rs outer Newton).
+    /// This couples the REML score's dispersion to the same σ² that the
+    /// inner PIRLS converged to, instead of recomputing a separate
+    /// Pearson chi-squared `dp/(n-mp)`. Required for LAML self-consistency.
     ///
     /// # Arguments
     /// * `y` — response vector (used only for `n = y.len()`)
@@ -544,7 +547,16 @@ impl Family {
             // InverseGaussian: ls = -n/2·log(2πφ) form → same closed-form φ̂ as Gaussian.
             Family::InverseGaussian => dp / (n - mp_f).max(1.0),
             Family::Binomial | Family::Poisson | Family::NegBin { .. } => 1.0,
-            Family::TDist { .. } => phi_init,
+            Family::TDist { sigma2, .. } => {
+                // Prefer the enum-stored σ² (synced from PIRLS); fall back
+                // to phi_init if the enum still holds the construction
+                // default sigma2=1.0 and PIRLS hasn't run yet.
+                if *sigma2 > 0.0 && (*sigma2 - 1.0).abs() > f64::EPSILON {
+                    *sigma2
+                } else {
+                    phi_init
+                }
+            }
             // Quantile: σ is the family parameter; φ stays at 1 by convention.
             Family::Quantile { .. } => 1.0,
             Family::Gamma | Family::GammaLog => {
