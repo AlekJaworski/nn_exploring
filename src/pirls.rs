@@ -304,15 +304,12 @@ impl Family {
                 let sum_log_y: f64 = y.iter().map(|&yi| yi.max(1e-300).ln()).sum();
                 n * k - sum_log_y
             }
-            // For TDist we approximate with the Gaussian saturated log-likelihood.
-            // Verified empirically (2026-05-07): switching to the proper
-            // t-form (lgamma-based, df-dependent) — even paired with MLE
-            // σ² inside fit_pirls_tdist — breaks test_tdist_mgcv_parity
-            // (RMSE rel-err > 0.30) because without the full gam.fit5 LAML
-            // outer loop the σ² estimator and the score formula don't
-            // agree at convergence. ls AND deviance AND σ² estimation
-            // AND the gam.fit5 outer Newton must all switch together.
-            // Tracked in task #15.
+            // For TDist we approximate with the Gaussian saturated log-lik.
+            // 2026-05-07 attempt to switch to the proper t-form (lgamma-based,
+            // df-dependent) showed it ships AS A UNIT with the gam.fit5
+            // outer Newton on log(df) — without joint df profiling, fixed
+            // df=5 on df=2.5/4 heavy-tail scenarios spikes RMSE rel-err to
+            // 97%. Phases 3-5 must ship together.
             Family::TDist { .. } => {
                 -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
             }
@@ -1205,15 +1202,9 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                 }
             }
             Family::Gamma | Family::GammaLog => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
-            // TDist deviance: -2 * log p(y|μ,σ²,df) up to an additive constant.
-            // Use the squared residual as a proxy (consistent scale comparison).
-            //
-            // Note (2026-05-07 LAML probe): the proper t-deviance
-            //   (df+1) · log(1 + (y-μ)²/(df·σ²))
-            // is what gam.fit5 LAML uses, but pairing it with our
-            // method-of-moments σ² estimation broke parity tests. A
-            // self-consistent fix needs the joint (df, σ²) outer Newton —
-            // tracked separately (task #15).
+            // TDist: squared residual proxy. Proper t-deviance ships with
+            // the gam.fit5 outer Newton on log(df) — see saturated_log_likelihood
+            // note above and task #15.
             Family::TDist { .. } => (yi - mui).powi(2),
             // Tweedie deviance for 1 < p < 2 (log link):
             //   d_i = 2 * [ y^(2-p)/((1-p)(2-p)) - y*μ^(1-p)/(1-p) + μ^(2-p)/(2-p) ]
@@ -1476,8 +1467,13 @@ pub fn fit_pirls_tdist(
         iter = outer_iter + 1;
 
         // ── Inner WLS: solve (X'WX + S) β = X'Wz with t-weights ─────────
-        // For identity link: μ = η = Xβ, z = y (working response = y for identity).
-        // t-weight: w_i = (df+1) / (df + r_i² / σ²) where r_i = y_i - η_i
+        // For identity link: μ = η = Xβ, z = y (working response = y for
+        // identity). Textbook EM-IRLS t-weight:
+        //   w_i = (ν+1) / (ν + r_i²/σ²)
+        //
+        // mgcv's gam.fit5 uses observed-info `Dmu2/2` instead — that ships
+        // as a unit with the proper t-form ls/deviance and gam.fit5 outer
+        // Newton on log(df); see task #15.
         let eta: Array1<f64> = x.dot(&beta);
         let w: Array1<f64> = y
             .iter()

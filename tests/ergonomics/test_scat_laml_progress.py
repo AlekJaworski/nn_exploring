@@ -98,25 +98,16 @@ cat(toJSON(out, auto_unbox=TRUE), file="{td}/out.json")
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Stage 1 of the gam.fit5 LAML port for scat. Currently "
-        "saturated_log_likelihood and deviance for TDist are both "
-        "Gaussian proxies — REML score is structurally df-independent. "
-        "Closing this needs proper t-distribution ls "
-        "(lgamma((ν+1)/2) - lgamma(ν/2) - ½·log(νπ) - ½·log σ²) AND "
-        "proper t-deviance ((ν+1)·log(1 + r²/(ν·σ²))) — coupled "
-        "consistently so σ² method-of-moments doesn't fight them."
-    ),
-    strict=True,
-)
 def test_scat_reml_has_df_gradient():
     """REML(df) at fixed (β, λ, σ²) must have a non-zero finite-difference gradient.
 
-    Structurally: if dREML/d(log df) = 0, the M+1 outer-Newton can never
-    move df off its initial value — confirmed empirically in
-    `mgcv_rust - LAML investigation 2026-05-07.md` (FD gradient
-    identically 0 with the Gaussian-proxy formulation).
+    Closed by phase 1+2 of the gam.fit5 LAML port: estimate_phi_mgcv now
+    returns the enum-stored σ² (synced from PIRLS), and σ² is MLE inside
+    fit_pirls_tdist. Since the t-IRLS weight depends on df, σ² depends
+    on df, and the `-Mp/2·log(2πφ)` term in the REML score picks up a
+    real df gradient — even with Gaussian-proxy ls/deviance still in place.
+    Tighter parity (Stages 2-5) needs the full t-form ls/deviance + outer
+    Newton on log(df), task #15 territory.
     """
     X, y, _ = _make_data(n=600, d=4, seed=42)
     k = [10] * 4
