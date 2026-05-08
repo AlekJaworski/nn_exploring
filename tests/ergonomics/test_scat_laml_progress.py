@@ -22,7 +22,7 @@ Stages covered:
   5. **λ parity**: log10(λ_rust / λ_mgcv) within 0.2 (factor of ~1.6×)
      per smooth.
 
-Status (2026-05-08, after commits b364b2c..113120b):
+Status (2026-05-08, after full LAML port):
 
   - **Phase 1 SHIPPED** — `Family::estimate_phi_mgcv` for TDist returns
     enum-stored σ² (synced from PIRLS via `PirlsRefresh.sigma2`).
@@ -30,10 +30,10 @@ Status (2026-05-08, after commits b364b2c..113120b):
     (`Σwr²/n` from `dlogL/dσ² = 0`).
   - **Stage 1 PASSES** — Phase 1+2 alone gives REML a real df gradient
     via `-Mp/2·log(2πφ)`, since φ depends on df through PIRLS-σ².
-  - **Phase 3 attempted, reverted** — switching ls/deviance to the
-    proper t-form alone breaks heavy-tail parity (RMSE rel-err 97% on
-    df=4/df=2.5 data) because fixed df=5 mismodels the data once the
-    score formula stops smoothing it out as Gaussian.
+  - **Stage 4 PASSES** — Full analytic gdi2 derivative assembly + Newton
+    working response `η − dmu/dmu2` as final z_score + fresh PIRLS
+    callback in shape_eval! closes the REML gap to <5 units vs mgcv.
+  - **All 6 stages pass**.
 
 Next steps (the atomic Phase 3+4+5 ship):
 
@@ -241,15 +241,6 @@ def test_scat_profile_df_matches_mgcv():
 
 
 @pytest.mark.skipif(not _rscript_available(), reason="Rscript unavailable")
-@pytest.mark.xfail(
-    reason=(
-        "Stage 4 of LAML port — final REML parity. Currently rust's "
-        "REML at convergence is +75 above mgcv's on the n=1500 "
-        "benchmark (rust 958, mgcv 883). A working LAML must close "
-        "this absolute gap to ~5 points."
-    ),
-    strict=True,
-)
 def test_scat_reml_parity_vs_mgcv():
     """Rust REML must be within 5 absolute units of mgcv's at the same data."""
     X, y, _ = _make_data(n=1500, d=4, seed=11)

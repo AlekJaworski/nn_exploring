@@ -893,10 +893,35 @@ impl GAM {
             } else {
                 crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
             };
-            // Use the working response z = η + (y-μ)/dμdη for non-Gaussian
-            // (matches what the optimizer's score saw); for Gaussian z = y.
+            // Working response for the final REML score evaluation:
+            //   - Gaussian: z = y (exact).
+            //   - TDist gam.fit5 profile path: z = η − dmu/dmu2 (Newton working
+            //     response). The optimizer used this throughout via the PIRLS
+            //     callback; using it here ensures the reported REML matches the
+            //     optimizer's converged value rather than an inconsistent re-
+            //     evaluation with z = y (which would add ~8 units of spurious gap).
+            //   - Other non-Gaussian: z = η + (y − μ)/(dμ/dη).
             let z_score: Array1<f64> = if matches!(self.family, crate::pirls::Family::Gaussian) {
                 y.clone()
+            } else if self.tdist_profile {
+                if let crate::pirls::Family::TDist { df, sigma2 } = self.family {
+                    final_result.linear_predictor.iter().enumerate().map(|(i, &eta)| {
+                        let r = y[i] - eta;
+                        let s2 = sigma2.max(1e-300);
+                        let denom = df * s2 + r * r;
+                        let dmu = -2.0 * (df + 1.0) * r / denom;
+                        let obs_dmu2 = 2.0 * (df + 1.0) * (df * s2 - r * r) / (denom * denom);
+                        let exp_dmu2 = 2.0 * (df + 1.0) / (s2 * (df + 3.0));
+                        let dmu2 = if obs_dmu2.is_finite() && obs_dmu2 > 1e-12 {
+                            obs_dmu2
+                        } else {
+                            exp_dmu2.max(1e-12)
+                        };
+                        eta - dmu / dmu2
+                    }).collect()
+                } else {
+                    y.clone()
+                }
             } else {
                 let mut z = final_result.linear_predictor.clone();
                 for i in 0..z.len() {

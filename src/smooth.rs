@@ -1892,16 +1892,39 @@ impl SmoothingParameter {
                                 *g = trial_fam;
                             }
                         }
-                        dispatch_reml_score_with_family(
-                            self,
-                            &y_local,
-                            x,
-                            &w_local,
-                            &current_lambdas,
-                            penalties,
-                            Some(&xtwx_local),
-                            trial_fam,
-                        )
+                        // When a PIRLS callback is available, refresh (z, w, X'WX) at
+                        // the trial family + current λ before evaluating the score. The
+                        // stale y_local/w_local/xtwx_local reflect (df, σ²) from the
+                        // START of the current Newton iteration; using them for the shape
+                        // line search gives an inconsistent score (old weights, new
+                        // parameters) that causes valid Newton steps to be rejected.
+                        if let Some(cb) = pirls_callback.as_mut() {
+                            match cb(&current_lambdas) {
+                                Ok(ref refresh) => reml_criterion_multi_cached_mgcv_exact(
+                                    &refresh.working_response,
+                                    x,
+                                    &refresh.weights,
+                                    &current_lambdas,
+                                    penalties,
+                                    Some(&refresh.xtwx),
+                                    self.mp,
+                                    trial_fam,
+                                    self.y_original.as_ref(),
+                                ),
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            dispatch_reml_score_with_family(
+                                self,
+                                &y_local,
+                                x,
+                                &w_local,
+                                &current_lambdas,
+                                penalties,
+                                Some(&xtwx_local),
+                                trial_fam,
+                            )
+                        }
                     }};
                 }
 
