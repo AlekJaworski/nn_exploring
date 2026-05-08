@@ -22,11 +22,62 @@ Stages covered:
   5. **λ parity**: log10(λ_rust / λ_mgcv) within 0.2 (factor of ~1.6×)
      per smooth.
 
-The current production path uses a Gaussian-proxy REML (saturated_log_lik
-~ -n/2·log(2πσ²) and deviance ~ (y-μ)²) which gives correct PREDICTIONS
-(corr > 0.9999 vs mgcv) and reasonable σ² via method-of-moments, but
-misses by ~0.78 log10 on λ and +75 on REML score. Properly closing the
-gap is the gam.fit5-style LAML port.
+Status (2026-05-08, after commits b364b2c..113120b):
+
+  - **Phase 1 SHIPPED** — `Family::estimate_phi_mgcv` for TDist returns
+    enum-stored σ² (synced from PIRLS via `PirlsRefresh.sigma2`).
+  - **Phase 2 SHIPPED** — σ² update in `fit_pirls_tdist` is MLE
+    (`Σwr²/n` from `dlogL/dσ² = 0`).
+  - **Stage 1 PASSES** — Phase 1+2 alone gives REML a real df gradient
+    via `-Mp/2·log(2πφ)`, since φ depends on df through PIRLS-σ².
+  - **Phase 3 attempted, reverted** — switching ls/deviance to the
+    proper t-form alone breaks heavy-tail parity (RMSE rel-err 97% on
+    df=4/df=2.5 data) because fixed df=5 mismodels the data once the
+    score formula stops smoothing it out as Gaussian.
+
+Next steps (the atomic Phase 3+4+5 ship):
+
+  1. **`Family::saturated_log_likelihood` for TDist** — switch to mgcv's
+     scat formula `n·[lgamma((ν+1)/2) - lgamma(ν/2) - 0.5·log(πνσ²)]`.
+     Reference values: `/tmp/tf_family_reference.md`.
+
+  2. **`Family::deviance` per-obs (compute_deviance + glm_deviance)** —
+     switch to t-form `(ν+1)·log(1 + r²/(νσ²))` reading σ² from the
+     enum.
+
+  3. **IRLS weight in `fit_pirls_tdist`** — switch from textbook
+     `(ν+1)/(ν + r²/σ²)` to mgcv's observed-info
+     `Dmu2/2 = (ν+1)·(σ²ν − r²)/(σ²ν + r²)²`, with EDmu2/2 fallback
+     `(ν+1)/(σ²·(ν+3))` when observed-info goes negative (r² > σ²ν).
+     Required for β-parity with gam.fit5.
+
+  4. **gam.fit5-style outer Newton on log(df)** — enable the dormant
+     `tdist_profile = true` in `gam_optimized.rs:577`. The block in
+     `smooth.rs:1726` already implements the FD Newton on log(df);
+     it goes live as soon as the t-form ls/deviance give it a real
+     gradient. ALSO disable internal Brent in `fit_pirls_tdist`
+     (always pass `fixed_df = Some(self.family.df)` in
+     `gam_optimized.rs::run_pirls`).
+
+  5. **Callback closure stale-family fix** — `gam_optimized.rs:678`'s
+     `let family = self.family;` captures by Copy ⟹ updates to
+     `smoothing_params.family` from the outer-Newton log(df) step are
+     invisible to the PIRLS callback. Either thread `Family` through
+     the `PirlsCallback` signature, or stash it in a `Cell<Family>`.
+     Without this, df mutations in the outer loop don't reach PIRLS.
+
+  6. **Python df accessor** — add `g.get_family_params()` returning
+     `{"df": ν, "sigma2": σ²}` so Stage 3 test (`test_scat_profile_df_matches_mgcv`)
+     can read converged df.
+
+  7. **Loosen Stage 3-5 thresholds** if needed — initially target
+     "rust df within 30% of mgcv's" (Stage 3), "REML gap < 10
+     absolute" (Stage 4), "log10(λ) within 0.5" (Stage 5). Tighten
+     once gam.fit5 outer Newton lands and stabilises.
+
+These six changes ship as ONE commit because the IRLS-weight + ls +
+deviance + outer-Newton are coupled (verified empirically — landing
+any subset breaks parity).
 
 Tests reference data: n=1500, d=8, k=10 each, τ-quantile-style true
 signal `Σ_j sin(2π(j+1)/3 · x_j)` with t(4) heavy-tail noise scale 0.3.
