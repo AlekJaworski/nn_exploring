@@ -7,6 +7,62 @@ use crate::reml::compute_xtwx;
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
 
+/// REML / LAML score formula. Different families use structurally
+/// different criteria (see `Family::score_formula`).
+///
+/// `assemble` combines the per-fit ingredients (`dp = D + β'Sβ`, saturated
+/// log-likelihood `ls`, log-determinants `log|H|` and `log|S|+`, dispersion
+/// `σ²`, model rank `Mp`) into a scalar score. The optimizer minimises
+/// whichever variant `Family::score_formula` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreFormula {
+    /// gam.fit3 form (gam.fit3.r:616-617):
+    ///     REML = Dp/(2σ²) - ls - Mp/2·log(2πσ²) + log|H|/2 - log|S|+/2
+    ///
+    /// For Gaussian/Gamma/Tweedie/Poisson/Binomial/etc. — the deviance is
+    /// in raw response units (Σr² for Gaussian) and the dispersion φ=σ²
+    /// scales the Dp/(2φ) term explicitly. The `-Mp/2·log(2πφ)` term is
+    /// the σ²-profile correction.
+    GamFit3,
+    /// gam.fit5 form (gam.fit5.r):
+    ///     LAML = Dp/2 - ls + log|H|/2 - log|S|+/2
+    ///
+    /// For extended families (TDist/scat, Quantile/ELF) where σ² is a
+    /// *family-internal* parameter that already appears inside the
+    /// deviance and saturated log-likelihood. Dp is in log-likelihood
+    /// units (so Dp/2 already has the right scaling — no extra /σ² or
+    /// `-Mp/2·log(2πσ²)` penalty term).
+    GamFit5,
+}
+
+impl ScoreFormula {
+    /// Combine the score ingredients into a scalar. The optimizer minimises
+    /// the result.
+    pub fn assemble(
+        self,
+        dp: f64,
+        ls: f64,
+        log_det_h: f64,
+        log_det_s: f64,
+        sigma2: f64,
+        mp: usize,
+    ) -> f64 {
+        match self {
+            ScoreFormula::GamFit3 => {
+                let two_pi_phi = 2.0 * std::f64::consts::PI * sigma2;
+                dp / (2.0 * sigma2) - ls - 0.5 * (mp as f64) * two_pi_phi.ln()
+                    + 0.5 * log_det_h
+                    - 0.5 * log_det_s
+            }
+            ScoreFormula::GamFit5 => {
+                0.5 * dp - ls + 0.5 * log_det_h
+                    - 0.5 * log_det_s
+                    - 0.5 * (mp as f64) * (2.0 * std::f64::consts::PI).ln()
+            }
+        }
+    }
+}
+
 /// Family and link function for GLM. Each variant uses its canonical link
 /// EXCEPT `GammaLog`, which is the gamma family paired with log link
 /// (a common production choice for positive responses where multiplicative
@@ -231,6 +287,27 @@ impl Family {
         }
     }
 
+    /// Which REML/LAML score formula this family uses.
+    ///
+    /// Two structurally different formulas live in mgcv: the gam.fit3 REML
+    /// (Gaussian-style scaled by an external dispersion φ) and the gam.fit5
+    /// LAML (extended families where σ² is a *family-internal* parameter
+    /// that already appears inside the deviance/saturated-ls).
+    ///
+    /// Mapping:
+    ///   - **GamFit3** — exponential families with profiled / fixed scale:
+    ///     Gaussian, Gamma, GammaLog, Tweedie, Poisson, Binomial, NegBin,
+    ///     QuasiPoisson, QuasiBinomial, InverseGaussian.
+    ///   - **GamFit5** — extended families with internal scale: TDist
+    ///     (mgcv `scat`), Quantile (qgam ELF). Their σ² is profiled inside
+    ///     the family methods, not as the GLM dispersion φ.
+    pub fn score_formula(&self) -> ScoreFormula {
+        match self {
+            Family::TDist { .. } | Family::Quantile { .. } => ScoreFormula::GamFit5,
+            _ => ScoreFormula::GamFit3,
+        }
+    }
+
     /// True iff the link is canonical for this family. Determines whether
     /// PIRLS uses Fisher scoring (canonical) or full Newton (non-canonical),
     /// per `gam.fit3.r:118`.
@@ -304,14 +381,14 @@ impl Family {
                 let sum_log_y: f64 = y.iter().map(|&yi| yi.max(1e-300).ln()).sum();
                 n * k - sum_log_y
             }
-            // For TDist we approximate with the Gaussian saturated log-lik.
-            // 2026-05-07 attempt to switch to the proper t-form (lgamma-based,
-            // df-dependent) showed it ships AS A UNIT with the gam.fit5
-            // outer Newton on log(df) — without joint df profiling, fixed
-            // df=5 on df=2.5/4 heavy-tail scenarios spikes RMSE rel-err to
-            // 97%. Phases 3-5 must ship together.
-            Family::TDist { .. } => {
-                -0.5 * n * (2.0 * std::f64::consts::PI * scale).ln()
+            // Scaled-t saturated log-likelihood (mgcv scat$ls):
+            //   ls = n · [lgamma((ν+1)/2) − lgamma(ν/2) − 0.5·log(π·ν·σ²)]
+            Family::TDist { df, .. } => {
+                let nu = *df;
+                let half_nu_p1 = (nu + 1.0) / 2.0;
+                let half_nu = nu / 2.0;
+                n * (log_gamma(half_nu_p1) - log_gamma(half_nu)
+                    - 0.5 * (std::f64::consts::PI * nu * scale).ln())
             }
             // Quantile/ELF saturated log-likelihood — port of qgam elf.R:204-216
             // for the special case λ = σ (single-bandwidth parameterisation).
@@ -544,16 +621,7 @@ impl Family {
             // InverseGaussian: ls = -n/2·log(2πφ) form → same closed-form φ̂ as Gaussian.
             Family::InverseGaussian => dp / (n - mp_f).max(1.0),
             Family::Binomial | Family::Poisson | Family::NegBin { .. } => 1.0,
-            Family::TDist { sigma2, .. } => {
-                // Prefer the enum-stored σ² (synced from PIRLS); fall back
-                // to phi_init if the enum still holds the construction
-                // default sigma2=1.0 and PIRLS hasn't run yet.
-                if *sigma2 > 0.0 && (*sigma2 - 1.0).abs() > f64::EPSILON {
-                    *sigma2
-                } else {
-                    phi_init
-                }
-            }
+            Family::TDist { sigma2, .. } => (*sigma2).max(1e-8),
             // Quantile: σ is the family parameter; φ stays at 1 by convention.
             Family::Quantile { .. } => 1.0,
             Family::Gamma | Family::GammaLog => {
@@ -877,6 +945,11 @@ pub struct PiRLSResult {
     /// other fitters this is `None` and the outer loop falls back to
     /// `estimate_phi_mgcv`.
     pub sigma2: Option<f64>,
+    /// Converged df for `TDist` (output of inner Brent profile, or the
+    /// caller-supplied fixed_df). Used by the outer loop to sync
+    /// `Family::TDist::df` after PIRLS so subsequent score evaluations
+    /// see the correct df. `None` for non-TDist fitters.
+    pub df: Option<f64>,
 }
 
 /// Fit a GAM using PiRLS algorithm
@@ -1086,6 +1159,7 @@ pub fn fit_pirls_cached(
         iterations: iter,
         converged,
         sigma2: None,
+        df: None,
     })
 }
 
@@ -1174,6 +1248,7 @@ fn fit_pirls_gaussian_fast(
         iterations: 1,
         converged: true,
         sigma2: None,
+        df: None,
     })
 }
 
@@ -1202,10 +1277,11 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                 }
             }
             Family::Gamma | Family::GammaLog => 2.0 * ((yi - mui) / mui - (yi / mui).ln()),
-            // TDist: squared residual proxy. Proper t-deviance ships with
-            // the gam.fit5 outer Newton on log(df) — see saturated_log_likelihood
-            // note above and task #15.
-            Family::TDist { .. } => (yi - mui).powi(2),
+            // Scaled-t per-obs deviance (mgcv scat$dev.resids): (ν+1)·log1p(r²/(ν·σ²)).
+            Family::TDist { df, sigma2 } => {
+                let r = yi - mui;
+                (df + 1.0) * (1.0 + r * r / (df * sigma2)).ln()
+            }
             // Tweedie deviance for 1 < p < 2 (log link):
             //   d_i = 2 * [ y^(2-p)/((1-p)(2-p)) - y*μ^(1-p)/(1-p) + μ^(2-p)/(2-p) ]
             // = 2 * [ y^(2-p) - (2-p)*y*μ^(1-p) + (1-p)*μ^(2-p) ] / ((1-p)(2-p))
@@ -1393,9 +1469,11 @@ fn brent_minimize<F: Fn(f64) -> f64>(
 ///
 /// 1. **Inner PIRLS** — fit β at fixed (df, σ²) using t-distribution IRLS
 ///    weights `w_i = (df+1) / (df + r_i²/σ²)` with identity link.
-/// 2. **σ² update** — method-of-moments: `σ² = Σ w_i r_i² / (Σ w_i - p)`.
-/// 3. **df update** (when `fixed_df` is None) — 1D Brent optimisation of the
-///    profile log-likelihood over df ∈ [2, 100].
+/// 2. **σ² MLE update** (when `fixed_sigma2` is None) — `σ² = Σ w_i r_i² / n`.
+///    Skipped when σ² is supplied (gam.fit5-style outer Newton drives it).
+/// 3. **df update** (when `fixed_df` is None) — 1D Brent on the profile
+///    log-likelihood over df ∈ [2, 100]. Skipped when df is supplied
+///    (outer Newton on log df at smooth.rs handles it).
 ///
 /// Returns a `PiRLSResult` with the converged β. The `weights` field holds the
 /// final per-observation t-weights.
@@ -1405,6 +1483,7 @@ pub fn fit_pirls_tdist(
     lambda: &[f64],
     penalties: &[BlockPenalty],
     fixed_df: Option<f64>,
+    fixed_sigma2: Option<f64>,
     max_iter: usize,
     tolerance: f64,
 ) -> Result<PiRLSResult> {
@@ -1451,14 +1530,48 @@ pub fn fit_pirls_tdist(
         1e-5 * (1.0 + (num_penalties as f64).sqrt())
     };
 
-    // Initialise β = 0, η = y (identity link), σ² from sample variance
+    // Initialise β = 0, η = y (identity link), σ² from caller / sample variance.
     let mut beta = Array1::zeros(p);
     let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
     let y_var: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
-    let mut sigma2 = y_var.max(1e-6);
+    let mut sigma2 = fixed_sigma2.unwrap_or_else(|| y_var.max(1e-6)).max(1e-6);
 
     // df: start at user value or 5.0 (a reasonable default)
     let mut df = fixed_df.unwrap_or(5.0).clamp(2.0, 100.0);
+
+    // EM-IRLS t-weight: w_i = (ν+1) / (ν + r²/σ²).
+    //
+    // Derivation: from d log L / d β = 0 with the t-density we get the
+    // weighted normal equations X'WX β = X'Wy where W = diag(w_i) above.
+    // This is the standard EM majorisation for t-regression and the form
+    // mgcv's gam.fit5 uses *implicitly* in the σ² score (the σ² MLE
+    // condition Σw·r² = nσ² inverts to σ² = Σw·r²/n with this same w).
+    //
+    // The 2026-05-08 attempt to switch IRLS to observed-info Dmu2/2 broke
+    // test_tdist_mgcv_parity (max relerr 0.10 → 0.44): observed-info has
+    // units of 1/σ², whereas the rest of the pipeline (penalty matrix S,
+    // ridge, λ) is calibrated for the unit-magnitude EM weight. The σ²
+    // MLE update also requires the EM weight to recover the t-likelihood
+    // MLE. Reverted; stayed with textbook EM-IRLS.
+    let t_weight = |r: f64, sigma2: f64, df: f64| -> f64 {
+        let t2 = r * r / sigma2.max(1e-300);
+        ((df + 1.0) / (df + t2)).max(1e-10)
+    };
+    let t_newton_working = |r: f64, eta: f64, sigma2: f64, df: f64| -> (f64, f64) {
+        let sigma2 = sigma2.max(1e-300);
+        let denom = df * sigma2 + r * r;
+        let dmu = -2.0 * (df + 1.0) * r / denom;
+        let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
+        let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+        let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
+            observed_dmu2
+        } else {
+            expected_dmu2.max(1e-12)
+        };
+        let z = eta - dmu / dmu2;
+        ((0.5 * dmu2).max(1e-10), z)
+    };
+    let use_newton_working = fixed_sigma2.is_some();
 
     let mut converged = false;
     let mut iter = 0;
@@ -1466,22 +1579,27 @@ pub fn fit_pirls_tdist(
     for outer_iter in 0..max_iter {
         iter = outer_iter + 1;
 
-        // ── Inner WLS: solve (X'WX + S) β = X'Wz with t-weights ─────────
-        // For identity link: μ = η = Xβ, z = y (working response = y for
-        // identity). Textbook EM-IRLS t-weight:
-        //   w_i = (ν+1) / (ν + r_i²/σ²)
-        //
-        // mgcv's gam.fit5 uses observed-info `Dmu2/2` instead — that ships
-        // as a unit with the proper t-form ls/deviance and gam.fit5 outer
-        // Newton on log(df); see task #15.
+        // ── Inner WLS: solve (X'WX + S) β = X'Wz with t weights ─────────
+        // Default/fixed-df legacy path uses textbook EM weights. The
+        // gam.fit5-style outer-LAML path (fixed σ² supplied by the outer
+        // shape Newton) uses mgcv scat$Dd observed Hessian weights with the
+        // expected Hessian fallback when the observed curvature is negative.
         let eta: Array1<f64> = x.dot(&beta);
+        let mut z_work = Array1::<f64>::zeros(n);
         let w: Array1<f64> = y
             .iter()
             .zip(eta.iter())
-            .map(|(&yi, &etai)| {
-                let r2 = (yi - etai).powi(2);
-                let t2 = r2 / sigma2.max(1e-300);
-                ((df + 1.0) / (df + t2)).max(1e-10)
+            .enumerate()
+            .map(|(i, (&yi, &etai))| {
+                let r = yi - etai;
+                if use_newton_working {
+                    let (wi, zi) = t_newton_working(r, etai, sigma2, df);
+                    z_work[i] = zi;
+                    wi
+                } else {
+                    z_work[i] = yi;
+                    t_weight(r, sigma2, df)
+                }
             })
             .collect();
 
@@ -1499,8 +1617,7 @@ pub fn fit_pirls_tdist(
             a[[i, i]] += ridge;
         }
 
-        // z = y for identity link
-        let wz: Array1<f64> = w.iter().zip(y.iter()).map(|(&wi, &yi)| wi * yi).collect();
+        let wz: Array1<f64> = w.iter().zip(z_work.iter()).map(|(&wi, &zi)| wi * zi).collect();
         let xtwz = x.t().dot(&wz);
 
         let beta_old = beta.clone();
@@ -1519,22 +1636,20 @@ pub fn fit_pirls_tdist(
         // From d log L/d σ² = 0:
         //   σ²_new = (1/n) · Σ w_i · r_i²,   w_i = (ν+1)/(ν + r_i²/σ²)
         // iterated to a fixed point inside the outer PIRLS loop. This is
-        // the MLE σ² that pairs with the proper t-form ls/deviance that
-        // later phases switch to.
-        //
-        // Previous form `Σ w_i r_i² / (Σ w_i - p)` was a method-of-moments
-        // estimator with an EDF correction; close to MLE on test scenarios
-        // (the parity battery passes either way at the test tolerances).
-        let w_new: Vec<f64> = residuals
-            .iter()
-            .map(|&r| {
-                let t2 = r * r / sigma2.max(1e-300);
-                ((df + 1.0) / (df + t2)).max(1e-10)
-            })
-            .collect();
-        let sum_wr2: f64 = w_new.iter().zip(residuals.iter()).map(|(&wi, &ri)| wi * ri * ri).sum();
+        // the MLE σ². Skipped when `fixed_sigma2` is supplied — the
+        // gam.fit5 outer Newton on log σ² (`smooth.rs`) drives σ² instead,
+        // letting the LAML score's Jeffreys-like correction shift σ² away
+        // from the MLE toward a finite-df minimum.
+        if fixed_sigma2.is_none() {
+            let w_new: Vec<f64> = residuals
+                .iter()
+                .map(|&r| t_weight(r, sigma2, df))
+                .collect();
+            let sum_wr2: f64 =
+                w_new.iter().zip(residuals.iter()).map(|(&wi, &ri)| wi * ri * ri).sum();
+            sigma2 = (sum_wr2 / n as f64).max(1e-6);
+        }
         let _ = p;
-        sigma2 = (sum_wr2 / n as f64).max(1e-6);
 
         // ── Update df via 1D Brent (skip if user fixed df) ───────────────
         if fixed_df.is_none() && outer_iter % 2 == 0 {
@@ -1567,9 +1682,13 @@ pub fn fit_pirls_tdist(
 
     let weights: Array1<f64> = residuals_final
         .iter()
-        .map(|&r| {
-            let t2 = r * r / sigma2.max(1e-300);
-            ((df + 1.0) / (df + t2)).max(1e-10)
+        .zip(eta.iter())
+        .map(|(&r, &etai)| {
+            if use_newton_working {
+                t_newton_working(r, etai, sigma2, df).0
+            } else {
+                t_weight(r, sigma2, df)
+            }
         })
         .collect();
 
@@ -1587,6 +1706,7 @@ pub fn fit_pirls_tdist(
         // Surface the converged MLE σ² so the outer Newton REML loop can
         // sync `Family::TDist::sigma2` before it evaluates ls/deviance.
         sigma2: Some(sigma2),
+        df: Some(df),
     })
 }
 
@@ -1832,6 +1952,7 @@ pub fn fit_pirls_quantile(
         iterations: iter,
         converged,
         sigma2: None,
+        df: None,
     })
 }
 
@@ -2515,6 +2636,7 @@ pub fn fit_pirls_discretized(
         iterations: iter,
         converged,
         sigma2: None,
+        df: None,
     })
 }
 
@@ -2587,6 +2709,7 @@ fn fit_pirls_gaussian_discretized(
         iterations: 1,
         converged: true,
         sigma2: None,
+        df: None,
     })
 }
 

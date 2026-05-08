@@ -2,6 +2,7 @@
 
 use crate::block_penalty::BlockPenalty;
 use crate::linalg::{determinant, inverse, solve};
+use crate::pirls::{digamma, trigamma};
 use crate::GAMError;
 use crate::Result;
 use ndarray::{s, Array1, Array2};
@@ -158,10 +159,14 @@ pub fn glm_deviance(
                 let yi_c = yi.max(1e-15);
                 2.0 * ((yi_c - mu_c) / mu_c - (yi_c / mu_c).ln())
             }
-            // TDist: squared residual proxy (identity link, μ = η). Proper
-            // t-deviance ships as a unit with the gam.fit5 outer Newton on
-            // log(df); see pirls.rs note.
-            Family::TDist { .. } => (yi - mui).powi(2),
+            // Scaled-t per-observation deviance (mgcv scat$dev.resids):
+            // (ν+1)·log1p(r²/(ν·σ²)). Keep this in sync with
+            // pirls.rs::compute_deviance; mgcv-exact REML calls this path
+            // for non-Gaussian true-response scoring.
+            Family::TDist { df, sigma2 } => {
+                let r = yi - mui;
+                (df + 1.0) * (1.0 + r * r / (df * sigma2)).ln()
+            }
             // Quantile/ELF deviance per qgam elf.R:122-138 with λ = σ
             // (matches pirls.rs::compute_deviance).
             Family::Quantile { tau, sigma } => {
@@ -604,24 +609,23 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // `pirls.rs`. For non-Gaussian we evaluate at `y_original` (the
     // true response) since the working response `z` is not what mgcv's
     // ls function takes.
-    let pi = std::f64::consts::PI;
     let _ = p;
     // y_for_ls was already computed above (used in estimate_phi_mgcv).
     let ls1 = family.saturated_log_likelihood(y_for_ls, scale_est);
-    let term_dp = dp / (2.0 * scale_est);
-    let term_const = -ls1 - 0.5 * (mp as f64) * (2.0 * pi * scale_est).ln();
-    let term_log_h = 0.5 * log_det_a;
-    let term_log_s = 0.5 * (log_lambda_sum + log_pseudo_det_sum);
-    let reml = term_dp + term_const + term_log_h - term_log_s;
+    let log_det_h = log_det_a;
+    let log_det_s = log_lambda_sum + log_pseudo_det_sum;
+    // Dispatch on the family's score formula. GamFit3 = standard REML
+    // with σ²-profile correction; GamFit5 = LAML for extended families
+    // (TDist/scat, Quantile/ELF) where σ² is family-internal.
+    let formula = family.score_formula();
+    let reml = formula.assemble(dp, ls1, log_det_h, log_det_s, scale_est, mp);
 
     if std::env::var("MGCV_EXACT_DEBUG").is_ok() {
         eprintln!(
-            "[MGCV_EXACT] λ={:?}\n  dev={:.6} bSb={:.6} dp={:.6} sigma2={:.8}\n  trA={:.6} n-trA={:.6} Mp={} ls[1]={:.6}\n  log|H|={:.6} log|λS|+={:.6} (lambda_sum={:.6} pseudo_det={:.6})\n  TERMS: dp/2σ²={:.6} +(-ls[1]-Mp/2·log(2πσ²))={:.6} +log|H|/2={:.6} -log|S|+/2={:.6} = REML {:.6}",
-            lambdas, dev_numerator, bsb, dp, scale_est,
+            "[MGCV_EXACT] λ={:?} formula={:?}\n  dev={:.6} bSb={:.6} dp={:.6} sigma2={:.8}\n  trA={:.6} n-trA={:.6} Mp={} ls[1]={:.6}\n  log|H|={:.6} log|λS|+={:.6} (lambda_sum={:.6} pseudo_det={:.6})\n  REML {:.6}",
+            lambdas, formula, dev_numerator, bsb, dp, scale_est,
             tr_a, n_minus_tra, mp, ls1,
-            log_det_a, log_lambda_sum + log_pseudo_det_sum,
-            log_lambda_sum, log_pseudo_det_sum,
-            term_dp, term_const, term_log_h, term_log_s, reml
+            log_det_h, log_det_s, log_lambda_sum, log_pseudo_det_sum, reml
         );
     }
 
@@ -899,6 +903,461 @@ pub fn reml_hessian_mgcv_exact_closed_form(
                 (kron * lam_j * bsb_per_j[j] - 2.0 * lam_i * lam_j * bsb_cross) / (2.0 * scale_est);
             let logh_part = (kron * lam_j * tr_a_s_per_j[j] - lam_i * lam_j * tr_cross) / 2.0;
             hess[[i, j]] = dp_part + logh_part;
+        }
+    }
+    Ok(hess)
+}
+
+#[cfg(feature = "blas")]
+fn penalty_dot_vec(penalty: &BlockPenalty, v: &Array1<f64>) -> Array1<f64> {
+    let p = v.len();
+    let mut out = Array1::<f64>::zeros(p);
+    let block = penalty.block_view();
+    let off = penalty.offset;
+    let k = block.nrows();
+    for r in 0..k {
+        let mut s = 0.0;
+        for c in 0..k {
+            s += block[[r, c]] * v[off + c];
+        }
+        out[off + r] = s;
+    }
+    out
+}
+
+#[cfg(feature = "blas")]
+fn add_scaled_penalty_dense(a: &mut Array2<f64>, penalty: &BlockPenalty, scale: f64) {
+    let block = penalty.block_view();
+    let off = penalty.offset;
+    let k = block.nrows();
+    for r in 0..k {
+        for c in 0..k {
+            a[[off + r, off + c]] += scale * block[[r, c]];
+        }
+    }
+}
+
+#[cfg(feature = "blas")]
+fn trace_product_dense(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+    let n = a.nrows();
+    let m = a.ncols();
+    let mut tr = 0.0;
+    for i in 0..n {
+        for j in 0..m {
+            tr += a[[i, j]] * b[[j, i]];
+        }
+    }
+    tr
+}
+
+#[cfg(feature = "blas")]
+fn add_weighted_xtx_inplace(out: &mut Array2<f64>, x: &Array2<f64>, diag: &Array1<f64>, scale: f64) {
+    let n = x.nrows();
+    let p = x.ncols();
+    for i in 0..n {
+        let wi = scale * diag[i];
+        if wi == 0.0 {
+            continue;
+        }
+        for a in 0..p {
+            let xia = x[[i, a]];
+            if xia == 0.0 {
+                continue;
+            }
+            for b in 0..p {
+                out[[a, b]] += wi * xia * x[[i, b]];
+            }
+        }
+    }
+}
+
+#[cfg(feature = "blas")]
+fn penalty_dot_all(penalties: &[BlockPenalty], lambdas: &[f64], v: &Array1<f64>) -> Array1<f64> {
+    let mut out = Array1::<f64>::zeros(v.len());
+    for (pen, lam) in penalties.iter().zip(lambdas.iter()) {
+        let sv = penalty_dot_vec(pen, v);
+        for i in 0..out.len() {
+            out[i] += lam * sv[i];
+        }
+    }
+    out
+}
+
+#[cfg(feature = "blas")]
+fn tdist_dd_arrays(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    df: f64,
+    sigma2: f64,
+) -> (
+    Array1<f64>, Array1<f64>, Array1<f64>, Array1<f64>,
+    [Array1<f64>; 2], [Array1<f64>; 2], [Array1<f64>; 2], [Array1<f64>; 2],
+    [Array1<f64>; 3], [Array1<f64>; 3], [Array1<f64>; 3],
+) {
+    let n = y.len();
+    let nu = df.max(2.0 + 1e-8);
+    let nu1 = nu + 1.0;
+    let nu2 = (nu - 2.0).max(1e-12);
+    let nu2nu = nu2 / nu;
+    let sig2 = sigma2.max(1e-300);
+    let sig = sig2.sqrt();
+    let mut det = Array1::<f64>::zeros(n);
+    let mut det2 = Array1::<f64>::zeros(n);
+    let mut det3 = Array1::<f64>::zeros(n);
+    let mut det4 = Array1::<f64>::zeros(n);
+    let mut dth = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut det_th = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut det2_th = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut det3_th = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut dth2 = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut det_th2 = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut det2_th2 = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+
+    for i in 0..n {
+        let ym = y[i] - eta[i];
+        let a = 1.0 + (ym / sig) * (ym / sig) / nu;
+        let sig2a = sig2 * a;
+        let nusig2a = nu * sig2a;
+        let f = nu1 * ym / nusig2a;
+        let f1 = ym / nusig2a;
+        let nu1nusig2a = nu1 / nusig2a;
+        let fym = f * ym;
+        let ff1 = f * f1;
+        let f1ym = f1 * ym;
+        let fymf1 = fym * f1;
+        let ymsig2a = ym / sig2a;
+        let nu1nu = nu1 / nu;
+        let fymf1ym = fym * f1ym;
+        let f1ymf1 = f1ym * f1;
+
+        det[i] = -2.0 * f;
+        det2[i] = 2.0 * nu1 * (1.0 / nusig2a - 2.0 * f1 * f1);
+        det3[i] = 4.0 * f * (3.0 / nusig2a - 4.0 * f1 * f1);
+        det4[i] = 12.0 * (-nu1nusig2a / nusig2a + 8.0 * ff1 / nusig2a - 8.0 * ff1 * f1 * f1);
+
+        dth[0][i] = nu2 * (a.ln() - fym / nu);
+        dth[1][i] = -2.0 * fym;
+        det_th[0][i] = 2.0 * (f - ymsig2a - fymf1) * nu2nu;
+        det_th[1][i] = 4.0 * f * (1.0 - f1ym);
+        det2_th[0][i] = 2.0
+            * (-nu1nusig2a + 1.0 / sig2a + 5.0 * ff1 - 2.0 * f1ym / sig2a - 4.0 * fymf1 * f1)
+            * nu2nu;
+        det2_th[1][i] = 4.0 * (-nu1nusig2a + ff1 * 5.0 - 4.0 * ff1 * f1ym);
+
+        dth2[0][i] = nu2 * a.ln()
+            + nu2nu * ym * ym * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym) / nusig2a;
+        dth2[1][i] = 2.0 * (fym - ym * ymsig2a - fymf1ym) * nu2nu;
+        dth2[2][i] = 4.0 * fym * (1.0 - f1ym);
+
+        let term = 2.0 * nu2nu - 2.0 * nu1nu * nu2nu - 1.0 + nu1nu;
+        det_th2[0][i] = 2.0 * f1 * nu2
+            * (term - 2.0 * nu2nu * f1ym + 4.0 * fym * nu2nu / nu - fym / nu - 2.0 * fymf1ym * nu2nu / nu);
+        det_th2[1][i] = 4.0 * (-f + ymsig2a + 3.0 * fymf1 - ymsig2a * f1ym - 2.0 * fymf1 * f1ym) * nu2nu;
+        det_th2[2][i] = 8.0 * f * (-1.0 + 3.0 * f1ym - 2.0 * f1ym * f1ym);
+        det3_th[0][i] = 4.0
+            * (-6.0 * f / nusig2a + 3.0 * f1 / sig2a + 18.0 * ff1 * f1
+                - 4.0 * f1ymf1 / sig2a - 12.0 * nu1 * ym * f1.powi(4))
+            * nu2nu;
+        det3_th[1][i] = 48.0 * f * (-1.0 / nusig2a + 3.0 * f1 * f1 - 2.0 * f1ymf1 * f1);
+        det2_th2[0][i] = 2.0 * nu2
+            * (-term + 10.0 * nu2nu * f1ym - 16.0 * fym * nu2nu / nu - 2.0 * f1ym
+                + 5.0 * nu1nu * f1ym - 8.0 * nu2nu * f1ym * f1ym
+                + 26.0 * fymf1ym * nu2nu / nu - 4.0 * nu1nu * f1ym * f1ym
+                - 12.0 * nu1nu * nu2nu * f1ym * f1ym * f1ym)
+            / nusig2a;
+        det2_th2[1][i] = 4.0
+            * (nu1nusig2a - 1.0 / sig2a - 11.0 * nu1 * f1 * f1 + 5.0 * f1ym / sig2a
+                + 22.0 * nu1 * fymf1 * f1 - 4.0 * f1ym * f1ym / sig2a
+                - 12.0 * nu1 * fymf1 * fymf1)
+            * nu2nu;
+        det2_th2[2][i] = 8.0
+            * (nu1nusig2a - 11.0 * nu1 * f1 * f1 + 22.0 * nu1 * fymf1 * f1
+                - 12.0 * nu1 * fymf1 * fymf1);
+    }
+    (det, det2, det3, det4, dth, det_th, det2_th, det3_th, dth2, det_th2, det2_th2)
+}
+
+/// Full mgcv `gdi2`-style derivative assembly for scat. Native parameter
+/// order is `[theta_df=log(df-2), theta_sigma=log(sigma), log(lambda)...]`.
+#[cfg(feature = "blas")]
+fn tdist_gdi2_native(
+    y_original: &Array1<f64>,
+    y_work: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+) -> Result<(Array1<f64>, Array2<f64>)> {
+    let (df, sigma2) = match family {
+        crate::pirls::Family::TDist { df, sigma2 } => (df.max(2.0 + 1e-8), sigma2.max(1e-300)),
+        _ => return Err(GAMError::InvalidParameter("TDist gdi2 called for non-TDist family".into())),
+    };
+    let ntheta = 2;
+    let m = lambdas.len();
+    let ntot = ntheta + m;
+    let p = x.ncols();
+
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx { c } else { xtwx_owned = compute_xtwx(x, w); &xtwx_owned };
+    let mut amat = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+        penalty.scaled_add_to(&mut amat, *lambda);
+    }
+    let beta = solve(amat.clone(), compute_xtwy(x, w, y_work))?;
+    let a_inv = inverse(&amat)?;
+    let eta = x.dot(&beta);
+    let (det, det2, det3, det4, dth, det_th, det2_th, det3_th, dth2, det_th2, det2_th2) =
+        tdist_dd_arrays(y_original, &eta, df, sigma2);
+
+    let mut b1: Vec<Array1<f64>> = Vec::with_capacity(ntot);
+    for t in 0..ntheta {
+        b1.push(-0.5 * a_inv.dot(&x.t().dot(&det_th[t])));
+    }
+    for j in 0..m {
+        b1.push(-lambdas[j] * a_inv.dot(&penalty_dot_vec(&penalties[j], &beta)));
+    }
+    let eta1: Vec<Array1<f64>> = b1.iter().map(|b| x.dot(b)).collect();
+
+    let s_beta = penalty_dot_all(penalties, lambdas, &beta);
+    let mut a1: Vec<Array2<f64>> = Vec::with_capacity(ntot);
+    for i in 0..ntot {
+        let mut ai = Array2::<f64>::zeros((p, p));
+        let wi = if i < ntheta {
+            (&det3 * &eta1[i] + &det2_th[i]) * 0.5
+        } else {
+            &det3 * &eta1[i] * 0.5
+        };
+        add_weighted_xtx_inplace(&mut ai, x, &wi, 1.0);
+        if i >= ntheta {
+            add_scaled_penalty_dense(&mut ai, &penalties[i - ntheta], lambdas[i - ntheta]);
+        }
+        a1.push(ai);
+    }
+
+    let mut d1 = Array1::<f64>::zeros(ntot);
+    let mut p1 = Array1::<f64>::zeros(ntot);
+    let mut ldet1 = Array1::<f64>::zeros(ntot);
+    for i in 0..ntot {
+        d1[i] = det.dot(&eta1[i]) + if i < ntheta { dth[i].sum() } else { 0.0 };
+        p1[i] = 2.0 * b1[i].dot(&s_beta);
+        if i >= ntheta {
+            p1[i] += lambdas[i - ntheta] * beta.dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
+        }
+        ldet1[i] = trace_product_dense(&a_inv, &a1[i]);
+    }
+
+    let half_nu1 = (df + 1.0) / 2.0;
+    let half_nu = df / 2.0;
+    let nu2 = df - 2.0;
+    let nu2nu = nu2 / df;
+    let mut ls1 = Array1::<f64>::zeros(ntot);
+    ls1[0] = (y_original.len() as f64) * (nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0 - 0.5 * nu2nu);
+    ls1[1] = -(y_original.len() as f64);
+    let mut ls2 = Array2::<f64>::zeros((ntot, ntot));
+    ls2[[0, 0]] = (y_original.len() as f64)
+        * (nu2 * nu2 * (trigamma(half_nu1) - trigamma(half_nu)) / 4.0
+            + nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0
+            + 0.5 * nu2nu * nu2nu
+            - 0.5 * nu2nu);
+
+    let mut b2: Vec<Vec<Array1<f64>>> = (0..ntot)
+        .map(|_| (0..ntot).map(|_| Array1::<f64>::zeros(p)).collect())
+        .collect();
+    let mut eta2: Vec<Vec<Array1<f64>>> = (0..ntot)
+        .map(|_| (0..ntot).map(|_| Array1::<f64>::zeros(x.nrows())).collect())
+        .collect();
+
+    for i in 0..ntot {
+        for k in i..ntot {
+            let rhs_w = -&det3 * &eta1[i] * &eta1[k];
+            let mut rhs = x.t().dot(&rhs_w);
+            if k < ntheta {
+                rhs = rhs - x.t().dot(&(&det2_th[k] * &eta1[i]));
+            } else {
+                rhs = rhs - 2.0 * lambdas[k - ntheta] * penalty_dot_vec(&penalties[k - ntheta], &b1[i]);
+            }
+            if i < ntheta {
+                rhs = rhs - x.t().dot(&(&det2_th[i] * &eta1[k]));
+            } else {
+                rhs = rhs - 2.0 * lambdas[i - ntheta] * penalty_dot_vec(&penalties[i - ntheta], &b1[k]);
+            }
+            if i < ntheta && k < ntheta {
+                let idx = if i == 0 && k == 0 { 0 } else if i == 0 && k == 1 { 1 } else { 2 };
+                rhs = rhs - x.t().dot(&det_th2[idx]);
+            } else if i == k {
+                rhs = rhs - 2.0 * lambdas[i - ntheta] * penalty_dot_vec(&penalties[i - ntheta], &beta);
+            }
+            let bik = 0.5 * a_inv.dot(&rhs);
+            let eik = x.dot(&bik);
+            b2[i][k] = bik.clone();
+            b2[k][i] = bik;
+            eta2[i][k] = eik.clone();
+            eta2[k][i] = eik;
+        }
+    }
+
+    let mut d2 = Array2::<f64>::zeros((ntot, ntot));
+    let mut p2 = Array2::<f64>::zeros((ntot, ntot));
+    let mut ldet2 = Array2::<f64>::zeros((ntot, ntot));
+    for i in 0..ntot {
+        for k in i..ntot {
+            let mut dij = (&det2 * &eta1[i] * &eta1[k]).sum() + det.dot(&eta2[i][k]);
+            if i < ntheta && k < ntheta {
+                let idx = if i == 0 && k == 0 { 0 } else if i == 0 && k == 1 { 1 } else { 2 };
+                dij += dth2[idx].sum();
+            }
+            if i < ntheta {
+                dij += det_th[i].dot(&eta1[k]);
+            }
+            if k < ntheta {
+                dij += det_th[k].dot(&eta1[i]);
+            }
+            d2[[i, k]] = dij;
+            d2[[k, i]] = dij;
+
+            let mut pij = 2.0 * b2[i][k].dot(&s_beta) + 2.0 * b1[i].dot(&penalty_dot_all(penalties, lambdas, &b1[k]));
+            if k >= ntheta {
+                pij += 2.0 * lambdas[k - ntheta] * b1[i].dot(&penalty_dot_vec(&penalties[k - ntheta], &beta));
+            }
+            if i >= ntheta {
+                pij += 2.0 * lambdas[i - ntheta] * b1[k].dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
+            }
+            if i == k && i >= ntheta {
+                pij += lambdas[i - ntheta] * beta.dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
+            }
+            p2[[i, k]] = pij;
+            p2[[k, i]] = pij;
+
+            let mut a2 = Array2::<f64>::zeros((p, p));
+            let mut w2 = &det4 * &eta1[i] * &eta1[k] + &det3 * &eta2[i][k];
+            if i < ntheta {
+                w2 = w2 + &det3_th[i] * &eta1[k];
+            }
+            if k < ntheta {
+                w2 = w2 + &det3_th[k] * &eta1[i];
+            }
+            if i < ntheta && k < ntheta {
+                let idx = if i == 0 && k == 0 { 0 } else if i == 0 && k == 1 { 1 } else { 2 };
+                w2 = w2 + &det2_th2[idx];
+            }
+            add_weighted_xtx_inplace(&mut a2, x, &w2, 0.5);
+            if i == k && i >= ntheta {
+                add_scaled_penalty_dense(&mut a2, &penalties[i - ntheta], lambdas[i - ntheta]);
+            }
+            let lij = trace_product_dense(&a_inv, &a2) - trace_product_dense(&a_inv.dot(&a1[i]), &a_inv.dot(&a1[k]));
+            ldet2[[i, k]] = lij;
+            ldet2[[k, i]] = lij;
+        }
+    }
+
+    let mut grad = Array1::<f64>::zeros(ntot);
+    let mut hess = Array2::<f64>::zeros((ntot, ntot));
+    for i in 0..ntot {
+        grad[i] = 0.5 * (d1[i] + p1[i]) - ls1[i] + 0.5 * ldet1[i];
+        if i >= ntheta {
+            grad[i] -= 0.5 * estimate_rank_eigen(&penalties[i - ntheta]) as f64;
+        }
+        for k in 0..ntot {
+            hess[[i, k]] = 0.5 * (d2[[i, k]] + p2[[i, k]]) - ls2[[i, k]] + 0.5 * ldet2[[i, k]];
+        }
+    }
+    Ok((grad, hess))
+}
+
+/// Analytic fixed-state scat theta derivatives from mgcv's `scat$Dd(level=2)`
+/// and `scat$ls`. Returns gradient and Hessian in Rust optimizer order:
+/// `(log σ², log(df - 2))`. Internally mgcv uses `(log(df - 2), log σ)`.
+#[cfg(feature = "blas")]
+pub fn tdist_shape_derivatives_gamfit4(
+    y_original: &Array1<f64>,
+    y_work: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+) -> Result<(Array1<f64>, Array2<f64>)> {
+    let (native_grad, native_hess) = tdist_gdi2_native(
+        y_original,
+        y_work,
+        x,
+        w,
+        lambdas,
+        penalties,
+        cached_xtwx,
+        family,
+    )?;
+    let mut grad = Array1::<f64>::zeros(2);
+    grad[0] = 0.5 * native_grad[1];
+    grad[1] = native_grad[0];
+    let mut hess = Array2::<f64>::zeros((2, 2));
+    hess[[0, 0]] = 0.25 * native_hess[[1, 1]];
+    hess[[0, 1]] = 0.5 * native_hess[[1, 0]];
+    hess[[1, 0]] = hess[[0, 1]];
+    hess[[1, 1]] = native_hess[[0, 0]];
+    Ok((grad, hess))
+}
+
+/// Analytic gam.fit4-style LAML gradient for mgcv's scat extended family.
+/// This replaces callback-aware finite differences over log λ for TDist.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_gamfit4_tdist_analytic(
+    y_work: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    y_original: &Array1<f64>,
+    family: crate::pirls::Family,
+) -> Result<Array1<f64>> {
+    let (native_grad, _) = tdist_gdi2_native(
+        y_original,
+        y_work,
+        x,
+        w,
+        lambdas,
+        penalties,
+        cached_xtwx,
+        family,
+    )?;
+    let mut grad = Array1::<f64>::zeros(lambdas.len());
+    for j in 0..lambdas.len() {
+        grad[j] = native_grad[2 + j];
+    }
+    Ok(grad)
+}
+
+/// Analytic gam.fit4-style LAML Hessian for mgcv's scat extended family.
+#[cfg(feature = "blas")]
+pub fn reml_hessian_gamfit4_tdist_analytic(
+    y_work: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    y_original: &Array1<f64>,
+    family: crate::pirls::Family,
+) -> Result<Array2<f64>> {
+    let (_, native_hess) = tdist_gdi2_native(
+        y_original,
+        y_work,
+        x,
+        w,
+        lambdas,
+        penalties,
+        cached_xtwx,
+        family,
+    )?;
+    let m = lambdas.len();
+    let mut hess = Array2::<f64>::zeros((m, m));
+    for i in 0..m {
+        for j in 0..m {
+            hess[[i, j]] = native_hess[[2 + i, 2 + j]];
         }
     }
     Ok(hess)

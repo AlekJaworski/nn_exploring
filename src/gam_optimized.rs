@@ -272,15 +272,41 @@ impl FitCache {
         tolerance: f64,
         cached_xtx: Option<&Array2<f64>>,
     ) -> Result<crate::pirls::PiRLSResult> {
-        // t-dist family needs a specialised fitter with σ²/df outer loop
-        if let crate::pirls::Family::TDist { df, .. } = family {
+        self.run_pirls_with_options(y, lambda, family, max_iter, tolerance, cached_xtx, false)
+    }
+
+    /// Variant that lets the caller signal "the outer Newton drives σ²" for
+    /// TDist (`tdist_outer_sigma2 = true`). When true, the inner PIRLS uses
+    /// the family's `sigma2` as a fixed input instead of profiling it via
+    /// MLE iteration. This is the gam.fit5 path — required for the outer
+    /// LAML Newton on log σ² to actually move the σ² value (otherwise the
+    /// inner MLE would overwrite each trial value).
+    fn run_pirls_with_options(
+        &self,
+        y: &Array1<f64>,
+        lambda: &[f64],
+        family: crate::pirls::Family,
+        max_iter: usize,
+        tolerance: f64,
+        cached_xtx: Option<&Array2<f64>>,
+        tdist_outer_sigma2: bool,
+    ) -> Result<crate::pirls::PiRLSResult> {
+        // t-dist family needs a specialised fitter. df sentinel: 0.0 ⟹
+        // PIRLS profiles df via internal 1D Brent (auto-mode, the default
+        // for `family="t-dist"` with no df arg), > 0 ⟹ user-fixed (or set
+        // by the outer Newton on log df when `tdist_profile = true`).
+        // When `tdist_outer_sigma2` is true, σ² is also treated as fixed
+        // (driven by the outer log σ² Newton block).
+        if let crate::pirls::Family::TDist { df, sigma2 } = family {
             let fixed_df = if df > 0.0 { Some(df) } else { None };
+            let fixed_sigma2 = if tdist_outer_sigma2 { Some(sigma2) } else { None };
             return fit_pirls_tdist(
                 y,
                 &self.design_matrix,
                 lambda,
                 &self.penalties,
                 fixed_df,
+                fixed_sigma2,
                 max_iter,
                 tolerance,
             );
@@ -567,15 +593,36 @@ impl GAM {
         } else {
             smoothing_params.negbin_log_theta = 2.0_f64.ln();
         }
-        // Profile-df for scat (TDist) — DORMANT until the joint (df, σ²)
-        // outer Newton lands. The infrastructure (tdist_profile flag, the
-        // FD-Newton block in smooth.rs) is ready, but with the current
-        // Gaussian-proxy deviance + ls the FD gradient w.r.t. df is
-        // structurally zero. Switching to proper t-deviance/ls breaks
-        // parity until σ² is also moved into the outer Newton. Tracked
-        // in task #14.
-        smoothing_params.tdist_profile = false;
-        smoothing_params.tdist_log_df = 5.0_f64.ln();
+        // Profile-df for scat (TDist): outer Newton on mgcv's theta1 =
+        // log(df - 2) at the ρ-loop level when caller passed no fixed df.
+        // Internal Brent in `fit_pirls_tdist` is disabled — PIRLS treats
+        // family.df as fixed within an inner fit; only the outer Newton
+        // moves it. Initial theta1 seeded from family.df so user-fixed
+        // mode (tdist_profile=false) and auto mode share state cleanly.
+        smoothing_params.tdist_profile = self.tdist_profile;
+        if let crate::pirls::Family::TDist { df, .. } = self.family {
+            smoothing_params.tdist_log_df = (df.max(2.0_f64 + 1e-8) - 2.0).ln();
+            // Seed σ² from sample variance — the gam.fit5 outer Newton on
+            // log σ² then refines from there. Also overwrite the family
+            // enum's σ² so the FIRST PIRLS call uses this seed (otherwise
+            // the init `sigma2: 1.0` would feed PIRLS).
+            let y_mean: f64 = y.iter().sum::<f64>() / (n as f64).max(1.0);
+            let y_var: f64 = y
+                .iter()
+                .map(|&yi| (yi - y_mean).powi(2))
+                .sum::<f64>()
+                / (n as f64 - 1.0).max(1.0);
+            let sigma2_seed = y_var.max(1e-6);
+            let log_seed = sigma2_seed.ln();
+            smoothing_params.tdist_log_sigma2 = log_seed;
+            smoothing_params.tdist_log_sigma2_lo = log_seed - 4.605_f64; // ÷100
+            smoothing_params.tdist_log_sigma2_hi = log_seed + 4.605_f64; // ×100
+            self.family = crate::pirls::Family::TDist { df, sigma2: sigma2_seed };
+            smoothing_params.family = self.family;
+        } else {
+            smoothing_params.tdist_log_df = (5.0_f64 - 2.0).ln();
+            smoothing_params.tdist_log_sigma2 = 0.0_f64;
+        }
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For
         // non-Gaussian, the optimizer is called with the working response z;
         // y_original carries the true y so IFT can evaluate
@@ -636,13 +683,14 @@ impl GAM {
 
             // Initial PIRLS at the starting λ (unchanged from Gaussian path)
             let pirls_start = Instant::now();
-            let pirls_result = cache.run_pirls(
+            let pirls_result = cache.run_pirls_with_options(
                 y,
                 &smoothing_params.lambda,
                 self.family,
                 max_inner_iter,
                 tolerance,
                 xtx_ref,
+                self.tdist_profile,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
@@ -671,11 +719,22 @@ impl GAM {
             };
 
             // Build the per-trial-λ PIRLS-refresh callback for non-Gaussian.
-            // Borrows `cache`, `y`, `family`, `max_inner_iter`, `tolerance`,
+            // Borrows `cache`, `y`, `max_inner_iter`, `tolerance`,
             // `xtx_ref` — all `Copy` or shared references that don't conflict
             // with the parallel `&cache.design_matrix` / `&cache.penalties`
             // borrows passed into `optimize_with_beta_xtwx_and_pirls_callback`.
-            let family = self.family;
+            //
+            // Family is shared via Arc<Mutex<Family>> so the outer Newton loop
+            // can publish freshly profiled family-shape params (TDist df/σ²,
+            // Tweedie p, NegBin θ) into the closure between iterations. A
+            // plain `let family = self.family;` Copy capture would freeze
+            // the closure's family at the starting value, defeating the
+            // outer-loop df / θ / p Newton steps. Mutex (vs. Cell) only
+            // because `SmoothingParameter` lives inside a `#[pyclass]` that
+            // requires Send + Sync; the lock is uncontended (single-threaded
+            // Newton).
+            let family_cell = std::sync::Arc::new(std::sync::Mutex::new(self.family));
+            smoothing_params.family_cell = Some(std::sync::Arc::clone(&family_cell));
             // For trial-λ refresh inside Newton's line search, cap PIRLS at
             // a fraction of the outer cap. The trial λ is close to the
             // current λ so β_trial converges in 5-20 iters with warm start;
@@ -710,20 +769,49 @@ impl GAM {
                 // Non-Gaussian: refresh PIRLS at every trial λ.
                 let cache_ref = &cache;
                 let y_ref = y;
+                let family_cell_ref = std::sync::Arc::clone(&family_cell);
+                let outer_sigma2_profile = self.tdist_profile;
                 let mut callback = |trial_lambdas: &[f64]| -> Result<crate::smooth::PirlsRefresh> {
                     callback_pirls_calls += 1;
-                    let res = cache_ref.run_pirls(
+                    // Read the latest family from the shared cell — the outer
+                    // Newton loop publishes fresh df/σ²/p/θ here between iters.
+                    let family = *family_cell_ref
+                        .lock()
+                        .expect("family_cell mutex poisoned");
+                    let res = cache_ref.run_pirls_with_options(
                         y_ref,
                         trial_lambdas,
                         family,
                         max_inner,
                         tol,
                         xtx_ref,
+                        outer_sigma2_profile,
                     )?;
                     callback_pirls_iters += res.iterations;
-                    // z = η + (y - μ)/(dμ/dη)
+                    // z = η + (y - μ)/(dμ/dη) for standard PIRLS. TDist's
+                    // gam.fit5 path uses the scat$Dd Newton working response
+                    // from the negative log-likelihood derivatives, not y.
                     let mut z = res.linear_predictor.clone();
                     for i in 0..z.len() {
+                        if outer_sigma2_profile {
+                            if let crate::pirls::Family::TDist { df, sigma2 } = family {
+                                let eta = res.linear_predictor[i];
+                                let r = y_ref[i] - eta;
+                                let sigma2 = sigma2.max(1e-300);
+                                let denom = df * sigma2 + r * r;
+                                let dmu = -2.0 * (df + 1.0) * r / denom;
+                                let observed_dmu2 =
+                                    2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
+                                let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+                                let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
+                                    observed_dmu2
+                                } else {
+                                    expected_dmu2.max(1e-12)
+                                };
+                                z[i] = eta - dmu / dmu2;
+                                continue;
+                            }
+                        }
                         let dmu_deta = family.d_inverse_link(res.linear_predictor[i]);
                         if dmu_deta.abs() > 1e-10 {
                             z[i] += (y_ref[i] - res.fitted_values[i]) / dmu_deta;
@@ -735,12 +823,14 @@ impl GAM {
                         crate::reml::compute_xtwx(&cache_ref.design_matrix, &res.weights)
                     };
                     let sigma2 = res.sigma2;
+                    let df = res.df;
                     Ok(crate::smooth::PirlsRefresh {
                         beta: res.coefficients,
                         weights: res.weights,
                         working_response: z,
                         xtwx,
                         sigma2,
+                        df,
                     })
                 };
                 smoothing_params.optimize_with_beta_xtwx_and_pirls_callback(
@@ -756,6 +846,10 @@ impl GAM {
                 )
             };
             callback_result?;
+            // Drop the shared family cell now that the Newton call returned —
+            // future re-uses of `smoothing_params` would otherwise carry a
+            // stale Rc pointing at this fit's cell.
+            smoothing_params.family_cell = None;
             total_reml_time += reml_start.elapsed().as_secs_f64() * 1000.0;
 
             if std::env::var("MGCV_PROFILE").is_ok() {
@@ -767,22 +861,27 @@ impl GAM {
 
             // Propagate the converged family params (Tweedie p, NegBin θ,
             // scat df) back to self.family so the final PIRLS uses them.
+            // For TDist always sync (σ² is profiled inside fit_pirls_tdist
+            // even when df is user-fixed); the smoothing_params.family
+            // refresh path at smooth.rs:912 keeps it current.
             if self.tweedie_profile
                 || self.negbin_profile
                 || smoothing_params.tdist_profile
+                || matches!(self.family, crate::pirls::Family::TDist { .. })
             {
                 self.family = smoothing_params.family;
             }
 
             // Step 3: Final PiRLS with optimal lambda (uses discretized scatter-gather)
             let pirls_start = Instant::now();
-            let final_result = cache.run_pirls(
+            let final_result = cache.run_pirls_with_options(
                 y,
                 &smoothing_params.lambda,
                 self.family,
                 max_inner_iter,
                 tolerance,
                 xtx_ref,
+                self.tdist_profile,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 

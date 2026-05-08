@@ -9,10 +9,12 @@ pub use crate::reml::ScaleParameterMethod;
 use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
     reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
+    reml_gradient_gamfit4_tdist_analytic, reml_hessian_gamfit4_tdist_analytic,
     reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
     reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
     reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift,
     reml_hessian_multi_cached,
+    tdist_shape_derivatives_gamfit4,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -97,6 +99,7 @@ fn reml_gradient_finite_diff(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    pirls_callback: &mut Option<PirlsCallback<'_>>,
 ) -> Result<Array1<f64>> {
     let m = lambdas.len();
     let h: f64 = 1.0e-4;
@@ -109,11 +112,38 @@ fn reml_gradient_finite_diff(
         log_minus[i] -= h;
         let lam_plus: Vec<f64> = log_plus.iter().map(|l| l.exp()).collect();
         let lam_minus: Vec<f64> = log_minus.iter().map(|l| l.exp()).collect();
-        let r_plus = dispatch_reml_score(sp, y, x, w, &lam_plus, penalties, cached_xtwx)?;
-        let r_minus = dispatch_reml_score(sp, y, x, w, &lam_minus, penalties, cached_xtwx)?;
+        let r_plus = dispatch_reml_score_fd(sp, y, x, w, &lam_plus, penalties, cached_xtwx, pirls_callback)?;
+        let r_minus = dispatch_reml_score_fd(sp, y, x, w, &lam_minus, penalties, cached_xtwx, pirls_callback)?;
         grad[i] = (r_plus - r_minus) / (2.0 * h);
     }
     Ok(grad)
+}
+
+#[cfg(feature = "blas")]
+fn dispatch_reml_score_fd(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    pirls_callback: &mut Option<PirlsCallback<'_>>,
+) -> Result<f64> {
+    if let Some(cb) = pirls_callback.as_mut() {
+        let refresh = cb(lambdas)?;
+        dispatch_reml_score(
+            sp,
+            &refresh.working_response,
+            x,
+            &refresh.weights,
+            lambdas,
+            penalties,
+            Some(&refresh.xtwx),
+        )
+    } else {
+        dispatch_reml_score(sp, y, x, w, lambdas, penalties, cached_xtwx)
+    }
 }
 
 /// Central-difference Hessian of the REML score wrt log(λ). Pairs with
@@ -129,11 +159,12 @@ fn reml_hessian_finite_diff(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    pirls_callback: &mut Option<PirlsCallback<'_>>,
 ) -> Result<Array2<f64>> {
     let m = lambdas.len();
     let h: f64 = 1.0e-3;
     let log_lambdas: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
-    let r0 = dispatch_reml_score(sp, y, x, w, lambdas, penalties, cached_xtwx)?;
+    let r0 = dispatch_reml_score_fd(sp, y, x, w, lambdas, penalties, cached_xtwx, pirls_callback)?;
 
     // Cache REML at log_λ ± h·e_i for i = 0..m
     let mut r_plus = vec![0.0f64; m];
@@ -145,8 +176,8 @@ fn reml_hessian_finite_diff(
         lm[i] -= h;
         let lam_p: Vec<f64> = lp.iter().map(|l| l.exp()).collect();
         let lam_m: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
-        r_plus[i] = dispatch_reml_score(sp, y, x, w, &lam_p, penalties, cached_xtwx)?;
-        r_minus[i] = dispatch_reml_score(sp, y, x, w, &lam_m, penalties, cached_xtwx)?;
+        r_plus[i] = dispatch_reml_score_fd(sp, y, x, w, &lam_p, penalties, cached_xtwx, pirls_callback)?;
+        r_minus[i] = dispatch_reml_score_fd(sp, y, x, w, &lam_m, penalties, cached_xtwx, pirls_callback)?;
     }
 
     let mut hess = Array2::<f64>::zeros((m, m));
@@ -174,10 +205,10 @@ fn reml_hessian_finite_diff(
             let lam_pm: Vec<f64> = lpm.iter().map(|l| l.exp()).collect();
             let lam_mp: Vec<f64> = lmp.iter().map(|l| l.exp()).collect();
             let lam_mm: Vec<f64> = lmm.iter().map(|l| l.exp()).collect();
-            let rpp = dispatch_reml_score(sp, y, x, w, &lam_pp, penalties, cached_xtwx)?;
-            let rpm = dispatch_reml_score(sp, y, x, w, &lam_pm, penalties, cached_xtwx)?;
-            let rmp = dispatch_reml_score(sp, y, x, w, &lam_mp, penalties, cached_xtwx)?;
-            let rmm = dispatch_reml_score(sp, y, x, w, &lam_mm, penalties, cached_xtwx)?;
+            let rpp = dispatch_reml_score_fd(sp, y, x, w, &lam_pp, penalties, cached_xtwx, pirls_callback)?;
+            let rpm = dispatch_reml_score_fd(sp, y, x, w, &lam_pm, penalties, cached_xtwx, pirls_callback)?;
+            let rmp = dispatch_reml_score_fd(sp, y, x, w, &lam_mp, penalties, cached_xtwx, pirls_callback)?;
+            let rmm = dispatch_reml_score_fd(sp, y, x, w, &lam_mm, penalties, cached_xtwx, pirls_callback)?;
             let off = (rpp - rpm - rmp + rmm) / (4.0 * h2);
             hess[[i, j]] = off;
             hess[[j, i]] = off;
@@ -346,13 +377,41 @@ pub struct SmoothingParameter {
     /// Newton). Set true when the user passed df=0 sentinel (the
     /// default for `mr.GAM("t-dist")`).
     pub tdist_profile: bool,
-    /// Current log(df) for TDist profile-df. Updated each outer Newton
-    /// iteration. Initial value: log(5).
+    /// Current mgcv scat theta1 = log(df - 2) for TDist profile-df.
+    /// Updated each outer Newton iteration. Initial value: log(5 - 2).
     pub tdist_log_df: f64,
+    /// Current log(σ²) for TDist outer σ² Newton (gam.fit5-style LAML
+    /// profiling). Updated each outer Newton iteration when
+    /// `tdist_profile = true`. Seeded from sample variance at fit start.
+    /// Inactive (no FD step taken) when `tdist_profile = false`.
+    pub tdist_log_sigma2: f64,
+    /// log(σ²) lower / upper bound for the outer σ² Newton, set at fit
+    /// start to seed ± 2 decades. Without bounds the frozen-β FD walks
+    /// σ² to numeric zero (β fit at a smaller σ² has tighter inliers ⇒
+    /// smaller weighted residual sum ⇒ smaller MLE-σ² target ⇒ repeat,
+    /// a vicious cycle). mgcv's gam.fit5 avoids it via joint (β, σ², λ,
+    /// df) Newton; until that lands the band keeps σ² near the data scale.
+    pub tdist_log_sigma2_lo: f64,
+    pub tdist_log_sigma2_hi: f64,
     /// REML / LAML score at convergence. Populated by the outer optimizer
     /// (Newton or FS) on the last iteration so callers can read it back
     /// for σ profiling at the wrapper level.
     pub last_score: Option<f64>,
+    /// Shared mutable handle to the Family enum used by the inner-PIRLS
+    /// callback in non-Gaussian Newton. Set by the caller (gam_optimized.rs)
+    /// when it builds the per-trial-λ refresh closure: the closure reads
+    /// the latest value here so it sees fresh family-shape parameters
+    /// (TDist df / σ², Tweedie p, NegBin θ) that the outer Newton mutates
+    /// between iterations. Without this, a plain `let family = self.family;`
+    /// capture would freeze the closure's family at the starting value.
+    /// `None` for the Fellner-Schall path / Gaussian / any caller that
+    /// doesn't need the sync.
+    ///
+    /// `Arc<Mutex<_>>` (rather than the cheaper `Rc<Cell<_>>`) only because
+    /// `SmoothingParameter` lives inside a `#[pyclass]` (PyGAM) which
+    /// requires `Send + Sync`. The Newton loop is single-threaded so the
+    /// mutex is uncontended; lock cost is negligible vs. PIRLS.
+    pub family_cell: Option<std::sync::Arc<std::sync::Mutex<crate::pirls::Family>>>,
 }
 
 /// Refresh produced by an inner PIRLS run at a candidate λ during the
@@ -377,6 +436,10 @@ pub struct PirlsRefresh {
     /// up-to-date σ². `None` ⟹ caller doesn't track σ²; outer loop falls
     /// back to `estimate_phi_mgcv`.
     pub sigma2: Option<f64>,
+    /// Family df the inner TDist fitter used/converged to. When `Some`, keep
+    /// the outer family enum in sync so score evaluations see the same df as
+    /// the refreshed PIRLS weights/β.
+    pub df: Option<f64>,
 }
 
 /// Callback type for refreshing PIRLS at trial λ during Newton line search.
@@ -408,8 +471,12 @@ impl SmoothingParameter {
             quantile_profile: false,
             quantile_log_sigma: 0.0,
             tdist_profile: false,
-            tdist_log_df: 5.0_f64.ln(),
+            tdist_log_df: (5.0_f64 - 2.0).ln(),
+            tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
+            tdist_log_sigma2_lo: f64::NEG_INFINITY,
+            tdist_log_sigma2_hi: f64::INFINITY,
             last_score: None,
+            family_cell: None,
         }
     }
 
@@ -437,8 +504,12 @@ impl SmoothingParameter {
             quantile_profile: false,
             quantile_log_sigma: 0.0,
             tdist_profile: false,
-            tdist_log_df: 5.0_f64.ln(),
+            tdist_log_df: (5.0_f64 - 2.0).ln(),
+            tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
+            tdist_log_sigma2_lo: f64::NEG_INFINITY,
+            tdist_log_sigma2_hi: f64::INFINITY,
             last_score: None,
+            family_cell: None,
         }
     }
 
@@ -466,8 +537,12 @@ impl SmoothingParameter {
             quantile_profile: false,
             quantile_log_sigma: 0.0,
             tdist_profile: false,
-            tdist_log_df: 5.0_f64.ln(),
+            tdist_log_df: (5.0_f64 - 2.0).ln(),
+            tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
+            tdist_log_sigma2_lo: f64::NEG_INFINITY,
+            tdist_log_sigma2_hi: f64::INFINITY,
             last_score: None,
+            family_cell: None,
         }
     }
 
@@ -894,9 +969,19 @@ impl SmoothingParameter {
                 // Sync the family enum's scale parameter (σ² for TDist) to
                 // whatever the inner fitter converged to, so the REML
                 // score formula that follows reads the right value.
-                if let Some(sig2) = refresh.sigma2 {
-                    if let crate::pirls::Family::TDist { df, .. } = self.family {
-                        self.family = crate::pirls::Family::TDist { df, sigma2: sig2 };
+                if refresh.sigma2.is_some() || refresh.df.is_some() {
+                    if let crate::pirls::Family::TDist { df, sigma2 } = self.family {
+                        self.family = crate::pirls::Family::TDist {
+                            df: refresh.df.unwrap_or(df),
+                            sigma2: refresh.sigma2.unwrap_or(sigma2),
+                        };
+                    }
+                    // Sync the closure-side cell so subsequent line-search
+                    // trial-λ callbacks within this iter see fresh TDist params.
+                    if let Some(cell) = self.family_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = self.family;
+                        }
                     }
                 }
             }
@@ -933,10 +1018,40 @@ impl SmoothingParameter {
                     || (!use_ift_disable
                         && !matches!(self.family, crate::pirls::Family::Gaussian)
                         && self.y_original.is_some()));
+            // GamFit5 score families (TDist/scat, Quantile/ELF) use a
+            // structurally different REML formula (Dp/2, no σ²-chain term).
+            // The closed-form / IFT gradient + hessian assemblies above are
+            // gam.fit3-specific (`H = D2/(2σ²) + det2/2`). Routing those
+            // families to FD keeps gradient/hessian consistent with the
+            // criterion until a closed-form GamFit5 derivative lands.
+            let use_fd_for_score_formula =
+                self.family.score_formula() == crate::pirls::ScoreFormula::GamFit5;
 
             let t_grad = Instant::now();
             let gradient = if self.mgcv_exact_score {
-                if use_ift {
+                if matches!(self.family, crate::pirls::Family::TDist { .. }) {
+                    reml_gradient_gamfit4_tdist_analytic(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        self.y_original.as_ref().unwrap_or(&y_local),
+                        self.family,
+                    )?
+                } else if use_fd_for_score_formula {
+                    reml_gradient_finite_diff(
+                        self,
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        &mut pirls_callback,
+                    )?
+                } else if use_ift {
                     reml_gradient_mgcv_exact_ift(
                         &y_local,
                         x,
@@ -968,7 +1083,29 @@ impl SmoothingParameter {
 
             let t_hess = Instant::now();
             let mut hessian = if self.mgcv_exact_score {
-                if use_ift {
+                if matches!(self.family, crate::pirls::Family::TDist { .. }) {
+                    reml_hessian_gamfit4_tdist_analytic(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        self.y_original.as_ref().unwrap_or(&y_local),
+                        self.family,
+                    )?
+                } else if use_fd_for_score_formula {
+                    reml_hessian_finite_diff(
+                        self,
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        &mut pirls_callback,
+                    )?
+                } else if use_ift {
                     reml_hessian_mgcv_exact_ift(
                         &y_local,
                         x,
@@ -1178,7 +1315,7 @@ impl SmoothingParameter {
             // mgcv safeguard (line 1432): ensure at least one dim is active.
             let active = if active.is_empty() {
                 let argmax = (0..m)
-                    .max_by(|&a, &b| gradient[a].abs().partial_cmp(&gradient[b].abs()).unwrap())
+                    .max_by(|&a, &b| gradient[a].abs().total_cmp(&gradient[b].abs()))
                     .unwrap_or(0);
                 vec![argmax]
             } else {
@@ -1627,6 +1764,13 @@ impl SmoothingParameter {
                     self.tweedie_theta = accepted_theta;
                     let new_p = tw_theta_to_p(accepted_theta).max(1.001).min(1.999);
                     self.family = crate::pirls::Family::Tweedie { p: new_p };
+                    // Sync the closure-side cell so the next iter's PIRLS
+                    // refresh callback sees the freshly profiled p.
+                    if let Some(cell) = self.family_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = self.family;
+                        }
+                    }
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
@@ -1699,6 +1843,13 @@ impl SmoothingParameter {
                     self.negbin_log_theta = accepted_lt;
                     let new_theta = accepted_lt.exp().max(0.5_f64).min(50.0_f64);
                     self.family = crate::pirls::Family::NegBin { theta: new_theta };
+                    // Sync the closure-side cell so the next iter's PIRLS
+                    // refresh callback sees the freshly profiled θ.
+                    if let Some(cell) = self.family_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = self.family;
+                        }
+                    }
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
@@ -1711,38 +1862,36 @@ impl SmoothingParameter {
             // End of NegBin profile-θ step
 
             // -----------------------------------------------------------------------
-            // scat (TDist) profile-df: Newton step on log(df) at the OUTER level,
-            // joint with ρ. Mirrors the Tweedie p / NegBin θ pattern. PIRLS keeps
-            // its inner σ² profiling (method-of-moments at converged β) — only
-            // df is moved here.
+            // scat (TDist) profile-shape: joint Newton on (log σ², log df).
             //
-            // Currently df is profiled INSIDE fit_pirls_tdist via 1D Brent on
-            // the profile log-likelihood. That's a partial LAML — joint with
-            // λ via the inner-loop coupling, but not with the closed-form REML
-            // gradient the outer Newton uses. Profiling at the outer level
-            // (this block) closes that gap, mirroring how Tweedie p closes the
-            // analogous gap there.
+            // This is the first gam.fit5-style structural port: each finite-
+            // difference shape trial publishes the trial family into
+            // `family_cell`, refits β through the PIRLS callback at the current
+            // λ, then evaluates the LAML score using the refreshed β/w/X'WX.
+            // That replaces the previous frozen-β sequential σ²-then-df steps.
             // -----------------------------------------------------------------------
             if self.tdist_profile {
+                let log_sigma2 = self.tdist_log_sigma2;
                 let log_df = self.tdist_log_df;
-                let h_th: f64 = 1e-3;
                 let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+                let log_sigma2_lo = self.tdist_log_sigma2_lo;
+                let log_sigma2_hi = self.tdist_log_sigma2_hi;
+                let log_df_lo = 1e-8_f64.ln();
+                let log_df_hi = (100.0_f64 - 2.0).ln();
 
-                // Helper: σ² at the family — read it back so trial REML score
-                // sees the same σ² the inner PIRLS just landed on.
-                let current_sigma2 = match self.family {
-                    crate::pirls::Family::TDist { sigma2, .. } => sigma2,
-                    _ => 1.0,
-                };
-
-                macro_rules! tdist_eval {
-                    ($lt_trial:expr) => {{
-                        let lt_trial: f64 = $lt_trial;
-                        let df_trial = lt_trial.exp().max(2.0_f64).min(100.0_f64);
+                macro_rules! shape_eval {
+                    ($ls_trial:expr, $ld_trial:expr) => {{
+                        let ls_trial = ($ls_trial).max(log_sigma2_lo).min(log_sigma2_hi);
+                        let ld_trial = ($ld_trial).max(log_df_lo).min(log_df_hi);
                         let trial_fam = crate::pirls::Family::TDist {
-                            df: df_trial,
-                            sigma2: current_sigma2,
+                            df: (ld_trial.exp() + 2.0).max(2.0_f64).min(100.0_f64),
+                            sigma2: ls_trial.exp().max(1e-8_f64).min(1e8_f64),
                         };
+                        if let Some(cell) = self.family_cell.as_ref() {
+                            if let Ok(mut g) = cell.lock() {
+                                *g = trial_fam;
+                            }
+                        }
                         dispatch_reml_score_with_family(
                             self,
                             &y_local,
@@ -1756,52 +1905,88 @@ impl SmoothingParameter {
                     }};
                 }
 
-                let reml_center = tdist_eval!(log_df);
-                let reml_plus = tdist_eval!(log_df + h_th);
-                let reml_minus = tdist_eval!(log_df - h_th);
+                let sc = shape_eval!(log_sigma2, log_df);
+                let deriv = tdist_shape_derivatives_gamfit4(
+                    self.y_original.as_ref().unwrap_or(&y_local),
+                    &y_local,
+                    x,
+                    &w_local,
+                    &current_lambdas,
+                    penalties,
+                    Some(&xtwx_local),
+                    self.family,
+                );
 
-                if let (Ok(rc), Ok(rp), Ok(rm)) = (reml_center, reml_plus, reml_minus) {
-                    let dlr_dlt = (rp - rm) / (2.0 * h_th);
-                    let d2lr_dlt2 = (rp - 2.0 * rc + rm) / (h_th * h_th);
+                if let (Ok(sc), Ok((shape_grad, shape_hess))) = (sc, deriv) {
+                    let g_s = shape_grad[0];
+                    let g_d = shape_grad[1];
+                    let h_ss = shape_hess[[0, 0]];
+                    let h_dd = shape_hess[[1, 1]];
+                    let h_sd = shape_hess[[0, 1]];
+                    let det = h_ss * h_dd - h_sd * h_sd;
 
-                    let denom = d2lr_dlt2.abs().max(1e-4);
-                    let delta_lt = -(dlr_dlt / denom);
-                    // Wider clamp than NegBin's [-0.5, 0.5] since df can move
-                    // through 1-2 decades during convergence on heavy-tailed
-                    // data; bound to [-1, 1] (≈ 2.7× per iteration max).
-                    let delta_lt = delta_lt.max(-1.0_f64).min(1.0_f64);
+                    let (mut delta_s, mut delta_d) = if det.abs() > 1e-8 && det.is_finite() {
+                        ((-h_dd * g_s + h_sd * g_d) / det, (h_sd * g_s - h_ss * g_d) / det)
+                    } else {
+                        (
+                            -g_s / h_ss.abs().max(1e-4),
+                            -g_d / h_dd.abs().max(1e-4),
+                        )
+                    };
+                    let max_abs = delta_s.abs().max(delta_d.abs());
+                    if max_abs > 1.0 {
+                        delta_s /= max_abs;
+                        delta_d /= max_abs;
+                    }
 
-                    let mut accepted_lt = log_df;
-                    let candidate = log_df + delta_lt;
-                    if let Ok(r_new) = tdist_eval!(candidate) {
-                        if r_new < rc {
-                            accepted_lt = candidate;
-                        } else {
-                            let half_cand = log_df + delta_lt * 0.5;
-                            if let Ok(r_half) = tdist_eval!(half_cand) {
-                                if r_half < rc {
-                                    accepted_lt = half_cand;
-                                }
+                    let mut accepted_s = log_sigma2;
+                    let mut accepted_d = log_df;
+                    let mut step_scale = 1.0;
+                    for _ in 0..8 {
+                        let cand_s = (log_sigma2 + step_scale * delta_s)
+                            .max(log_sigma2_lo)
+                            .min(log_sigma2_hi);
+                        let cand_d = (log_df + step_scale * delta_d)
+                            .max(log_df_lo)
+                            .min(log_df_hi);
+                        if let Ok(s_new) = shape_eval!(cand_s, cand_d) {
+                            if s_new < sc {
+                                accepted_s = cand_s;
+                                accepted_d = cand_d;
+                                break;
                             }
+                        }
+                        step_scale *= 0.5;
+                    }
+
+                    self.tdist_log_sigma2 = accepted_s;
+                    self.tdist_log_df = accepted_d;
+                    self.family = crate::pirls::Family::TDist {
+                        df: (accepted_d.exp() + 2.0).max(2.0_f64).min(100.0_f64),
+                        sigma2: accepted_s.exp().max(1e-8_f64).min(1e8_f64),
+                    };
+                    if let Some(cell) = self.family_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = self.family;
                         }
                     }
 
-                    self.tdist_log_df = accepted_lt;
-                    let new_df = accepted_lt.exp().max(2.0_f64).min(100.0_f64);
-                    self.family = crate::pirls::Family::TDist {
-                        df: new_df,
-                        sigma2: current_sigma2,
-                    };
-
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
-                            "[PROFILE]   scat profile-df: log_df {:.4}→{:.4} df={:.4} dlr/d(log_df)={:.4e}",
-                            log_df, accepted_lt, new_df, dlr_dlt
+                            "[PROFILE]   scat joint shape: log_σ² {:.4}→{:.4} σ²={:.6}; theta_df {:.4}→{:.4} df={:.4}; grad=({:.3e},{:.3e})",
+                            log_sigma2,
+                            accepted_s,
+                            accepted_s.exp(),
+                            log_df,
+                            accepted_d,
+                            accepted_d.exp() + 2.0,
+                            g_s,
+                            g_d,
                         );
                     }
                 }
             }
-            // End of scat (TDist) profile-df step
+            // End of scat (TDist) joint profile-shape step
         }
 
         // Update final lambdas

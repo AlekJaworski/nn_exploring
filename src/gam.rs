@@ -511,6 +511,10 @@ pub struct GAM {
     /// Newton step on log(θ) (mgcv's `nb()` extended family). Default false
     /// means fixed-θ (`negbin(theta=...)` family).
     pub negbin_profile: bool,
+    /// When true, scat (TDist) df and σ² are profiled by the outer LAML path
+    /// (mgcv's `scat()` family with no fixed df). Default false means fixed-df
+    /// / legacy inner σ² profiling.
+    pub tdist_profile: bool,
     /// REML / LAML score at the converged fit. Populated by store_results
     /// using the same dispatch_reml_score path that the outer optimizer
     /// uses, so it's a consistent objective value across families.
@@ -534,6 +538,7 @@ impl GAM {
             mgcv_exact: false,
             tweedie_profile: false,
             negbin_profile: false,
+            tdist_profile: false,
             reml_score: None,
         }
     }

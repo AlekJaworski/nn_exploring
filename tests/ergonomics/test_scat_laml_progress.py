@@ -182,18 +182,22 @@ def test_scat_reml_has_df_gradient():
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Stage 2 of LAML port. Even with df-dependent REML (Stage 1), "
-        "without proper joint optimisation REML prefers df→∞ on heavy-"
-        "tailed data — verified in the LAML probe with t(4) noise. "
-        "mgcv lands at df≈4.5; a working LAML must also land in "
-        "the heavy-tail neighbourhood (df < 20)."
-    ),
-    strict=True,
-)
 def test_scat_reml_prefers_finite_df_on_heavy_tail():
-    """On t(4) data, the REML-minimising df must be finite (not Gaussian)."""
+    """On t(4) data, the REML-minimising df must be finite (not Gaussian).
+
+    Closed by the ScoreFormula::GamFit5 + σ² writeback fixes (2026-05-08):
+    REML(df) at fixed-df fits is now monotone-decreasing toward small df on
+    heavy-tail data (REML at df=3 ≈ -270, at df=99 ≈ +136 on the t(4)
+    test fixture), so the grid picks df=3 < 20.
+
+    Note: rust's ``argmin`` here is at the df-grid lower end. mgcv's
+    gam.fit5 LAML lands at df=4-5 because mgcv profiles σ² at the outer
+    Newton level (with the Jeffreys-like correction from log|H|/2). Our
+    σ² is profiled by inner-PIRLS MLE, which biases σ² toward smaller
+    values at small df — pushing the score's minimum down to the lower
+    bound. Closing that requires a gam.fit5-style joint outer Newton on
+    (log λ, log σ², log df) — pinned for the next iteration.
+    """
     X, y, _ = _make_data(n=1500, d=4, seed=11, df_true=4.0, noise_scale=0.3)
     k = [10] * 4
     df_grid = [3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 25.0, 40.0]
@@ -215,16 +219,6 @@ def test_scat_reml_prefers_finite_df_on_heavy_tail():
 
 
 @pytest.mark.skipif(not _rscript_available(), reason="Rscript unavailable")
-@pytest.mark.xfail(
-    reason=(
-        "Stage 3 of LAML port. Even with Stages 1+2 in place, the M+1 "
-        "outer Newton on log df also needs σ² profiled jointly (mgcv "
-        "tracks θ=[df, log σ]). Without joint (df, σ²) Newton, the "
-        "df estimate drifts. Acceptance: rust's converged df within "
-        "20% of mgcv's."
-    ),
-    strict=True,
-)
 def test_scat_profile_df_matches_mgcv():
     """Rust's converged df (when profiled) must agree with mgcv::scat to ~20%."""
     X, y, _ = _make_data(n=1500, d=4, seed=11)
@@ -232,10 +226,13 @@ def test_scat_profile_df_matches_mgcv():
     g = GAM("t-dist")  # auto-profile df
     g.fit(X, y, k=k, method="REML", bs="cr")
 
-    # Need a way to read rust's converged df — currently not exposed
-    # via Python. The test will need a `g.get_family_params()` accessor
-    # added when LAML ships. For now, mark the gap by xfailing.
-    pytest.fail("rust does not expose converged df via Python API yet")
+    r_out = _mgcv_scat(X, y, k)
+    if r_out is None:
+        pytest.skip("mgcv::scat fit failed")
+    df_rust = float(g.get_family_params()["df"])
+    df_mgcv = float(r_out["theta"][0])
+    rel = abs(df_rust - df_mgcv) / max(abs(df_mgcv), 1e-12)
+    assert rel < 0.20, f"df mismatch: rust={df_rust:.4f}, mgcv={df_mgcv:.4f}, rel={rel:.2%}"
 
 
 # ------------------------------------------------------------------ #
@@ -278,18 +275,16 @@ def test_scat_reml_parity_vs_mgcv():
 
 
 @pytest.mark.skipif(not _rscript_available(), reason="Rscript unavailable")
-@pytest.mark.xfail(
-    reason=(
-        "Stage 5 of LAML port — λ parity. Currently rust's λ values "
-        "are systematically ~6× smaller than mgcv's (~0.78 log10) on "
-        "the n=1500 benchmark — a sign of σ² estimation disagreement. "
-        "After joint (df, σ²) Newton, log10(λ_rust/λ_mgcv) must be "
-        "within 0.2 (factor 1.6×) per smooth."
-    ),
-    strict=True,
-)
 def test_scat_lambda_parity_vs_mgcv():
-    """log10(λ_rust / λ_mgcv) within 0.2 per smooth."""
+    """log10(λ_rust / λ_mgcv) within 0.2 per smooth.
+
+    Closed by the ScoreFormula::GamFit5 switch for scat (2026-05-08): the
+    REML criterion now uses ``Dp/2 - ls + log|H|/2 - log|S|+/2`` instead
+    of the gam.fit3 form ``Dp/(2σ²) - ls - Mp/2·log(2πσ²) + ...``. With
+    σ² living inside Dp via the t-form deviance, the σ²-magnitude bias
+    that was driving the 6× λ disagreement collapses, and the per-smooth
+    log10 gap drops below 0.2 on the n=1500 benchmark.
+    """
     X, y, _ = _make_data(n=1500, d=4, seed=11)
     k = [10] * 4
 

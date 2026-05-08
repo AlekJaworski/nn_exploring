@@ -184,12 +184,11 @@ impl PyGAM {
             // Quasi-Binomial: same as Binomial but with profiled dispersion φ̂.
             (Some("quasibinomial"), None) | (Some("quasibinomial"), Some("logit")) => Family::QuasiBinomial,
             // Scaled t-distribution (mgcv's scat family). Identity link only.
-            // df = 0.0 encodes "profile df"; df > 0 = user-fixed.
-            // scat is mgcv's name for the scaled-t family; accept both.
+            // df=None ⟹ mgcv scat-style profiling, seeded at ν=5 and driven
+            // by the outer gam.fit5-style LAML path. df=Some(_) stays fixed.
             (Some("t-dist") | Some("scat"), None)
             | (Some("t-dist") | Some("scat"), Some("identity")) => {
-                let fixed_df = df.unwrap_or(0.0); // 0.0 = profile
-                Family::TDist { df: fixed_df, sigma2: 1.0 }
+                Family::TDist { df: df.unwrap_or(5.0), sigma2: 1.0 }
             }
             // Inverse Gaussian with log link.
             (Some("inverse.gaussian") | Some("inverse_gaussian"), Some("log") | None) => {
@@ -279,6 +278,11 @@ impl PyGAM {
         // Fixed-θ mode uses family="negbin" with optional theta kwarg.
         if matches!(family, Some("nb")) {
             g.negbin_profile = true;
+        }
+        // Profile df/σ² for scat when df was not user-supplied. User-fixed
+        // df keeps the historical fixed-df path.
+        if matches!(fam, Family::TDist { .. }) && df.is_none() {
+            g.tdist_profile = true;
         }
         Ok(PyGAM { inner: g, mgcv_exact: exact })
     }
@@ -758,6 +762,42 @@ impl PyGAM {
             Family::NegBin { .. } => "log",
             Family::Quantile { .. } => "identity",
         }
+    }
+
+    /// Get the converged family-shape parameters as a dict.
+    ///
+    /// For families with profile-able shape parameters (TDist, NegBin,
+    /// Tweedie, Quantile), returns the *current* values stored on the
+    /// family enum — which after `fit()` are the converged values. For
+    /// scale-only families (Gaussian, Binomial, Poisson, etc.) returns
+    /// an empty dict.
+    ///
+    /// Keys per family:
+    ///   - TDist:    {"df", "sigma2"}
+    ///   - NegBin:   {"theta"}
+    ///   - Tweedie:  {"p"}
+    ///   - Quantile: {"tau", "sigma"}
+    ///   - others:   {} (empty)
+    fn get_family_params<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        let dict = pyo3::types::PyDict::new(py);
+        match self.inner.family {
+            Family::TDist { df, sigma2 } => {
+                dict.set_item("df", df)?;
+                dict.set_item("sigma2", sigma2)?;
+            }
+            Family::NegBin { theta } => {
+                dict.set_item("theta", theta)?;
+            }
+            Family::Tweedie { p } => {
+                dict.set_item("p", p)?;
+            }
+            Family::Quantile { tau, sigma } => {
+                dict.set_item("tau", tau)?;
+                dict.set_item("sigma", sigma)?;
+            }
+            _ => {}
+        }
+        Ok(dict.into())
     }
 
     /// Get the fitted coefficients
