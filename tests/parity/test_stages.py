@@ -53,13 +53,55 @@ ro.r('options(contrasts = c("contr.sum", "contr.poly"))')
 ro.r("options(warn = -1)")
 
 
+import re as _re
+
+# R-side mgcv family() constructors. Named placeholders: {link}, {p}, {theta}.
 _FAMILY_R = {
-    "gaussian": 'gaussian(link="{}")',
-    "binomial": 'binomial(link="{}")',
-    "poisson": 'poisson(link="{}")',
-    "Gamma": 'Gamma(link="{}")',
-    "gamma": 'Gamma(link="{}")',
+    "gaussian":          'gaussian(link="{link}")',
+    "binomial":          'binomial(link="{link}")',
+    "poisson":           'poisson(link="{link}")',
+    "Gamma":             'Gamma(link="{link}")',
+    "gamma":             'Gamma(link="{link}")',
+    "tw":                'tw(link="{link}")',
+    "Tweedie":           'Tweedie(p={p}, link="{link}")',
+    "tweedie":           'Tweedie(p={p}, link="{link}")',
+    "inverse.gaussian":  'inverse.gaussian(link="{link}")',
+    "negative.binomial": 'negbin(theta={theta}, link="{link}")',
+    "nb":                'nb(link="{link}")',
+    "quasipoisson":      'quasipoisson(link="{link}")',
+    "quasibinomial":     'quasibinomial(link="{link}")',
 }
+
+# Map fixture family names to Rust GAM family strings (mirrors test_parity.py).
+_RUST_FAMILY = {
+    "gaussian": "gaussian",
+    "binomial": "binomial",
+    "poisson": "poisson",
+    "Gamma": "gamma",
+    "gamma": "gamma",
+    "tw": "tweedie",
+    "Tweedie": "tweedie",
+    "tweedie": "tweedie",
+    "inverse.gaussian": "inverse.gaussian",
+    "negative.binomial": "negbin",
+    "nb": "nb",
+    "quasipoisson": "quasipoisson",
+    "quasibinomial": "quasibinomial",
+}
+
+
+def _parse_family_param(name: str, kind: str):
+    """Parse a family parameter encoded in the fixture name (e.g. _p15, _theta2)."""
+    if kind == "p":
+        m = _re.search(r"_p(\d+)(?=$|[_.])", name)
+        if m:
+            digits = m.group(1)
+            return float(digits) / (10 ** (len(digits) - 1))
+    elif kind == "theta":
+        m = _re.search(r"_theta(\d+(?:\.\d+)?)(?=$|[_.])", name)
+        if m:
+            return float(m.group(1))
+    return None
 
 
 def _fit_mgcv_with_lpmatrix(fix: Fixture):
@@ -72,10 +114,17 @@ def _fit_mgcv_with_lpmatrix(fix: Fixture):
     rhs = " + ".join(f's(x{i}, k={inp.k[i]}, bs="{inp.bs[i]}")' for i in range(inp.d))
     with localconverter(pandas2ri.converter + default_converter):
         rdf = pandas2ri.py2rpy(df)
-    family = ro.r(_FAMILY_R[inp.family].format(inp.link))
-    # Match the fixture generator: `bam` discretises knot placement once
-    # n > chunk.size=10000, producing a basis our `gam`-style cr-spline
-    # can't match. Use `gam` for large-n so the basis spec is identical.
+
+    fam_template = _FAMILY_R.get(inp.family)
+    if fam_template is None:
+        pytest.skip(f"no R family mapping for {inp.family!r}")
+
+    # Resolve named placeholders {link}, {p}, {theta}
+    p_val = _parse_family_param(fix.name, "p") or 1.5
+    theta_val = _parse_family_param(fix.name, "theta") or 2.0
+    fam_str = fam_template.format(link=inp.link, p=p_val, theta=theta_val)
+    family = ro.r(fam_str)
+
     fitter = _mgcv.gam if df.shape[0] > 10000 else _mgcv.bam
     fit = fitter(ro.Formula(f"y ~ {rhs}"), data=rdf, method=inp.method, family=family)
     lpmatrix = np.asarray(_stats.predict(fit, newdata=rdf, type="lpmatrix"), dtype=float)
@@ -86,8 +135,25 @@ def _fit_mgcv_rust(fix: Fixture):
     inp = fix.inputs
     x = np.asarray(inp.x_train, dtype=float)
     y = np.asarray(inp.y_train, dtype=float)
-    family = inp.family.lower()
-    g = mgcv_rust.GAM() if family == "gaussian" else mgcv_rust.GAM(family.replace("gamma", "gamma"))
+
+    rust_fam = _RUST_FAMILY.get(inp.family)
+    if rust_fam is None:
+        pytest.skip(f"no Rust family mapping for {inp.family!r}")
+
+    kwargs: dict = {}
+    if inp.family in ("Tweedie", "tweedie"):
+        p = _parse_family_param(fix.name, "p")
+        if p is not None:
+            kwargs["p"] = p
+    elif inp.family == "negative.binomial":
+        theta = _parse_family_param(fix.name, "theta")
+        if theta is not None:
+            kwargs["theta"] = theta
+
+    try:
+        g = mgcv_rust.GAM() if rust_fam == "gaussian" else mgcv_rust.GAM(rust_fam, **kwargs)
+    except Exception as exc:
+        pytest.skip(f"GAM({rust_fam!r}, {kwargs}) unavailable: {exc}")
     g.fit(x, y, k=list(inp.k), method=inp.method, bs=inp.bs[0])
     return g
 

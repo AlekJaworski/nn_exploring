@@ -137,45 +137,38 @@ def test_gradient_zero_at_mgcv_optimum(fix_path, fix_data) -> None:
     )
 
 
-def _fd_hessian(g, y, lambdas, h=1e-2):
-    """Central-difference Hessian of the mgcv-exact REML in log-λ space.
+def _fd_hessian(g, y, lambdas, h=1e-3):
+    """FD Hessian via central differences of the closed-form gradient.
 
-    H_ii = [r(+h_i) - 2 r(0) + r(-h_i)] / h²    (second central diff)
-    H_ij = [r(++) - r(+-) - r(-+) + r(--)] / (4 h²)   off-diagonal
+    H[:, j] = (grad(λ * exp(+h_j)) - grad(λ * exp(-h_j))) / (2h)
 
-    Default h=1e-2 (more conservative than the gradient's h=1e-3) because
-    Hessian's 1/h² amplifies rounding noise. For very extreme λ values
-    (λ ≳ 1e7 — only 1d_near_linear's optimum) even h=1e-2 isn't enough;
-    those cases are excluded from FD comparison and validated via
-    `test_closed_form_hessian_symmetric` + the gradient tests instead.
+    Using gradient differences (not 2nd differences of the score) because:
+    - Both the gradient and the CF Hessian treat σ² = RSS/(n-trA) as a
+      plug-in constant (gam.fit3.r:625 convention).
+    - The score function re-profiles σ² at every λ point, so 2nd
+      differences of the score capture σ²-chain terms that the CF
+      Hessian deliberately omits. This makes them systematically
+      disagree on off-diagonal entries in multi-smooth models.
+    - Gradient-based FD has O(h²) truncation (vs O(h²) for 2nd-diff) but
+      avoids the 1/h² rounding amplification that the 2nd-difference
+      formula suffers at large h, and matches the σ² convention exactly.
     """
     log_l = np.log(np.asarray(lambdas, dtype=float))
     m = len(log_l)
-    r0 = g.evaluate_reml_mgcv_formula(y, list(np.exp(log_l)))
-    r_plus = np.zeros(m)
-    r_minus = np.zeros(m)
-    for i in range(m):
-        lp = log_l.copy(); lp[i] += h
-        lm = log_l.copy(); lm[i] -= h
-        r_plus[i] = g.evaluate_reml_mgcv_formula(y, list(np.exp(lp)))
-        r_minus[i] = g.evaluate_reml_mgcv_formula(y, list(np.exp(lm)))
     H = np.zeros((m, m))
-    for i in range(m):
-        H[i, i] = (r_plus[i] - 2 * r0 + r_minus[i]) / (h * h)
-    for i in range(m):
-        for j in range(i + 1, m):
-            lpp = log_l.copy(); lpp[i] += h; lpp[j] += h
-            lpm = log_l.copy(); lpm[i] += h; lpm[j] -= h
-            lmp = log_l.copy(); lmp[i] -= h; lmp[j] += h
-            lmm = log_l.copy(); lmm[i] -= h; lmm[j] -= h
-            rpp = g.evaluate_reml_mgcv_formula(y, list(np.exp(lpp)))
-            rpm = g.evaluate_reml_mgcv_formula(y, list(np.exp(lpm)))
-            rmp = g.evaluate_reml_mgcv_formula(y, list(np.exp(lmp)))
-            rmm = g.evaluate_reml_mgcv_formula(y, list(np.exp(lmm)))
-            off = (rpp - rpm - rmp + rmm) / (4 * h * h)
-            H[i, j] = off
-            H[j, i] = off
-    return H
+    for j in range(m):
+        lp = log_l.copy(); lp[j] += h
+        lm = log_l.copy(); lm[j] -= h
+        gp = np.asarray(
+            g.evaluate_reml_gradient_closed_form(y, list(np.exp(lp))), dtype=float
+        )
+        gm = np.asarray(
+            g.evaluate_reml_gradient_closed_form(y, list(np.exp(lm))), dtype=float
+        )
+        H[:, j] = (gp - gm) / (2 * h)
+    # Symmetrize: H[i,j] and H[j,i] are both estimates of the same second
+    # derivative; averaging suppresses FD truncation asymmetry.
+    return (H + H.T) / 2.0
 
 
 @pytest.mark.parametrize(
@@ -185,22 +178,17 @@ def _fd_hessian(g, y, lambdas, h=1e-2):
 )
 def test_closed_form_hessian_matches_fd(fix_path, fix_data) -> None:
     """At mgcv's converged λ, the closed-form Hessian should agree with
-    the finite-difference Hessian. Both compute the second derivative
-    of the mgcv-exact REML score (treating σ² as constant per
+    the FD Hessian computed from central differences of the closed-form
+    gradient (both treat σ² = RSS/(n-trA) as constant per
     gam.fit3.r:625's profile-REML convention).
 
-    Skips cases where mgcv's optimal λ is so large (≳1e6) that
-    second-difference FD goes haywire — those are validated via
-    `test_closed_form_hessian_symmetric` and the gradient tests.
+    Note: `_fd_hessian` uses gradient differences (not 2nd differences of
+    the score) because the score re-profiles σ² at every λ, adding σ²-chain
+    cross-terms that the CF Hessian deliberately omits. See `_fd_hessian`
+    docstring for the full rationale.
     """
     inp = fix_data["inputs"]
     out = fix_data["mgcv_output"]
-    if max(out["lambda"]) > 1.0e6:
-        pytest.skip(
-            f"FD Hessian unreliable at extreme λ={max(out['lambda']):.2e} "
-            f"(catastrophic cancellation in 1/h² subtractive cancellation); "
-            f"closed-form is verified via symmetry + gradient tests."
-        )
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
@@ -211,16 +199,16 @@ def test_closed_form_hessian_matches_fd(fix_path, fix_data) -> None:
     fd = _fd_hessian(g, y, lam)
 
     diff = np.abs(cf - fd)
-    scale = np.maximum(np.abs(fd), 1e-3)
-    rel = diff / scale
-    # FD Hessian has truncation O(h²) and rounding O(score_mag·ε/h²)
-    # — at h=1e-3 with score~100 and ε~1e-15, rounding ~1e-9 per entry.
-    # Accept rel < 5% OR abs < 1e-2 (saturating dims have small Hessian
-    # entries with proportionally noisy FD).
-    assert rel.max() < 5e-2 or diff.max() < 1e-2, (
+    # Relative error clamped to the Frobenius-scale of fd so tiny near-zero
+    # entries don't inflate rel (e.g. a true value of 1e-4 with FD noise 1e-4
+    # would give 100% relative but is numerically irrelevant vs diagonal ~3).
+    frob = max(np.linalg.norm(fd), 1e-3)
+    rel = diff / frob
+    # Accept < 1% of Frobenius norm OR absolute < 2e-3.
+    assert rel.max() < 1e-2 or diff.max() < 2e-3, (
         f"closed-form vs FD Hessian mismatch on {fix_path.stem}:\n"
         f"  cf=\n{cf}\n  fd=\n{fd}\n  max_absdiff={diff.max():.3e}, "
-        f"max_relerr={rel.max():.3e}"
+        f"max_frob_relerr={rel.max():.3e}"
     )
 
 

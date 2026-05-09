@@ -1612,9 +1612,17 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         .map(|(l, pen)| l * pen.quadratic_form(&beta))
         .sum();
     let dp_for_phi = dev_numerator + bsb_total_for_phi;
+    // σ² convention: Gaussian and IFT use RSS/(n-trA) so that the IFT
+    // gradient and the envelope gradient differentiate the same REML score
+    // with the same plug-in σ² (gam.fit3.r:625 convention). For non-Gaussian
+    // families, use estimate_phi_mgcv (dp/(n-mp)) which is the correct
+    // profiled dispersion for extended-family REML.
     let scale_est = match family {
         crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
         | crate::pirls::Family::NegBin { .. } => 1.0,
+        crate::pirls::Family::Gaussian => {
+            dev_numerator / ((n as f64) - tr_a).max(1e-10)
+        }
         _ => {
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
             family.estimate_phi_mgcv(y_for_grad, dp_for_phi, mp, 1.0, phi_init)
