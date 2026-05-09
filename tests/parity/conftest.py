@@ -113,7 +113,6 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
         "2d_gamma_inverse_n1000_k10_cr": _GAMMA_INVERSE_GAP_REASON,
         "2d_binomial_logit_n200_k10_cr": _BINOMIAL_LOGIT_SMALL_N_GAP_REASON,
         "2d_invgauss_log_n800_k10_cr": _INVGAUSS_V1_REASON,
-        "2d_nb_profile_log_n1000_k10_cr": _NB_PROFILE_V1_REASON,
     },
 }
 
