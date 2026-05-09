@@ -1073,6 +1073,115 @@ impl PyGAM {
         Ok(numpy::PyArray1::from_owned_array(py, grad))
     }
 
+    /// Like `evaluate_reml_gradient_closed_form` but with a caller-pinned σ².
+    /// Useful for FD-Hessian verification: fixes σ² at the base-point value so
+    /// FD and CF differentiate exactly the same function.
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_gradient_closed_form_fixed_sigma2<'py>(
+        &self,
+        py: Python<'py>,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+        fixed_sigma2: f64,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+        let y_array = y.as_array().to_owned();
+        let grad = crate::reml::reml_gradient_mgcv_exact_closed_form_fixed_sigma2(
+            &y_array,
+            design_matrix,
+            weights,
+            &lambdas,
+            &penalties,
+            None,
+            self.inner.family,
+            fixed_sigma2,
+        )
+        .map_err(|e| PyValueError::new_err(format!("gradient fixed-σ² failed: {}", e)))?;
+        Ok(numpy::PyArray1::from_owned_array(py, grad))
+    }
+
+    /// Returns the plug-in σ² = RSS/(n-trA) that `evaluate_reml_gradient_closed_form`
+    /// would use at these λ values. Call this once at the base λ and pass
+    /// the result to `evaluate_reml_gradient_closed_form_fixed_sigma2` for FD
+    /// Hessian verification.
+    #[cfg(feature = "blas")]
+    fn evaluate_scale_at_lambdas(&self, y: PyReadonlyArray1<f64>, lambdas: Vec<f64>) -> PyResult<f64> {
+        use crate::reml::{compute_xtwx, compute_xtwy};
+        use crate::linalg::{solve, inverse};
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let weights_arr;
+        let weights: &ndarray::Array1<f64> = match self.inner.weights.as_ref() {
+            Some(w) => w,
+            None => {
+                weights_arr = ndarray::Array1::ones(design_matrix.nrows());
+                &weights_arr
+            }
+        };
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            penalties.push(crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            ));
+            col_offset += nb;
+        }
+        let y_array = y.as_array().to_owned();
+        let n = y_array.len();
+        let xtwx = compute_xtwx(design_matrix, weights);
+        let mut a = xtwx.clone();
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            penalty.scaled_add_to(&mut a, *lambda);
+        }
+        let xtwy = compute_xtwy(design_matrix, weights, &y_array);
+        let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+        let mut a_solve = a.clone();
+        a_solve.diag_mut().iter_mut().for_each(|d| *d += 1e-12 * max_diag);
+        let beta = solve(a_solve, xtwy)
+            .map_err(|e| PyValueError::new_err(format!("solve failed: {}", e)))?;
+        let fitted = design_matrix.dot(&beta);
+        let rss: f64 = y_array.iter()
+            .zip(fitted.iter())
+            .zip(weights.iter())
+            .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+            .sum();
+        let a_inv = inverse(&a)
+            .map_err(|e| PyValueError::new_err(format!("inverse failed: {}", e)))?;
+        let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+        Ok(rss / ((n as f64) - tr_a).max(1e-10))
+    }
+
     /// IFT-based gradient of the mgcv-exact REML score at the given λ.
     /// Pass `y_original=Some(y_orig)` to enable the GLM-deviance form
     /// (matches mgcv's gdi.c::ift1 + gdi1 path); pass None to fall

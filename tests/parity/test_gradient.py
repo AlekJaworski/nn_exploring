@@ -140,19 +140,16 @@ def test_gradient_zero_at_mgcv_optimum(fix_path, fix_data) -> None:
 def _fd_hessian(g, y, lambdas, h=1e-3):
     """FD Hessian via central differences of the closed-form gradient.
 
-    H[:, j] = (grad(λ * exp(+h_j)) - grad(λ * exp(-h_j))) / (2h)
+    H[:, j] = (grad_fixed_σ²(λ * exp(+h_j)) - grad_fixed_σ²(λ * exp(-h_j))) / (2h)
 
-    Using gradient differences (not 2nd differences of the score) because:
-    - Both the gradient and the CF Hessian treat σ² = RSS/(n-trA) as a
-      plug-in constant (gam.fit3.r:625 convention).
-    - The score function re-profiles σ² at every λ point, so 2nd
-      differences of the score capture σ²-chain terms that the CF
-      Hessian deliberately omits. This makes them systematically
-      disagree on off-diagonal entries in multi-smooth models.
-    - Gradient-based FD has O(h²) truncation (vs O(h²) for 2nd-diff) but
-      avoids the 1/h² rounding amplification that the 2nd-difference
-      formula suffers at large h, and matches the σ² convention exactly.
+    Uses `evaluate_reml_gradient_closed_form_fixed_sigma2` with σ² pinned to
+    its value at the base λ. This makes FD and the CF Hessian differentiate
+    exactly the same function (both treat σ² as constant at the base point),
+    eliminating the σ²-chain cross-terms that would otherwise cause systematic
+    disagreement on off-diagonal entries.
     """
+    lambdas = list(np.asarray(lambdas, dtype=float))
+    sigma2_base = float(g.evaluate_scale_at_lambdas(y, lambdas))
     log_l = np.log(np.asarray(lambdas, dtype=float))
     m = len(log_l)
     H = np.zeros((m, m))
@@ -160,10 +157,12 @@ def _fd_hessian(g, y, lambdas, h=1e-3):
         lp = log_l.copy(); lp[j] += h
         lm = log_l.copy(); lm[j] -= h
         gp = np.asarray(
-            g.evaluate_reml_gradient_closed_form(y, list(np.exp(lp))), dtype=float
+            g.evaluate_reml_gradient_closed_form_fixed_sigma2(y, list(np.exp(lp)), sigma2_base),
+            dtype=float,
         )
         gm = np.asarray(
-            g.evaluate_reml_gradient_closed_form(y, list(np.exp(lm))), dtype=float
+            g.evaluate_reml_gradient_closed_form_fixed_sigma2(y, list(np.exp(lm)), sigma2_base),
+            dtype=float,
         )
         H[:, j] = (gp - gm) / (2 * h)
     # Symmetrize: H[i,j] and H[j,i] are both estimates of the same second

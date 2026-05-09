@@ -218,7 +218,7 @@ pub fn glm_deviance(
 }
 
 /// Compute X'Wy efficiently using BLAS
-fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
+pub fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
     let x_weighted = create_weighted_x(x, w);
 
     // Create weighted y vector: y_w[i] = sqrt(w[i]) * y[i]
@@ -661,6 +661,37 @@ pub fn reml_gradient_mgcv_exact_closed_form(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
 ) -> Result<Array1<f64>> {
+    reml_gradient_mgcv_exact_closed_form_inner(y, x, w, lambdas, penalties_blocks, cached_xtwx, family, None)
+}
+
+/// Like `reml_gradient_mgcv_exact_closed_form` but with a caller-supplied
+/// fixed σ² — used when differentiating the score at a fixed σ² base point
+/// (so FD-of-gradient and CF Hessian use the same σ² convention exactly).
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_closed_form_fixed_sigma2(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    fixed_sigma2: f64,
+) -> Result<Array1<f64>> {
+    reml_gradient_mgcv_exact_closed_form_inner(y, x, w, lambdas, penalties_blocks, cached_xtwx, family, Some(fixed_sigma2))
+}
+
+#[cfg(feature = "blas")]
+fn reml_gradient_mgcv_exact_closed_form_inner(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    fixed_scale: Option<f64>,
+) -> Result<Array1<f64>> {
     let n = y.len();
     let m = lambdas.len();
     let xtwx_owned;
@@ -698,7 +729,7 @@ pub fn reml_gradient_mgcv_exact_closed_form(
         .sum();
     let a_inv = inverse(&a)?;
     let tr_a = (xtwx.dot(&a_inv)).diag().sum();
-    let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
+    let scale_est = fixed_scale.unwrap_or_else(|| rss / ((n as f64) - tr_a).max(1e-10));
 
     // Per-smooth gradient
     let mut grad = Array1::<f64>::zeros(m);
