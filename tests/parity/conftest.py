@@ -93,19 +93,33 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     # consistent over-smoothing across all dims; λs off by 5-15×. Real
     # algorithmic issue with the non-canonical log link in pirls.rs and the
     # REML formula path in reml.rs.
+    # All response-scale xfails are Bucket A: link-scale comparison passes
+    # at strict 1e-3 (see test_mgcv_exact_predictions_link_scale), but the
+    # inverse-link (exp / 1/μ) amplifies the η-error to 1.7e-3 to 4.6e-3 on
+    # the response scale — exceeds the 1e-3 atol on points where the link's
+    # derivative is large. Same near-zero amplification pattern resolved in
+    # test_parity (commit e3e83e6 / parity-tests note 4i) via std-floor.
     "test_mgcv_exact_predictions": {
-        # Bucket A
-        "2d_invgauss_log_n800_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        "2d_poisson_log_n5000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        "3d_poisson_log_n2000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        "2d_quasipoisson_log_n1000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        "2d_gamma_inverse_n1000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        "2d_nb_log_n1000_k10_cr_theta2": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        "2d_nb_profile_log_n1000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
-        # Bucket B
-        "2d_gamma_log_n200_k10_cr": "Bucket B: Gamma(link=log) algorithmic gap — λs off 5-15× from mgcv; needs non-canonical-link gradient audit",
-        "2d_gamma_log_n1000_k10_cr": "Bucket B: Gamma(link=log) algorithmic gap — λs off 5-15× from mgcv; needs non-canonical-link gradient audit",
-        "4d_gamma_log_n2000_k8_cr": "Bucket B: Gamma(link=log) algorithmic gap — λs off 5-15× from mgcv; needs non-canonical-link gradient audit",
+        "2d_invgauss_log_n800_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "2d_poisson_log_n5000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "3d_poisson_log_n2000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "2d_quasipoisson_log_n1000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "2d_gamma_inverse_n1000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "2d_nb_log_n1000_k10_cr_theta2": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "2d_nb_profile_log_n1000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "2d_gamma_log_n200_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+        "4d_gamma_log_n2000_k8_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
+    },
+    # Link-scale Stage-4 — Bucket D: logit binomial/quasibinomial. Pass
+    # response-scale (logit compresses near μ→0/1) but |Δη| stays at
+    # 2.3e-3 to 2.7e-3, an envelope-theorem residual at PiRLS-converged β.
+    # See parity-tests note 4q: mgcv's gdi.c:ift1 uses full IFT on the
+    # IRLS first-order condition; our envelope gradient equals the true
+    # gradient only at exact convergence.
+    "test_mgcv_exact_predictions_link_scale": {
+        "2d_binomial_logit_n1000_k10_cr": "Bucket D: logit binomial — |Δη|≈2.5e-3 envelope-theorem residual; mgcv uses full IFT (gdi.c:ift1)",
+        "2d_quasibinomial_logit_n1000_k10_cr": "Bucket D: logit quasibinomial — |Δη|≈2.3e-3 envelope-theorem residual; mgcv uses full IFT",
+        "4d_binomial_logit_n2000_k8_cr": "Bucket D: logit binomial 4d — |Δη|≈2.7e-3 envelope-theorem residual; mgcv uses full IFT",
     },
 }
 

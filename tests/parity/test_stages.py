@@ -141,6 +141,8 @@ def _fit_mgcv_rust(fix: Fixture):
         pytest.skip(f"no Rust family mapping for {inp.family!r}")
 
     kwargs: dict = {}
+    if inp.link and inp.link != "identity":
+        kwargs["link"] = inp.link
     if inp.family in ("Tweedie", "tweedie"):
         p = _parse_family_param(fix.name, "p")
         if p is not None:
@@ -243,6 +245,10 @@ def test_mgcv_exact_predictions(
     if rust_fam is None:
         pytest.skip(f"no Rust family mapping for {inp.family!r}")
     kwargs: dict = {"mgcv_exact": True}
+    # Pass link explicitly so Gamma(log) doesn't silently fall back to
+    # canonical inverse (and similar non-canonical-link cases).
+    if inp.link and inp.link != "identity":
+        kwargs["link"] = inp.link
     if inp.family in ("Tweedie", "tweedie"):
         p = _parse_family_param(fix.name, "p")
         if p is not None:
@@ -295,6 +301,95 @@ def test_mgcv_exact_predictions(
     assert max_absdiff <= threshold, (
         f"mgcv_exact Bar A on {fix.name}: max_absdiff={max_absdiff:.3e} "
         f"exceeds {threshold:.0e}. our λ={rec['rust_lambda']}, mgcv λ={rec['mgcv_lambda']}"
+    )
+
+
+# Forward link μ → η. Used by `test_mgcv_exact_predictions_link_scale` to
+# strip the inverse-link amplification out of the response-scale comparison.
+_FORWARD_LINK = {
+    "identity": lambda mu: mu,
+    "log":      lambda mu: np.log(np.maximum(mu, 1e-300)),
+    "inverse":  lambda mu: 1.0 / np.where(np.abs(mu) < 1e-300, 1e-300, mu),
+    "logit":    lambda mu: np.log(np.clip(mu, 1e-15, 1 - 1e-15) / (1 - np.clip(mu, 1e-15, 1 - 1e-15))),
+}
+
+
+def test_mgcv_exact_predictions_link_scale(
+    fixture_path,
+    fixture: Fixture,
+    parity_results: list,
+) -> None:
+    """Companion to `test_mgcv_exact_predictions` that compares fits at the
+    LINK scale (η = X·β), where the optimiser's actual numerical precision
+    lives. The response-scale (μ) comparison is amplified through the inverse
+    link — a 5e-4 η-error becomes a 4e-3 μ-error at η ≈ 3 under exp() — so
+    response-scale alone confounds "algorithm is wrong" with "the link
+    function is steep." η-scale isolates the former.
+
+    Strict 1e-3 absolute threshold uniformly across all families.
+    """
+    fix = fixture
+    inp = fix.inputs
+    fwd = _FORWARD_LINK.get(inp.link)
+    if fwd is None:
+        pytest.skip(f"no forward-link mapping for link={inp.link!r}")
+    rust_fam = _RUST_FAMILY.get(inp.family)
+    if rust_fam is None:
+        pytest.skip(f"no Rust family mapping for {inp.family!r}")
+
+    kwargs: dict = {"mgcv_exact": True}
+    if inp.link and inp.link != "identity":
+        kwargs["link"] = inp.link
+    if inp.family in ("Tweedie", "tweedie"):
+        p = _parse_family_param(fix.name, "p")
+        if p is not None:
+            kwargs["p"] = p
+    elif inp.family == "negative.binomial":
+        theta = _parse_family_param(fix.name, "theta")
+        if theta is not None:
+            kwargs["theta"] = theta
+    try:
+        if rust_fam == "gaussian":
+            g = mgcv_rust.GAM(mgcv_exact=True)
+        else:
+            g = mgcv_rust.GAM(rust_fam, **kwargs)
+    except Exception as exc:
+        pytest.skip(f"GAM({rust_fam!r}, {kwargs}) unavailable: {exc}")
+    try:
+        g.fit(
+            np.asarray(inp.x_train, dtype=float),
+            np.asarray(inp.y_train, dtype=float),
+            k=list(inp.k), method=inp.method, bs=inp.bs[0],
+        )
+    except Exception as exc:
+        pytest.skip(f"mgcv_exact fit raised: {exc}")
+
+    X = np.asarray(g.get_design_matrix(), dtype=float)
+    beta = np.asarray(g.get_coefficients(), dtype=float)
+    if X.shape[1] != beta.shape[0]:
+        pytest.skip(f"X={X.shape}, β={beta.shape} disagree on {fix.name}")
+    eta_ours = X @ beta
+
+    mu_mgcv = np.asarray(fix.mgcv_output.predictions_train, dtype=float)
+    eta_mgcv = fwd(mu_mgcv)
+
+    diff = np.abs(eta_ours - eta_mgcv)
+    finite = np.isfinite(diff)
+    if not finite.all():
+        diff = diff[finite]
+    max_link_absdiff = float(diff.max())
+
+    matched = next((r for r in parity_results if r.get("name") == fix.name), None)
+    rec = {"link": inp.link, "max_link_absdiff": max_link_absdiff}
+    if matched is None:
+        parity_results.append({"name": fix.name, "stage4_link": rec})
+    else:
+        matched["stage4_link"] = rec
+
+    threshold = 1.0e-3
+    assert max_link_absdiff <= threshold, (
+        f"mgcv_exact link-scale on {fix.name}: |Δη|_max={max_link_absdiff:.3e} "
+        f"exceeds {threshold:.0e} (link={inp.link})"
     )
 
 
@@ -464,34 +559,18 @@ def test_lambda_trajectory_vs_mgcv(
 # Stage 2: internal consistency of mgcv_rust's prediction path           #
 # --------------------------------------------------------------------- #
 
-# mgcv_rust's Family enum hardcodes the canonical link per family — the
-# Python API has no link parameter. So the inverse link applied internally
-# by gam.predict()/get_fitted_values() is always the *canonical* one,
-# regardless of what link the fixture was generated under. The Stage 2
-# invariant (predict ≟ X @ β with inverse link) only holds when we use
-# mgcv_rust's actual inverse link, not the fixture's.
 _LOG_INV = lambda eta: np.exp(np.clip(eta, None, 20))
 _LOGIT_INV = lambda eta: 1.0 / (1.0 + np.exp(-np.clip(eta, -20, 20)))
 _INVERSE_INV = lambda eta: 1.0 / np.where(np.abs(eta) < 1e-10, 1e-10, eta)
 
-# mgcv_rust's Family enum hardcodes the canonical link per family. For Tweedie,
-# negbin/nb, quasi-* and inverse.gaussian, mgcv_rust uses log link internally
-# (see src/lib.rs Family arms), so the inverse link applied by predict() is exp().
-_CANONICAL_INVERSE_LINK = {
-    "gaussian":          lambda eta: eta,
-    "binomial":          _LOGIT_INV,
-    "quasibinomial":     _LOGIT_INV,
-    "poisson":           _LOG_INV,
-    "quasipoisson":      _LOG_INV,
-    "Gamma":             _INVERSE_INV,
-    "gamma":             _INVERSE_INV,
-    "tw":                _LOG_INV,
-    "Tweedie":           _LOG_INV,
-    "tweedie":           _LOG_INV,
-    "nb":                _LOG_INV,
-    "negbin":            _LOG_INV,
-    "negative.binomial": _LOG_INV,
-    "inverse.gaussian":  _LOG_INV,  # mgcv_rust uses log link, not 1/μ²
+# Stage 2 invariant (predict ≟ inverse_link(X @ β)) is parameterised by the
+# link mgcv_rust uses internally. Now that the Python API accepts a `link`
+# kwarg, we mirror the fixture's `inputs.link` directly.
+_INVERSE_LINK = {
+    "identity": lambda eta: eta,
+    "log":      _LOG_INV,
+    "logit":    _LOGIT_INV,
+    "inverse":  _INVERSE_INV,
 }
 
 
@@ -503,18 +582,14 @@ def test_predict_matches_design_dot_coef(fixture_path, fixture: Fixture) -> None
     Python API's predict() and design_matrix paths internally disagree
     — independent of any mgcv comparison.
 
-    Important: applies mgcv_rust's *canonical* inverse link per family
-    (Gamma → 1/η, not exp(η)), since the Family enum has no link
-    parameter. A non-canonical-link fixture (e.g. Gamma(link="log"))
-    will still pass this stage if mgcv_rust's internal predict and
-    design-matrix paths are self-consistent, even though the fit
-    diverges from the mgcv fixture (that divergence is Bar A's
-    territory).
+    Uses the link declared in `inputs.link` (mgcv_rust's Python API now
+    takes a `link` kwarg, so the inverse link applied internally by
+    predict() matches whichever link the fixture was generated under).
     """
     fix = fixture
-    inv_link = _CANONICAL_INVERSE_LINK.get(fix.inputs.family)
+    inv_link = _INVERSE_LINK.get(fix.inputs.link)
     if inv_link is None:
-        pytest.skip(f"no canonical inverse link known for family={fix.inputs.family!r}")
+        pytest.skip(f"no inverse-link mapping for link={fix.inputs.link!r}")
 
     g = _fit_mgcv_rust(fix)
     X = np.asarray(g.get_design_matrix(), dtype=float)
