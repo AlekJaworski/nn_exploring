@@ -238,10 +238,6 @@ def test_mgcv_exact_predictions(
     inp = fix.inputs
     if inp.family != "gaussian":
         pytest.skip(f"mgcv_exact only validated on Gaussian for now, got {inp.family!r}")
-    # Skip the bs basis case — mgcv uses de Boor B-splines, mgcv_rust
-    # uses natural cubic splines (different basis altogether).
-    if "k20_bs" in fix.name:
-        pytest.skip("bs basis not yet mgcv-equivalent")
 
     x_train = np.asarray(inp.x_train, dtype=float)
     y_train = np.asarray(inp.y_train, dtype=float)
@@ -319,7 +315,7 @@ fix_data = json.load(open({str(fixture_path_for_code(fix))!r}))
 inp = fix_data["inputs"]
 x = np.asarray(inp["x_train"], dtype=float)
 y = np.asarray(inp["y_train"], dtype=float)
-family = inp["family"].lower()
+family = inp["family"]
 g = mgcv_rust.GAM() if family == "gaussian" else mgcv_rust.GAM(family)
 g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
 print("FINAL_LAMBDA", json.dumps(list(g.get_all_lambdas())))
@@ -458,12 +454,28 @@ def test_lambda_trajectory_vs_mgcv(
 # regardless of what link the fixture was generated under. The Stage 2
 # invariant (predict ≟ X @ β with inverse link) only holds when we use
 # mgcv_rust's actual inverse link, not the fixture's.
+_LOG_INV = lambda eta: np.exp(np.clip(eta, None, 20))
+_LOGIT_INV = lambda eta: 1.0 / (1.0 + np.exp(-np.clip(eta, -20, 20)))
+_INVERSE_INV = lambda eta: 1.0 / np.where(np.abs(eta) < 1e-10, 1e-10, eta)
+
+# mgcv_rust's Family enum hardcodes the canonical link per family. For Tweedie,
+# negbin/nb, quasi-* and inverse.gaussian, mgcv_rust uses log link internally
+# (see src/lib.rs Family arms), so the inverse link applied by predict() is exp().
 _CANONICAL_INVERSE_LINK = {
-    "gaussian": lambda eta: eta,                      # identity
-    "binomial": lambda eta: 1.0 / (1.0 + np.exp(-np.clip(eta, -20, 20))),  # logit
-    "poisson":  lambda eta: np.exp(np.clip(eta, None, 20)),                # log
-    "Gamma":    lambda eta: 1.0 / np.where(np.abs(eta) < 1e-10, 1e-10, eta),  # inverse
-    "gamma":    lambda eta: 1.0 / np.where(np.abs(eta) < 1e-10, 1e-10, eta),  # inverse
+    "gaussian":          lambda eta: eta,
+    "binomial":          _LOGIT_INV,
+    "quasibinomial":     _LOGIT_INV,
+    "poisson":           _LOG_INV,
+    "quasipoisson":      _LOG_INV,
+    "Gamma":             _INVERSE_INV,
+    "gamma":             _INVERSE_INV,
+    "tw":                _LOG_INV,
+    "Tweedie":           _LOG_INV,
+    "tweedie":           _LOG_INV,
+    "nb":                _LOG_INV,
+    "negbin":            _LOG_INV,
+    "negative.binomial": _LOG_INV,
+    "inverse.gaussian":  _LOG_INV,  # mgcv_rust uses log link, not 1/μ²
 }
 
 

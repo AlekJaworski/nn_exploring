@@ -96,13 +96,14 @@ def test_closed_form_matches_finite_diff_at_optimum(fix_path, fix_data) -> None:
     # to mgcv's own outer.info$grad). Skip the FD comparison when any
     # λ exceeds 1e8 — the gradient holds to FD's noise floor up through
     # ~1e8 with h=1e-3 but loses precision past that.
-    if max(lam) > 1e8:
-        pytest.skip(
-            f"max(λ)={max(lam):.2e} > 1e6 — FD gradient unreliable at "
-            f"saturating λ; closed-form validated against mgcv's reported grad."
-        )
     cf = np.asarray(g.evaluate_reml_gradient_closed_form(y, lam), dtype=float)
     fd = _fd_gradient(g, y, lam)
+    if not np.all(np.isfinite(fd)):
+        pytest.skip(
+            f"FD gradient produced NaN/inf at λ={lam} — catastrophic "
+            f"cancellation in central diff; closed-form validated against "
+            f"mgcv's reported grad."
+        )
     diff = np.abs(cf - fd)
     rel = diff / (np.abs(fd) + 1e-8)
     assert rel.max() < 5e-2 or diff.max() < 1e-3, (
@@ -432,8 +433,6 @@ def test_ift_gradient_matches_envelope_off_optimum(fix_path, fix_data) -> None:
     g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
 
     lam_opt = np.asarray(out["lambda"], dtype=float)
-    if lam_opt.max() > 1e6 or lam_opt.min() < 1e-3:
-        pytest.skip("extreme λ — A⁻¹ ill-conditioned")
     # Probe at 10x mgcv's optimum (well off-optimum — non-trivial gradient)
     lam_probe = (lam_opt * 10.0).tolist()
     env = np.asarray(g.evaluate_reml_gradient_closed_form(y, lam_probe), dtype=float)
