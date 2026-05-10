@@ -1765,12 +1765,14 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         // where tk_kkt = Σᵢ a1[i]·η₁[i,k]·sign(w[i])·lev_uw[i]. The
         // infrastructure for tk_kkt is computed above (a1, eta1, lev_uw)
         // and verified correct by `tests/test_tk_kkt_reference.rs` and
-        // `tests/test_binomial_gradient_reference.rs`. Wiring it into the
-        // gradient is gated behind MGCV_TK_GRAD because doing so unmasks
-        // the saturating-λ trap (one smooth's λ runs away to ~10²× mgcv's
-        // saturation point, since we lack edge.correct/saturation-freeze).
-        // Safe to enable once #44 (edge.correct) lands.
-        let tk_kkt = if std::env::var("MGCV_TK_GRAD").is_ok() {
+        // `tests/test_binomial_gradient_reference.rs`. Enable it by default
+        // for inverse Gaussian: without this term the log-link REML path
+        // converges to a nearby but worse stationary point than mgcv. Keep
+        // other families behind MGCV_TK_GRAD because it can still unmask the
+        // saturating-λ trap before edge.correct/saturation-freeze lands.
+        let use_tk_kkt = matches!(family, crate::pirls::Family::InverseGaussian)
+            || std::env::var("MGCV_TK_GRAD").is_ok();
+        let tk_kkt = if use_tk_kkt {
             (0..n)
                 .map(|i| a1[i] * eta1[[i, k]] * w[i].signum() * lev_uw[i])
                 .sum::<f64>()
@@ -2994,7 +2996,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached_edf(
 
             if std::env::var("MGCV_EDF_DEBUG").is_ok() {
                 eprintln!("[EDF_DEBUG] n={}, total_rank={}, EDF={:.4}, n-EDF={:.4}, n-rank={:.4}, phi_edf={:.6e}, phi_rank={:.6e}",
-                    n, total_rank, edf, n_minus_edf, n as f64 - total_rank as f64, 
+                    n, total_rank, edf, n_minus_edf, n as f64 - total_rank as f64,
                     phi, rss / (n as f64 - total_rank as f64));
             }
 

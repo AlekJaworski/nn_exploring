@@ -1405,7 +1405,10 @@ impl SmoothingParameter {
             // OPTIMIZATION: Adaptive max_half based on convergence progress
             // Near convergence (small gradient), Newton step is likely good - use fewer halvings
             // Far from convergence, may need more exploration
-            let max_half = if grad_norm_linf < 0.1 {
+            let stalled_score = iter >= 3 && reml_change < 1.0e-4;
+            let max_half = if stalled_score {
+                1 // If score barely moved last iter, do not burn time on a deep flat search.
+            } else if grad_norm_linf < 0.1 {
                 10 // Near convergence - fewer line search iterations
             } else if grad_norm_linf < 1.0 {
                 20 // Moderate - standard search
@@ -1559,6 +1562,18 @@ impl SmoothingParameter {
                         "[PROFILE]   Newton step too small (scale={:.3e}), checking gradient",
                         best_step_scale
                     );
+                }
+
+                if stalled_score {
+                    self.lambda = lambdas;
+                    if std::env::var("MGCV_PROFILE").is_ok() {
+                        eprintln!(
+                            "[PROFILE] Converged after {} iterations (stalled score {:.2e} and no improving Newton step)",
+                            iter + 1,
+                            reml_change
+                        );
+                    }
+                    return Ok(());
                 }
 
                 if grad_norm_linf < 0.1 {
