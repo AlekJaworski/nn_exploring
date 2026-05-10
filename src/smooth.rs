@@ -21,6 +21,41 @@ use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
 use std::time::Instant;
 
+#[cfg(feature = "blas")]
+fn use_mgcv_exact_ift_policy(
+    mgcv_exact_score: bool,
+    family: crate::pirls::Family,
+    y_len: usize,
+    has_original_response: bool,
+) -> bool {
+    if !mgcv_exact_score {
+        return false;
+    }
+
+    let explicit = std::env::var("MGCV_USE_IFT").is_ok();
+    if explicit {
+        return true;
+    }
+    if std::env::var("MGCV_DISABLE_IFT").is_ok() || !has_original_response {
+        return false;
+    }
+
+    // IFT differentiates the true GLM deviance, while the line search still
+    // evaluates working-response REML. Keep those paired derivatives on the
+    // consistent closed-form path for the two parity-sensitive edge cases.
+    if matches!(
+        family,
+        crate::pirls::Family::Gaussian | crate::pirls::Family::Gamma
+    ) {
+        return false;
+    }
+    if matches!(family, crate::pirls::Family::Binomial) && y_len <= 500 {
+        return false;
+    }
+
+    true
+}
+
 /// Dispatch to either mgcv-exact REML or default REML based on the
 /// SmoothingParameter flag. mgcv_exact_score=true is set by
 /// gam_optimized.rs::fit_optimized_full when the GAM was constructed
@@ -1062,39 +1097,12 @@ impl SmoothingParameter {
             //   for Gaussian + canonical link via envelope theorem).
             //   Hessian still uses finite differences for now —
             //   replacing it with closed-form is an open task.
-            // IFT path selection. Opt-in via env var MGCV_USE_IFT=1
-            // (overrides everything). Otherwise: opt-out via
-            // MGCV_DISABLE_IFT=1, else default ON for non-Gaussian when
-            // y_original was supplied. For Gaussian we keep envelope (it
-            // is exact there anyway and matches the score byte-for-byte).
-            //
-            // Note (Parity 4t): at our (always inner-loop converged) β =
-            // A⁻¹X'Wy, IFT with working-RSS deviance collapses to envelope.
-            // The GLM-deviance form (y_original set) is a gradient of a
-            // DIFFERENT score (true GLM deviance) than what the line search
-            // optimises (working RSS). Empirically, the gradient/score
-            // inconsistency on binomial moved absdiff from 4e-3 to ~1.3e-2;
-            // a proper fix needs a working-deviance-based score too.
-            let use_ift_explicit = std::env::var("MGCV_USE_IFT").is_ok();
-            let use_ift_disable = std::env::var("MGCV_DISABLE_IFT").is_ok();
-            let use_ift = self.mgcv_exact_score
-                && (use_ift_explicit
-                    || (!use_ift_disable
-                        && !matches!(self.family, crate::pirls::Family::Gaussian)
-                        // Canonical GLMs can be especially sensitive to the
-                        // IFT path differentiating true GLM deviance while the
-                        // line search evaluates working-response REML. Keep the
-                        // score/gradient pair consistent by default for Gamma
-                        // inverse and the small-n binomial flat-REML case;
-                        // larger binomial fits still need IFT to avoid the
-                        // high-λ trap. MGCV_USE_IFT can still force IFT.
-                        && !matches!(
-                            self.family,
-                            crate::pirls::Family::Gamma
-                        )
-                        && !(matches!(self.family, crate::pirls::Family::Binomial)
-                            && y.len() <= 500)
-                        && self.y_original.is_some()));
+            let use_ift = use_mgcv_exact_ift_policy(
+                self.mgcv_exact_score,
+                self.family,
+                y.len(),
+                self.y_original.is_some(),
+            );
             // GamFit5 score families (TDist/scat, Quantile/ELF) use a
             // structurally different REML formula (Dp/2, no σ²-chain term).
             // The closed-form / IFT gradient + hessian assemblies above are

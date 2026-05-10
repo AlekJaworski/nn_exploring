@@ -11,6 +11,7 @@ the Bar B / Bar C tolerances over time.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -152,12 +153,48 @@ def parity_results() -> list[dict[str, Any]]:
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if not _PARITY_RECORDS:
         return
+    if not _should_write_results(_PARITY_RECORDS):
+        return
     _write_results(_PARITY_RECORDS)
 
 
+def _should_write_results(records: list[dict[str, Any]]) -> bool:
+    if os.environ.get("MGCV_PARITY_WRITE_PARTIAL_RESULTS"):
+        return True
+
+    fixture_names = {p.stem for p in _discover_fixture_paths()}
+    parity_names = {r.get("name") for r in records if "bar_a" in r}
+    return bool(fixture_names) and parity_names == fixture_names
+
+
 def _write_results(records: list[dict[str, Any]]) -> None:
+    records = _merge_existing_result_sections(records)
     RESULTS_JSON.write_text(json.dumps(records, indent=2, sort_keys=True))
     RESULTS_MD.write_text(_render_markdown(records))
+
+
+def _merge_existing_result_sections(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not RESULTS_JSON.exists():
+        return records
+    try:
+        existing = json.loads(RESULTS_JSON.read_text())
+    except (OSError, json.JSONDecodeError):
+        return records
+
+    existing_by_name = {
+        r.get("name"): r
+        for r in existing
+        if isinstance(r, dict) and isinstance(r.get("name"), str)
+    }
+    merged = []
+    for record in records:
+        out = dict(record)
+        prev = existing_by_name.get(record.get("name"))
+        if prev:
+            for key, value in prev.items():
+                out.setdefault(key, value)
+        merged.append(out)
+    return merged
 
 
 def _render_markdown(records: list[dict[str, Any]]) -> str:
