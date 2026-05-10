@@ -1763,6 +1763,10 @@ impl SmoothingParameter {
 
                     self.tweedie_theta = accepted_theta;
                     let new_p = tw_theta_to_p(accepted_theta).max(1.001).min(1.999);
+                    // Near p=2 the Wright series becomes intractable; freeze profiling.
+                    if new_p > 1.97 {
+                        self.tweedie_profile = false;
+                    }
                     self.family = crate::pirls::Family::Tweedie { p: new_p };
                     // Sync the closure-side cell so the next iter's PIRLS
                     // refresh callback sees the freshly profiled p.

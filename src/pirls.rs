@@ -453,6 +453,17 @@ impl Family {
             // For y=0: log f = -μ^(2-p)/(φ*(2-p)) → at μ=y=0 this is 0.
             Family::Tweedie { p } => {
                 let phi = scale;
+                // Near p=2: j_max = y^(2-p)/(φ(2-p)) → ∞ making the Wright series
+                // intractable. Use the Gamma-family limit (Tweedie → Gamma as p→2):
+                //   ls_Gamma = n·[-lgamma(1/φ) - log(φ)/φ - 1/φ] - Σ log(y_i)
+                if *p > 1.95 {
+                    let n_f = y.len() as f64;
+                    let inv_phi = 1.0 / phi;
+                    let ls_per_obs = -log_gamma(inv_phi) - inv_phi * phi.ln() - inv_phi;
+                    let sum_log_y: f64 =
+                        y.iter().filter(|&&yi| yi > 0.0).map(|&yi| yi.ln()).sum();
+                    return n_f * ls_per_obs - sum_log_y;
+                }
                 let (log_w, _, _) = tweedie_series(y, phi, *p);
                 let mut ls = 0.0f64;
                 for (i, &yi) in y.iter().enumerate() {
@@ -511,6 +522,12 @@ impl Family {
             // We get dlogW/drho from tweedie_series as the second output.
             Family::Tweedie { p } => {
                 let phi = scale;
+                // Near p=2: use Gamma-limit derivative (exact at p=2).
+                if *p > 1.95 {
+                    let n = y.len() as f64;
+                    let inv_phi = 1.0 / phi;
+                    return n * (digamma(inv_phi) + phi.ln()) / (phi * phi);
+                }
                 let (log_w, dlog_w_drho, _) = tweedie_series(y, phi, *p);
                 let _ = log_w; // log_w already used for ls; here we only need derivs
                 let mut dls = 0.0f64;
@@ -658,6 +675,12 @@ impl Family {
             // since the Tweedie series ls has no closed-form second derivative here.
             Family::Tweedie { p } => {
                 let p = *p;
+                // Near p=2: Wright series requires j_max = y^(2-p)/(φ(2-p)) → ∞.
+                // Use the Gaussian closed-form φ̂ = Dp/(n-Mp) as a fast approximation
+                // (exact at p=0 and p=2 where ls reduces to Gaussian/Gamma form).
+                if p > 1.95 {
+                    return dp / (n - mp_f).max(1.0);
+                }
                 let mut phi = phi_init.max(1e-8);
                 for _ in 0..30 {
                     let dls = self.dls_dsigma2(y, phi);
@@ -1077,15 +1100,16 @@ pub fn fit_pirls_cached(
                 let c_resid = y[i] - mu[i];
                 let dvar = family.dvar(mu[i]);
                 let d2link = family.d2link(mu[i]);
-                let mut alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
-                // Clamp α positive so X'WX + λS stays PSD. For InverseGaussian+log,
-                // α = 2y/μ − 1 which goes negative when y < μ/2 (common far from
-                // optimum). Negative α makes W indefinite → Cholesky → NaN.
-                // mgcv handles this via QR with column pivoting; we use a direct
-                // solve, so clamp instead. The convergence trajectory differs but
-                // the final point is the same.
+                let alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
+                // When α ≤ 0 the Newton weight goes negative (e.g. InverseGaussian+log
+                // at y < μ/2, or GammaLog far from convergence). mgcv handles negative
+                // weights via QR with column pivoting; our Cholesky solve needs PSD.
+                // Fall back to Fisher scoring (α=1) for those observations: same MLE
+                // limit as Newton, always positive weights, better than clamping to ε.
                 if alpha <= 0.0 {
-                    alpha = f64::EPSILON;
+                    z[i] = eta[i] + (y[i] - mu[i]) / dmu_deta;
+                    w[i] = wf.max(1e-10);
+                    continue;
                 }
                 z[i] = eta[i] + (y[i] - mu[i]) / (dmu_deta * alpha);
                 w[i] = wf * alpha;

@@ -1709,10 +1709,9 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
             } else {
                 let y_for_resid = y_original.unwrap_or(y);
                 let c_resid = y_for_resid[i] - mu_i;
-                let mut alpha = 1.0 + c_resid * (v1n + g2n);
-                if alpha <= 0.0 {
-                    alpha = f64::EPSILON;
-                }
+                let alpha = 1.0 + c_resid * (v1n + g2n);
+                // When α ≤ 0 fall back to Fisher (α=1) to avoid division by zero.
+                let alpha = if alpha <= 0.0 { 1.0 } else { alpha };
                 let xx = v2n - v1n * v1n + g3n - g2n * g2n;
                 let alpha1 = (-(v1n + g2n) + c_resid * xx) / alpha;
                 // gdi.c:2556: a1 = w·(α₁ - V₁ - 2·g₂)/g₁
