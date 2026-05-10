@@ -81,6 +81,32 @@ _NB_PROFILE_V1_REASON = (
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {},
+    # mgcv_exact predictions Bar A (1e-3 absdiff). Two open-gap buckets:
+    #
+    # Bucket A — marginal (max_absdiff 1.7e-3 to 4.6e-3): λs match mgcv to
+    # ~1% on non-saturating dims; only the saturating-λ dim differs. Same
+    # near-zero amplification pattern that test_parity addressed via std
+    # floor (commit e3e83e6, parity-tests note 4i). Stage-4 still uses raw
+    # 1e-3·1e-3; closes when the threshold gets the same std-floor.
+    #
+    # Bucket B — Gamma(link=log) algorithmic gap (max_absdiff 0.28 to 0.63):
+    # consistent over-smoothing across all dims; λs off by 5-15×. Real
+    # algorithmic issue with the non-canonical log link in pirls.rs and the
+    # REML formula path in reml.rs.
+    "test_mgcv_exact_predictions": {
+        # Bucket A
+        "2d_invgauss_log_n800_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        "2d_poisson_log_n5000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        "3d_poisson_log_n2000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        "2d_quasipoisson_log_n1000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        "2d_gamma_inverse_n1000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        "2d_nb_log_n1000_k10_cr_theta2": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        "2d_nb_profile_log_n1000_k10_cr": "Bucket A: mgcv_exact non-Gaussian — Stage-4 1e-3 atol vs near-zero predictions; needs std-floor",
+        # Bucket B
+        "2d_gamma_log_n200_k10_cr": "Bucket B: Gamma(link=log) algorithmic gap — λs off 5-15× from mgcv; needs non-canonical-link gradient audit",
+        "2d_gamma_log_n1000_k10_cr": "Bucket B: Gamma(link=log) algorithmic gap — λs off 5-15× from mgcv; needs non-canonical-link gradient audit",
+        "4d_gamma_log_n2000_k8_cr": "Bucket B: Gamma(link=log) algorithmic gap — λs off 5-15× from mgcv; needs non-canonical-link gradient audit",
+    },
 }
 
 

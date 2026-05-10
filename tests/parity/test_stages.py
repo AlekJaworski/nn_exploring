@@ -236,12 +236,28 @@ def test_mgcv_exact_predictions(
     """
     fix = fixture
     inp = fix.inputs
-    if inp.family != "gaussian":
-        pytest.skip(f"mgcv_exact only validated on Gaussian for now, got {inp.family!r}")
 
     x_train = np.asarray(inp.x_train, dtype=float)
     y_train = np.asarray(inp.y_train, dtype=float)
-    g = mgcv_rust.GAM(mgcv_exact=True)
+    rust_fam = _RUST_FAMILY.get(inp.family)
+    if rust_fam is None:
+        pytest.skip(f"no Rust family mapping for {inp.family!r}")
+    kwargs: dict = {"mgcv_exact": True}
+    if inp.family in ("Tweedie", "tweedie"):
+        p = _parse_family_param(fix.name, "p")
+        if p is not None:
+            kwargs["p"] = p
+    elif inp.family == "negative.binomial":
+        theta = _parse_family_param(fix.name, "theta")
+        if theta is not None:
+            kwargs["theta"] = theta
+    try:
+        if rust_fam == "gaussian":
+            g = mgcv_rust.GAM(mgcv_exact=True)
+        else:
+            g = mgcv_rust.GAM(rust_fam, **kwargs)
+    except Exception as exc:
+        pytest.skip(f"GAM({rust_fam!r}, {kwargs}) unavailable: {exc}")
     try:
         g.fit(x_train, y_train, k=list(inp.k), method=inp.method, bs=inp.bs[0])
     except Exception as exc:
