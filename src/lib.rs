@@ -177,8 +177,9 @@ impl PyGAM {
             (Some("gaussian"), Some("identity")) => Family::Gaussian,
             (Some("binomial"), None) | (Some("binomial"), Some("logit")) => Family::Binomial,
             (Some("poisson"), None) | (Some("poisson"), Some("log")) => Family::Poisson,
-            (Some("gamma"), None) | (Some("gamma"), Some("inverse")) => Family::Gamma,
-            (Some("gamma"), Some("log")) => Family::GammaLog,
+            (Some("gamma") | Some("Gamma"), None)
+            | (Some("gamma") | Some("Gamma"), Some("inverse")) => Family::Gamma,
+            (Some("gamma") | Some("Gamma"), Some("log")) => Family::GammaLog,
             // Quasi-Poisson: same as Poisson but with profiled dispersion φ̂.
             (Some("quasipoisson"), None) | (Some("quasipoisson"), Some("log")) => Family::QuasiPoisson,
             // Quasi-Binomial: same as Binomial but with profiled dispersion φ̂.
@@ -197,7 +198,8 @@ impl PyGAM {
             // Tweedie with log link (1 < p < 2).
             // p=None → profile-p mode (mgcv's tw()), starting at p=1.5.
             // p=Some(val) → fixed-p mode (mgcv's Tweedie(p=val)).
-            (Some("tweedie"), None) | (Some("tweedie"), Some("log")) => {
+            (Some("tweedie") | Some("tw") | Some("Tweedie"), None)
+            | (Some("tweedie") | Some("tw") | Some("Tweedie"), Some("log")) => {
                 let tweedie_p = p.unwrap_or(1.5);
                 if tweedie_p <= 1.0 || tweedie_p >= 2.0 {
                     return Err(PyValueError::new_err(format!(
@@ -254,9 +256,9 @@ impl PyGAM {
             }
             (Some(f), None) => {
                 return Err(PyValueError::new_err(format!(
-                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma', \
-                     'quasipoisson', 'quasibinomial', 't-dist', 'scat', 'quantile', 'tweedie', 'inverse.gaussian', \
-                     'negbin', or 'nb'",
+                    "Unknown family '{}'. Use 'gaussian', 'binomial', 'poisson', 'gamma' (or 'Gamma'), \
+                     'quasipoisson', 'quasibinomial', 't-dist', 'scat', 'quantile', 'tweedie' (or 'Tweedie'/'tw'), 'inverse.gaussian', \
+                     'negbin', 'nb', or 'negative.binomial'",
                     f
                 )))
             }
