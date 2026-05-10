@@ -117,9 +117,12 @@ _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     # IRLS first-order condition; our envelope gradient equals the true
     # gradient only at exact convergence.
     "test_mgcv_exact_predictions_link_scale": {
-        "2d_binomial_logit_n1000_k10_cr": "Bucket D: logit binomial — |Δη|≈2.5e-3 envelope-theorem residual; mgcv uses full IFT (gdi.c:ift1)",
-        "2d_quasibinomial_logit_n1000_k10_cr": "Bucket D: logit quasibinomial — |Δη|≈2.3e-3 envelope-theorem residual; mgcv uses full IFT",
-        "4d_binomial_logit_n2000_k8_cr": "Bucket D: logit binomial 4d — |Δη|≈2.7e-3 envelope-theorem residual; mgcv uses full IFT",
+        # Bucket D residual after Tk·KK' default-on for Binomial/QuasiBinomial:
+        # 4d binomial improved 2.72e-3 → 1.37e-3 but dim-4 λ rides the
+        # saturation knee (~6% off mgcv) so it still misses 1e-3. Same
+        # edge.correct gap as Gamma(log)/nb — see Obsidian note
+        # "Tk·KK' edge.correct regression 2026-05-10".
+        "4d_binomial_logit_n2000_k8_cr": "Bucket D: logit binomial 4d — |Δη|≈1.4e-3 saturating-λ knee on dim 4; needs edge.correct port",
     },
 }
 

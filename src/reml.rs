@@ -1876,13 +1876,19 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         // where tk_kkt = Σᵢ a1[i]·η₁[i,k]·sign(w[i])·lev_uw[i]. The
         // infrastructure for tk_kkt is computed above (a1, eta1, lev_uw)
         // and verified correct by `tests/test_tk_kkt_reference.rs` and
-        // `tests/test_binomial_gradient_reference.rs`. Enable it by default
-        // for inverse Gaussian: without this term the log-link REML path
-        // converges to a nearby but worse stationary point than mgcv. Keep
-        // other families behind MGCV_TK_GRAD because it can still unmask the
-        // saturating-λ trap before edge.correct/saturation-freeze lands.
-        let use_tk_kkt = matches!(family, crate::pirls::Family::InverseGaussian)
-            || std::env::var("MGCV_TK_GRAD").is_ok();
+        // `tests/test_binomial_gradient_reference.rs`. Enabled by default for
+        // families where the σ²-fixed REML and the closed-form gradient agree
+        // tightly enough that the Tk·KK' contribution lands on mgcv's |Δη|<1e-3
+        // η-stationary point. For Gamma(log) / nb / inverse.gaussian-with-
+        // saturating-λ the term can drift the optimizer toward the saturation
+        // boundary before edge.correct lands, so they stay opt-in via
+        // MGCV_TK_GRAD until step-blending is ported.
+        let use_tk_kkt = matches!(
+            family,
+            crate::pirls::Family::InverseGaussian
+                | crate::pirls::Family::Binomial
+                | crate::pirls::Family::QuasiBinomial
+        ) || std::env::var("MGCV_TK_GRAD").is_ok();
         let tk_kkt = if use_tk_kkt {
             (0..n)
                 .map(|i| a1[i] * eta1[[i, k]] * w[i].signum() * lev_uw[i])
