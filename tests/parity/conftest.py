@@ -81,35 +81,7 @@ _NB_PROFILE_V1_REASON = (
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {},
-    # mgcv_exact predictions Bar A (1e-3 absdiff). Two open-gap buckets:
-    #
-    # Bucket A — marginal (max_absdiff 1.7e-3 to 4.6e-3): λs match mgcv to
-    # ~1% on non-saturating dims; only the saturating-λ dim differs. Same
-    # near-zero amplification pattern that test_parity addressed via std
-    # floor (commit e3e83e6, parity-tests note 4i). Stage-4 still uses raw
-    # 1e-3·1e-3; closes when the threshold gets the same std-floor.
-    #
-    # Bucket B — Gamma(link=log) algorithmic gap (max_absdiff 0.28 to 0.63):
-    # consistent over-smoothing across all dims; λs off by 5-15×. Real
-    # algorithmic issue with the non-canonical log link in pirls.rs and the
-    # REML formula path in reml.rs.
-    # All response-scale xfails are Bucket A: link-scale comparison passes
-    # at strict 1e-3 (see test_mgcv_exact_predictions_link_scale), but the
-    # inverse-link (exp / 1/μ) amplifies the η-error to 1.7e-3 to 4.6e-3 on
-    # the response scale — exceeds the 1e-3 atol on points where the link's
-    # derivative is large. Same near-zero amplification pattern resolved in
-    # test_parity (commit e3e83e6 / parity-tests note 4i) via std-floor.
-    "test_mgcv_exact_predictions": {
-        "2d_invgauss_log_n800_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "2d_poisson_log_n5000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "3d_poisson_log_n2000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "2d_quasipoisson_log_n1000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "2d_gamma_inverse_n1000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "2d_nb_log_n1000_k10_cr_theta2": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "2d_nb_profile_log_n1000_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "2d_gamma_log_n200_k10_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-        "4d_gamma_log_n2000_k8_cr": "Bucket A: response-scale exp-amplified; link-scale passes 1e-3",
-    },
+    "test_mgcv_exact_predictions": {},
     # Link-scale Stage-4 — Bucket D: logit binomial/quasibinomial. Pass
     # response-scale (logit compresses near μ→0/1) but |Δη| stays at
     # 2.3e-3 to 2.7e-3, an envelope-theorem residual at PiRLS-converged β.

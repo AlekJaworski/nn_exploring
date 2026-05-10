@@ -885,14 +885,7 @@ impl GAM {
                     y.clone()
                 }
             } else {
-                let mut z = final_result.linear_predictor.clone();
-                for i in 0..z.len() {
-                    let dmu_deta = self.family.d_inverse_link(final_result.linear_predictor[i]);
-                    if dmu_deta.abs() > 1e-10 {
-                        z[i] += (y[i] - final_result.fitted_values[i]) / dmu_deta;
-                    }
-                }
-                z
+                final_result.working_response.clone()
             };
             smoothing_params.last_score = crate::reml::reml_criterion_multi_cached_mgcv_exact(
                 &z_score,
