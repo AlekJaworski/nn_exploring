@@ -1329,7 +1329,7 @@ impl SmoothingParameter {
             // outer Newton, regardless of convergence criterion. Keeping OR.
             let grad_tol = if self.mgcv_exact_score {
                 let score_scale = current_reml.abs() + 1.0;
-                score_scale * 1.0e-6
+                score_scale * 1.0e-7
             } else {
                 0.05
             };

@@ -99,11 +99,19 @@ def test_closed_form_matches_finite_diff_at_optimum(fix_path, fix_data) -> None:
     cf = np.asarray(g.evaluate_reml_gradient_closed_form(y, lam), dtype=float)
     fd = _fd_gradient(g, y, lam)
     if not np.all(np.isfinite(fd)):
-        pytest.skip(
-            f"FD gradient produced NaN/inf at λ={lam} — catastrophic "
-            f"cancellation in central diff; closed-form validated against "
-            f"mgcv's reported grad."
+        assert "final_grad" in out, (
+            f"FD gradient produced NaN/inf at λ={lam}, and fixture lacks "
+            "mgcv final_grad fallback. Regenerate fixtures with outer.info$grad."
         )
+        mgcv_grad = np.asarray(out["final_grad"], dtype=float).ravel()[:len(cf)]
+        diff = np.abs(cf - mgcv_grad)
+        both_converged = float(np.abs(cf).max()) < 5e-2 and float(np.abs(mgcv_grad).max()) < 5e-2
+        assert diff.max() < 1e-3 or both_converged, (
+            f"closed-form gradient disagrees with mgcv's reported final_grad on "
+            f"{fix_path.stem} after FD cancellation:\n  cf={cf.tolist()}\n  "
+            f"mgcv={mgcv_grad.tolist()}\n  absdiff={diff.tolist()}"
+        )
+        return
     diff = np.abs(cf - fd)
     rel = diff / (np.abs(fd) + 1e-8)
     assert rel.max() < 5e-2 or diff.max() < 1e-3, (
