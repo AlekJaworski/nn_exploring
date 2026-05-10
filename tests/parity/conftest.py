@@ -67,24 +67,6 @@ _8D_15K_FD_GRAD_REASON = (
     "which now passes). This test should be skipped when max(λ) > 1e6 "
     "but currently isn't."
 )
-_GAMMA_INVERSE_GAP_REASON = (
-    "Gamma + canonical inverse link parity: predict matches mgcv only "
-    "to ~1.5e-2 absdiff. The gamma(log) path passes byte-for-byte for "
-    "n≥1000 after #47 but the canonical inverse path needs more "
-    "investigation (likely the inverse-link Fisher weights aren't "
-    "exactly mgcv's). Tracked in Parity 5 expansion battery."
-)
-_BINOMIAL_LOGIT_SMALL_N_GAP_REASON = (
-    "binomial(logit) at n=200: non-unique-optimum issue in a flat region "
-    "of the REML score. With Tk·KK' grad enabled (MGCV_TK_GRAD=1) our λ "
-    "tracks mgcv's saturation point closely (λ_2 ratio 0.99, post-N-SF) "
-    "but the trajectory lands at a slightly different stationary point "
-    "(λ_1 = 7.17 vs mgcv 7.84) — both with small gradients, predictions "
-    "diverge ~5e-3. Was masked by bam-based fixtures pre-N12; surfaces "
-    "with gam-based fixtures because gam and bam both pick different "
-    "non-unique optima here. Tracked as Defer-1 (post #44 edge.correct)."
-)
-
 _NB_PROFILE_V1_REASON = (
     "nb() profile-θ, n=1000: rust converges to θ̂ near mgcv's (mgcv "
     "reports 2.08 for data-generating θ=2.0) and λ within ~10% in "
@@ -97,10 +79,7 @@ _NB_PROFILE_V1_REASON = (
 )
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
-    "test_parity": {
-        "2d_gamma_inverse_n1000_k10_cr": _GAMMA_INVERSE_GAP_REASON,
-        "2d_binomial_logit_n200_k10_cr": _BINOMIAL_LOGIT_SMALL_N_GAP_REASON,
-    },
+    "test_parity": {},
 }
 
 

@@ -9,11 +9,10 @@ pub use crate::reml::ScaleParameterMethod;
 use crate::reml::{
     compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
     reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
-    reml_gradient_gamfit4_tdist_analytic, reml_hessian_gamfit4_tdist_analytic,
-    reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
-    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
-    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift,
-    reml_hessian_multi_cached,
+    reml_gradient_gamfit4_tdist_analytic, reml_gradient_mgcv_exact_closed_form,
+    reml_gradient_mgcv_exact_ift, reml_gradient_multi_qr_adaptive,
+    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
+    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
     tdist_shape_derivatives_gamfit4,
 };
 #[cfg(not(feature = "blas"))]
@@ -112,8 +111,26 @@ fn reml_gradient_finite_diff(
         log_minus[i] -= h;
         let lam_plus: Vec<f64> = log_plus.iter().map(|l| l.exp()).collect();
         let lam_minus: Vec<f64> = log_minus.iter().map(|l| l.exp()).collect();
-        let r_plus = dispatch_reml_score_fd(sp, y, x, w, &lam_plus, penalties, cached_xtwx, pirls_callback)?;
-        let r_minus = dispatch_reml_score_fd(sp, y, x, w, &lam_minus, penalties, cached_xtwx, pirls_callback)?;
+        let r_plus = dispatch_reml_score_fd(
+            sp,
+            y,
+            x,
+            w,
+            &lam_plus,
+            penalties,
+            cached_xtwx,
+            pirls_callback,
+        )?;
+        let r_minus = dispatch_reml_score_fd(
+            sp,
+            y,
+            x,
+            w,
+            &lam_minus,
+            penalties,
+            cached_xtwx,
+            pirls_callback,
+        )?;
         grad[i] = (r_plus - r_minus) / (2.0 * h);
     }
     Ok(grad)
@@ -176,8 +193,10 @@ fn reml_hessian_finite_diff(
         lm[i] -= h;
         let lam_p: Vec<f64> = lp.iter().map(|l| l.exp()).collect();
         let lam_m: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
-        r_plus[i] = dispatch_reml_score_fd(sp, y, x, w, &lam_p, penalties, cached_xtwx, pirls_callback)?;
-        r_minus[i] = dispatch_reml_score_fd(sp, y, x, w, &lam_m, penalties, cached_xtwx, pirls_callback)?;
+        r_plus[i] =
+            dispatch_reml_score_fd(sp, y, x, w, &lam_p, penalties, cached_xtwx, pirls_callback)?;
+        r_minus[i] =
+            dispatch_reml_score_fd(sp, y, x, w, &lam_m, penalties, cached_xtwx, pirls_callback)?;
     }
 
     let mut hess = Array2::<f64>::zeros((m, m));
@@ -205,10 +224,46 @@ fn reml_hessian_finite_diff(
             let lam_pm: Vec<f64> = lpm.iter().map(|l| l.exp()).collect();
             let lam_mp: Vec<f64> = lmp.iter().map(|l| l.exp()).collect();
             let lam_mm: Vec<f64> = lmm.iter().map(|l| l.exp()).collect();
-            let rpp = dispatch_reml_score_fd(sp, y, x, w, &lam_pp, penalties, cached_xtwx, pirls_callback)?;
-            let rpm = dispatch_reml_score_fd(sp, y, x, w, &lam_pm, penalties, cached_xtwx, pirls_callback)?;
-            let rmp = dispatch_reml_score_fd(sp, y, x, w, &lam_mp, penalties, cached_xtwx, pirls_callback)?;
-            let rmm = dispatch_reml_score_fd(sp, y, x, w, &lam_mm, penalties, cached_xtwx, pirls_callback)?;
+            let rpp = dispatch_reml_score_fd(
+                sp,
+                y,
+                x,
+                w,
+                &lam_pp,
+                penalties,
+                cached_xtwx,
+                pirls_callback,
+            )?;
+            let rpm = dispatch_reml_score_fd(
+                sp,
+                y,
+                x,
+                w,
+                &lam_pm,
+                penalties,
+                cached_xtwx,
+                pirls_callback,
+            )?;
+            let rmp = dispatch_reml_score_fd(
+                sp,
+                y,
+                x,
+                w,
+                &lam_mp,
+                penalties,
+                cached_xtwx,
+                pirls_callback,
+            )?;
+            let rmm = dispatch_reml_score_fd(
+                sp,
+                y,
+                x,
+                w,
+                &lam_mm,
+                penalties,
+                cached_xtwx,
+                pirls_callback,
+            )?;
             let off = (rpp - rpm - rmp + rmm) / (4.0 * h2);
             hess[[i, j]] = off;
             hess[[j, i]] = off;
@@ -276,7 +331,9 @@ pub fn fellner_schall_step(
         let bsb = pen.quadratic_form(beta).max(tiny);
         let numerator = (rank_i / lambda_i.max(1e-20) - tr_vs).max(tiny);
 
-        let log_ratio = (phi * numerator / bsb).ln().clamp(-log_step_clamp, log_step_clamp);
+        let log_ratio = (phi * numerator / bsb)
+            .ln()
+            .clamp(-log_step_clamp, log_step_clamp);
         let log_lambda_new = (lambda_i.ln() + log_ratio)
             .max(lambda_bounds.0.ln())
             .min(lambda_bounds.1.ln());
@@ -988,8 +1045,15 @@ impl SmoothingParameter {
 
             // Compute current REML value for convergence check
             // (dispatches to mgcv-exact formula when mgcv_exact_score=true)
-            let current_reml =
-                dispatch_reml_score(self, &y_local, x, &w_local, &lambdas, penalties, Some(&xtwx_local))?;
+            let current_reml = dispatch_reml_score(
+                self,
+                &y_local,
+                x,
+                &w_local,
+                &lambdas,
+                penalties,
+                Some(&xtwx_local),
+            )?;
 
             // Compute gradient and Hessian.
             // - Default mode: closed-form QR-based formulas, fast.
@@ -1017,6 +1081,19 @@ impl SmoothingParameter {
                 && (use_ift_explicit
                     || (!use_ift_disable
                         && !matches!(self.family, crate::pirls::Family::Gaussian)
+                        // Canonical GLMs can be especially sensitive to the
+                        // IFT path differentiating true GLM deviance while the
+                        // line search evaluates working-response REML. Keep the
+                        // score/gradient pair consistent by default for Gamma
+                        // inverse and the small-n binomial flat-REML case;
+                        // larger binomial fits still need IFT to avoid the
+                        // high-λ trap. MGCV_USE_IFT can still force IFT.
+                        && !matches!(
+                            self.family,
+                            crate::pirls::Family::Gamma
+                        )
+                        && !(matches!(self.family, crate::pirls::Family::Binomial)
+                            && y.len() <= 500)
                         && self.y_original.is_some()));
             // GamFit5 score families (TDist/scat, Quantile/ELF) use a
             // structurally different REML formula (Dp/2, no σ²-chain term).
@@ -1063,7 +1140,15 @@ impl SmoothingParameter {
                         self.y_original.as_ref(),
                     )?
                 } else {
-                    reml_gradient_mgcv_exact_closed_form(&y_local, x, &w_local, &lambdas, penalties, Some(&xtwx_local), self.family)?
+                    reml_gradient_mgcv_exact_closed_form(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        self.family,
+                    )?
                 }
             } else {
                 reml_gradient_multi_qr_adaptive_cached_edf(
@@ -1117,7 +1202,15 @@ impl SmoothingParameter {
                         self.y_original.as_ref(),
                     )?
                 } else {
-                    reml_hessian_mgcv_exact_closed_form(&y_local, x, &w_local, &lambdas, penalties, Some(&xtwx_local), self.family)?
+                    reml_hessian_mgcv_exact_closed_form(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        self.family,
+                    )?
                 }
             } else {
                 reml_hessian_multi_cached(&y_local, x, &w_local, &lambdas, penalties, &xtwx_local)?
@@ -1354,9 +1447,9 @@ impl SmoothingParameter {
                 gs
             };
 
-            let (eigvals, eigvecs) = h_sub.eigh(UPLO::Upper).map_err(|e| {
-                GAMError::LinAlgError(format!("Hessian eigh failed: {:?}", e))
-            })?;
+            let (eigvals, eigvecs) = h_sub
+                .eigh(UPLO::Upper)
+                .map_err(|e| GAMError::LinAlgError(format!("Hessian eigh failed: {:?}", e)))?;
 
             // Modify eigenvalues: ABS for indefinite, floor for tiny.
             // mgcv's low.d = max(d) * .Machine$double.eps^.7 ≈ max(d) * 1.5e-11.
@@ -1592,7 +1685,8 @@ impl SmoothingParameter {
 
                 // Steepest descent: step = -gradient (scaled very small)
                 // Recompute gradient since it was moved earlier
-                let gradient_sd = reml_gradient_multi_qr_adaptive(&y_local, x, &w_local, &lambdas, penalties)?;
+                let gradient_sd =
+                    reml_gradient_multi_qr_adaptive(&y_local, x, &w_local, &lambdas, penalties)?;
 
                 // Try progressively smaller steepest descent steps
                 let mut sd_worked = false;
@@ -1664,8 +1758,9 @@ impl SmoothingParameter {
                     }
                     // Check if we're close enough to converged before giving up
                     // When at a minimum, no further progress is possible but gradient may still be small
-                    let gradient_check =
-                        reml_gradient_multi_qr_adaptive(&y_local, x, &w_local, &lambdas, penalties)?;
+                    let gradient_check = reml_gradient_multi_qr_adaptive(
+                        &y_local, x, &w_local, &lambdas, penalties,
+                    )?;
                     let grad_norm_final = gradient_check
                         .iter()
                         .map(|g| g.abs())
@@ -1968,12 +2063,12 @@ impl SmoothingParameter {
                     let det = h_ss * h_dd - h_sd * h_sd;
 
                     let (mut delta_s, mut delta_d) = if det.abs() > 1e-8 && det.is_finite() {
-                        ((-h_dd * g_s + h_sd * g_d) / det, (h_sd * g_s - h_ss * g_d) / det)
-                    } else {
                         (
-                            -g_s / h_ss.abs().max(1e-4),
-                            -g_d / h_dd.abs().max(1e-4),
+                            (-h_dd * g_s + h_sd * g_d) / det,
+                            (h_sd * g_s - h_ss * g_d) / det,
                         )
+                    } else {
+                        (-g_s / h_ss.abs().max(1e-4), -g_d / h_dd.abs().max(1e-4))
                     };
                     let max_abs = delta_s.abs().max(delta_d.abs());
                     if max_abs > 1.0 {
@@ -2200,7 +2295,10 @@ impl SmoothingParameter {
         };
         let rss = if std::env::var("MGCV_PROFILE").is_ok() {
             let r = y - &x.dot(beta);
-            r.iter().zip(w.iter()).map(|(r, wi)| wi * r * r).sum::<f64>()
+            r.iter()
+                .zip(w.iter())
+                .map(|(r, wi)| wi * r * r)
+                .sum::<f64>()
         } else {
             0.0
         };
@@ -2218,8 +2316,14 @@ impl SmoothingParameter {
         // λ_new = λ · phi · max(rank/λ − tr(A⁻¹S), ε) / (β'Sβ).
         let ranks_f64: Vec<f64> = penalty_ranks.iter().map(|&r| r as f64).collect();
         let new_lambdas = fellner_schall_step(
-            penalties, &ranks_f64, &lambdas, &a_inv, beta,
-            phi, /*log_step_clamp=*/ 3.0, /*lambda_bounds=*/ (1e-9, 1e7),
+            penalties,
+            &ranks_f64,
+            &lambdas,
+            &a_inv,
+            beta,
+            phi,
+            /*log_step_clamp=*/ 3.0,
+            /*lambda_bounds=*/ (1e-9, 1e7),
         );
         for i in 0..m {
             if std::env::var("MGCV_PROFILE").is_ok() {

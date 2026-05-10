@@ -50,8 +50,7 @@ impl ScoreFormula {
         match self {
             ScoreFormula::GamFit3 => {
                 let two_pi_phi = 2.0 * std::f64::consts::PI * sigma2;
-                dp / (2.0 * sigma2) - ls - 0.5 * (mp as f64) * two_pi_phi.ln()
-                    + 0.5 * log_det_h
+                dp / (2.0 * sigma2) - ls - 0.5 * (mp as f64) * two_pi_phi.ln() + 0.5 * log_det_h
                     - 0.5 * log_det_s
             }
             ScoreFormula::GamFit5 => {
@@ -96,7 +95,10 @@ pub enum Family {
     /// The actual per-observation weights are computed directly in
     /// `fit_pirls_tdist` — the `variance` method here is used only by code
     /// paths that do not call the tdist-specific fitter.
-    TDist { df: f64, sigma2: f64 },
+    TDist {
+        df: f64,
+        sigma2: f64,
+    },
     /// Tweedie distribution with log link (1 < p < 2).
     ///
     /// Log link: η = log(μ), μ = exp(η). Variance function V(μ) = μ^p.
@@ -106,7 +108,9 @@ pub enum Family {
     /// series summation for 1 < p < 2 — a port of mgcv's `tweedious` C
     /// function (misc.c:170). For y=0 the density simplifies; for y>0 the
     /// series `W = Σ_j W_j` is summed using log-sum-exp to avoid overflow.
-    Tweedie { p: f64 },
+    Tweedie {
+        p: f64,
+    },
     /// Quasi-Poisson: same variance V(μ)=μ and log link as Poisson, but
     /// the dispersion φ is **estimated from data** rather than fixed at 1.
     /// mgcv estimates φ̂ = Dp / (n − trA) (Pearson-style).
@@ -128,7 +132,9 @@ pub enum Family {
     /// The dispersion θ > 0 is either fixed (mgcv's `negbin(theta=...)`) or
     /// profiled jointly with λ (mgcv's `nb()` extended family). The standard
     /// scale parameter φ is fixed at 1 for NB; θ carries all overdispersion.
-    NegBin { theta: f64 },
+    NegBin {
+        theta: f64,
+    },
     /// Quantile (qgam-style) family using a smooth pinball loss.
     ///
     /// Implements the ELF (Extended Log-F) loss from Fasiolo et al. 2021 —
@@ -150,7 +156,10 @@ pub enum Family {
     /// pinball-loss smoothing (smaller σ → sharper quantile, larger σ →
     /// smoother loss). v1 takes σ as user-provided or a heuristic default;
     /// full qgam-style σ calibration is a deferred followup.
-    Quantile { tau: f64, sigma: f64 },
+    Quantile {
+        tau: f64,
+        sigma: f64,
+    },
 }
 
 impl Family {
@@ -185,8 +194,12 @@ impl Family {
         match self {
             Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => mu,
             Family::Binomial | Family::QuasiBinomial => (mu / (1.0 - mu)).ln(),
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
-            | Family::InverseGaussian | Family::NegBin { .. } => mu.ln(),
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => mu.ln(),
             Family::Gamma => 1.0 / mu,
         }
     }
@@ -199,8 +212,12 @@ impl Family {
                 let eta_safe = eta.max(-20.0).min(20.0);
                 1.0 / (1.0 + (-eta_safe).exp())
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
-            | Family::InverseGaussian | Family::NegBin { .. } => {
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => {
                 let eta_safe = eta.min(20.0);
                 eta_safe.exp()
             }
@@ -219,8 +236,12 @@ impl Family {
                 let mu = self.inverse_link(eta);
                 mu * (1.0 - mu)
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
-            | Family::InverseGaussian | Family::NegBin { .. } => eta.exp(),
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => eta.exp(),
             Family::Gamma => -1.0 / (eta * eta),
         }
     }
@@ -267,8 +288,12 @@ impl Family {
                 let one_minus = 1.0 - mu;
                 -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
-            | Family::InverseGaussian | Family::NegBin { .. } => -1.0 / (mu * mu),
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => -1.0 / (mu * mu),
             Family::Gamma => 2.0 / (mu * mu * mu),
         }
     }
@@ -281,8 +306,12 @@ impl Family {
                 let one_minus = 1.0 - mu;
                 2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
             }
-            Family::Poisson | Family::QuasiPoisson | Family::GammaLog | Family::Tweedie { .. }
-            | Family::InverseGaussian | Family::NegBin { .. } => 2.0 / (mu * mu * mu),
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => 2.0 / (mu * mu * mu),
             Family::Gamma => -6.0 / (mu * mu * mu * mu),
         }
     }
@@ -387,7 +416,8 @@ impl Family {
                 let nu = *df;
                 let half_nu_p1 = (nu + 1.0) / 2.0;
                 let half_nu = nu / 2.0;
-                n * (log_gamma(half_nu_p1) - log_gamma(half_nu)
+                n * (log_gamma(half_nu_p1)
+                    - log_gamma(half_nu)
                     - 0.5 * (std::f64::consts::PI * nu * scale).ln())
             }
             // Quantile/ELF saturated log-likelihood — port of qgam elf.R:204-216
@@ -429,8 +459,8 @@ impl Family {
                 y.iter()
                     .map(|&yi| {
                         let yi_p_theta = yi + theta;
-                        let lgam_term = log_gamma(yi_p_theta) - log_gamma(theta)
-                            - log_gamma(yi + 1.0);
+                        let lgam_term =
+                            log_gamma(yi_p_theta) - log_gamma(theta) - log_gamma(yi + 1.0);
                         let log_ratio_theta = theta.ln() - yi_p_theta.ln();
                         let y_log_term = if yi > 0.0 {
                             yi * (yi.ln() - yi_p_theta.ln())
@@ -460,8 +490,7 @@ impl Family {
                     let n_f = y.len() as f64;
                     let inv_phi = 1.0 / phi;
                     let ls_per_obs = -log_gamma(inv_phi) - inv_phi * phi.ln() - inv_phi;
-                    let sum_log_y: f64 =
-                        y.iter().filter(|&&yi| yi > 0.0).map(|&yi| yi.ln()).sum();
+                    let sum_log_y: f64 = y.iter().filter(|&&yi| yi > 0.0).map(|&yi| yi.ln()).sum();
                     return n_f * ls_per_obs - sum_log_y;
                 }
                 let (log_w, _, _) = tweedie_series(y, phi, *p);
@@ -565,13 +594,13 @@ pub(crate) fn digamma(mut x: f64) -> f64 {
     let xinv2 = xinv * xinv;
     result += x.ln() - 0.5 * xinv;
     let mut t = xinv2;
-    result -= t / 12.0;   // B2/2 = (1/6)/2
+    result -= t / 12.0; // B2/2 = (1/6)/2
     t *= xinv2;
-    result += t / 120.0;  // B4/4 = (-1/30)/4  → +1/120
+    result += t / 120.0; // B4/4 = (-1/30)/4  → +1/120
     t *= xinv2;
-    result -= t / 252.0;  // B6/6 = (1/42)/6   → -1/252
+    result -= t / 252.0; // B6/6 = (1/42)/6   → -1/252
     t *= xinv2;
-    result += t / 240.0;  // B8/8 = (-1/30)/8  → +1/240
+    result += t / 240.0; // B8/8 = (-1/30)/8  → +1/240
     result
 }
 
@@ -693,8 +722,7 @@ impl Family {
                     let h = phi * 1e-5;
                     let dls_plus = Family::Tweedie { p }.dls_dsigma2(y, phi + h);
                     let dls_minus = Family::Tweedie { p }.dls_dsigma2(y, phi - h);
-                    let fp = dp / (phi * phi * phi)
-                        - (dls_plus - dls_minus) / (2.0 * h)
+                    let fp = dp / (phi * phi * phi) - (dls_plus - dls_minus) / (2.0 * h)
                         + mp_f / (2.0 * phi * phi);
                     if fp.abs() < 1e-20 {
                         break;
@@ -788,8 +816,8 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
     let w_base = alpha * log_pm1 + rho / onep - twop.ln();
     // wb1_base: for obs i, wb1_j = -j/onep (= j/|onep| > 0 since onep < 0)
     let wb1_base = -1.0 / onep; // multiply by j to get wb1_j
-    // wp_base for dlogW/dp: misc.c:231
-    //   wp_base = (log(-onep) + rho)/onep^2 - alpha/onep + 1/(2-p)
+                                // wp_base for dlogW/dp: misc.c:231
+                                //   wp_base = (log(-onep) + rho)/onep^2 - alpha/onep + 1/(2-p)
     let wp_base = (log_pm1 + rho) / onep2 - alpha / onep + 1.0 / twop;
 
     let log_eps = f64::EPSILON * f64::EPSILON; // tolerance for convergence (~5e-32)
@@ -960,6 +988,7 @@ pub struct PiRLSResult {
     pub fitted_values: Array1<f64>,
     pub linear_predictor: Array1<f64>,
     pub weights: Array1<f64>,
+    pub working_response: Array1<f64>,
     pub deviance: f64,
     pub iterations: usize,
     pub converged: bool,
@@ -973,6 +1002,58 @@ pub struct PiRLSResult {
     /// `Family::TDist::df` after PIRLS so subsequent score evaluations
     /// see the correct df. `None` for non-TDist fitters.
     pub df: Option<f64>,
+}
+
+struct WorkingQuantities {
+    z: Array1<f64>,
+    w: Array1<f64>,
+}
+
+fn standard_glm_working_quantities(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    family: Family,
+    fisher_only: bool,
+) -> WorkingQuantities {
+    let n = y.len();
+    let use_fisher = fisher_only || family.is_canonical_link();
+    let mut z = Array1::zeros(n);
+    let mut w = Array1::zeros(n);
+
+    for i in 0..n {
+        let mu = family.inverse_link(eta[i]);
+        let dmu_deta = family.d_inverse_link(eta[i]);
+        let variance = family.variance(mu);
+        let var_safe = variance.max(1e-10);
+        if dmu_deta.abs() < 1e-10 {
+            z[i] = eta[i];
+            w[i] = 1e-10;
+            continue;
+        }
+
+        let wf = (dmu_deta * dmu_deta) / var_safe;
+        if use_fisher {
+            z[i] = eta[i] + (y[i] - mu) / dmu_deta;
+            w[i] = wf.max(1e-10);
+            continue;
+        }
+
+        let c_resid = y[i] - mu;
+        let dvar = family.dvar(mu);
+        let d2link = family.d2link(mu);
+        let alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
+        // Cholesky needs PSD weights; when Newton curvature goes negative,
+        // keep the existing fallback to Fisher scoring for that observation.
+        if alpha <= 0.0 {
+            z[i] = eta[i] + c_resid / dmu_deta;
+            w[i] = wf.max(1e-10);
+            continue;
+        }
+        z[i] = eta[i] + c_resid / (dmu_deta * alpha);
+        w[i] = wf * alpha;
+    }
+
+    WorkingQuantities { z, w }
 }
 
 /// Fit a GAM using PiRLS algorithm
@@ -1046,8 +1127,13 @@ pub fn fit_pirls_cached(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog
-            | Family::Tweedie { .. } | Family::InverseGaussian | Family::NegBin { .. } => y[i].max(0.1),
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::Gamma
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => y[i].max(0.1),
             // Identity-link families: initialize η = y directly.
             Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
         };
@@ -1072,49 +1158,9 @@ pub fn fit_pirls_cached(
     for iteration in 0..max_iter {
         iter = iteration + 1;
 
-        // Compute fitted values μ = g^(-1)(η)
-        let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
-
-        // Compute working response z and IRLS weights w in a single pass.
-        // Canonical link → Fisher scoring (E[w] = wf). Non-canonical → full
-        // Newton (per gam.fit3.r:505-515): w = wf·α, z = η + (y−μ)/(dμ/dη·α),
-        // where α = 1 + (y−μ)·(V'/V + g''·dμ/dη). The `c·` factor in mgcv
-        // becomes 0 at convergence (y ≈ μ), giving α → 1 and Newton → Fisher.
-        let use_fisher = family.is_canonical_link();
-        let mut z = Array1::zeros(n);
-        let mut w = Array1::zeros(n);
-        for i in 0..n {
-            let dmu_deta = family.d_inverse_link(eta[i]);
-            let variance = family.variance(mu[i]);
-            let var_safe = variance.max(1e-10);
-            if dmu_deta.abs() < 1e-10 {
-                z[i] = eta[i];
-                w[i] = 1e-10;
-                continue;
-            }
-            let wf = (dmu_deta * dmu_deta) / var_safe;
-            if use_fisher {
-                z[i] = eta[i] + (y[i] - mu[i]) / dmu_deta;
-                w[i] = wf.max(1e-10);
-            } else {
-                let c_resid = y[i] - mu[i];
-                let dvar = family.dvar(mu[i]);
-                let d2link = family.d2link(mu[i]);
-                let alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
-                // When α ≤ 0 the Newton weight goes negative (e.g. InverseGaussian+log
-                // at y < μ/2, or GammaLog far from convergence). mgcv handles negative
-                // weights via QR with column pivoting; our Cholesky solve needs PSD.
-                // Fall back to Fisher scoring (α=1) for those observations: same MLE
-                // limit as Newton, always positive weights, better than clamping to ε.
-                if alpha <= 0.0 {
-                    z[i] = eta[i] + (y[i] - mu[i]) / dmu_deta;
-                    w[i] = wf.max(1e-10);
-                    continue;
-                }
-                z[i] = eta[i] + (y[i] - mu[i]) / (dmu_deta * alpha);
-                w[i] = wf * alpha;
-            }
-        }
+        let working = standard_glm_working_quantities(y, &eta, family, false);
+        let z = working.z;
+        let w = working.w;
 
         // X'WX using BLAS (instead of manual triple-nested loop)
         let xtwx = compute_xtwx(x, &w);
@@ -1163,22 +1209,17 @@ pub fn fit_pirls_cached(
     // Compute deviance
     let deviance = compute_deviance(y, &fitted_values, family);
 
-    // Compute final weights
-    let weights: Array1<f64> = eta
-        .iter()
-        .map(|&e| {
-            let mu = family.inverse_link(e);
-            let dmu_deta = family.d_inverse_link(e);
-            let variance = family.variance(mu);
-            ((dmu_deta * dmu_deta) / variance.max(1e-10)).max(1e-10)
-        })
-        .collect();
+    // Preserve the historical final scoring contract: outer REML callbacks
+    // consume Fisher working quantities at the converged η, even if the inner
+    // dense PIRLS iterations used Newton alpha correction.
+    let working = standard_glm_working_quantities(y, &eta, family, true);
 
     Ok(PiRLSResult {
         coefficients: beta,
         fitted_values,
         linear_predictor: eta,
-        weights,
+        weights: working.w,
+        working_response: working.z,
         deviance,
         iterations: iter,
         converged,
@@ -1268,6 +1309,7 @@ fn fit_pirls_gaussian_fast(
         fitted_values,
         linear_predictor: eta,
         weights,
+        working_response: y.clone(),
         deviance,
         iterations: 1,
         converged: true,
@@ -1316,8 +1358,7 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                     // For y=0: deviance = 2 * μ^(2-p) / (2-p)
                     2.0 * mui.powf(twop) / twop
                 } else {
-                    2.0 * (yi.powf(twop) / (onep * twop)
-                        - yi * mui.powf(onep) / onep
+                    2.0 * (yi.powf(twop) / (onep * twop) - yi * mui.powf(onep) / onep
                         + mui.powf(twop) / twop)
                 }
             }
@@ -1405,7 +1446,9 @@ pub fn profile_df(residuals: &[f64], sigma2: f64) -> f64 {
             })
             .sum();
         // Negative profile log-likelihood (minimise ↔ maximise log-likelihood)
-        -(n * (log_gamma(half_nu_p1) - log_gamma(half_nu) - 0.5 * (nu * std::f64::consts::PI * sigma2.max(1e-300)).ln())
+        -(n * (log_gamma(half_nu_p1)
+            - log_gamma(half_nu)
+            - 0.5 * (nu * std::f64::consts::PI * sigma2.max(1e-300)).ln())
             - half_nu_p1 * log_sum)
     };
 
@@ -1466,21 +1509,41 @@ fn brent_minimize<F: Fn(f64) -> f64>(
             d = golden * e;
         }
 
-        let u = x + if d.abs() >= tol1 { d } else if d > 0.0 { tol1 } else { -tol1 };
+        let u = x + if d.abs() >= tol1 {
+            d
+        } else if d > 0.0 {
+            tol1
+        } else {
+            -tol1
+        };
         let fu = f(u);
 
         if fu <= fx {
-            if u < x { b = x; } else { a = x; }
-            v = w; fv = fw;
-            w = x; fw = fx;
-            x = u; fx = fu;
+            if u < x {
+                b = x;
+            } else {
+                a = x;
+            }
+            v = w;
+            fv = fw;
+            w = x;
+            fw = fx;
+            x = u;
+            fx = fu;
         } else {
-            if u < x { a = u; } else { b = u; }
+            if u < x {
+                a = u;
+            } else {
+                b = u;
+            }
             if fu <= fw || w == x {
-                v = w; fv = fw;
-                w = u; fw = fu;
+                v = w;
+                fv = fw;
+                w = u;
+                fw = fu;
             } else if fu <= fv || v == x || v == w {
-                v = u; fv = fu;
+                v = u;
+                fv = fu;
             }
         }
     }
@@ -1531,12 +1594,14 @@ pub fn fit_pirls_tdist(
     if let Some(df) = fixed_df {
         if df < 2.0 {
             return Err(GAMError::InvalidParameter(format!(
-                "t-dist df must be >= 2.0, got {}", df
+                "t-dist df must be >= 2.0, got {}",
+                df
             )));
         }
         if df > 100.0 {
             return Err(GAMError::InvalidParameter(format!(
-                "t-dist df must be <= 100.0, got {}", df
+                "t-dist df must be <= 100.0, got {}",
+                df
             )));
         }
     }
@@ -1557,7 +1622,8 @@ pub fn fit_pirls_tdist(
     // Initialise β = 0, η = y (identity link), σ² from caller / sample variance.
     let mut beta = Array1::zeros(p);
     let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
-    let y_var: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
+    let y_var: f64 =
+        y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
     let mut sigma2 = fixed_sigma2.unwrap_or_else(|| y_var.max(1e-6)).max(1e-6);
 
     // df: start at user value or 5.0 (a reasonable default)
@@ -1641,7 +1707,11 @@ pub fn fit_pirls_tdist(
             a[[i, i]] += ridge;
         }
 
-        let wz: Array1<f64> = w.iter().zip(z_work.iter()).map(|(&wi, &zi)| wi * zi).collect();
+        let wz: Array1<f64> = w
+            .iter()
+            .zip(z_work.iter())
+            .map(|(&wi, &zi)| wi * zi)
+            .collect();
         let xtwz = x.t().dot(&wz);
 
         let beta_old = beta.clone();
@@ -1665,12 +1735,12 @@ pub fn fit_pirls_tdist(
         // letting the LAML score's Jeffreys-like correction shift σ² away
         // from the MLE toward a finite-df minimum.
         if fixed_sigma2.is_none() {
-            let w_new: Vec<f64> = residuals
+            let w_new: Vec<f64> = residuals.iter().map(|&r| t_weight(r, sigma2, df)).collect();
+            let sum_wr2: f64 = w_new
                 .iter()
-                .map(|&r| t_weight(r, sigma2, df))
-                .collect();
-            let sum_wr2: f64 =
-                w_new.iter().zip(residuals.iter()).map(|(&wi, &ri)| wi * ri * ri).sum();
+                .zip(residuals.iter())
+                .map(|(&wi, &ri)| wi * ri * ri)
+                .sum();
             sigma2 = (sum_wr2 / n as f64).max(1e-6);
         }
         let _ = p;
@@ -1715,6 +1785,17 @@ pub fn fit_pirls_tdist(
             }
         })
         .collect();
+    let working_response: Array1<f64> = residuals_final
+        .iter()
+        .zip(eta.iter())
+        .map(|(&r, &etai)| {
+            if use_newton_working {
+                t_newton_working(r, etai, sigma2, df).1
+            } else {
+                etai + r
+            }
+        })
+        .collect();
 
     // Deviance as weighted RSS (used for REML score; not the t-log-likelihood).
     let deviance: f64 = residuals_final.iter().map(|&r| r * r).sum();
@@ -1724,6 +1805,7 @@ pub fn fit_pirls_tdist(
         fitted_values,
         linear_predictor: eta,
         weights,
+        working_response,
         deviance,
         iterations: iter,
         converged,
@@ -1772,7 +1854,9 @@ pub fn fit_pirls_quantile(
 
     if x.nrows() != n {
         return Err(GAMError::DimensionMismatch(format!(
-            "X has {} rows but y has {} elements", x.nrows(), n
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            n
         )));
     }
     if lambda.len() != penalties.len() {
@@ -1782,7 +1866,8 @@ pub fn fit_pirls_quantile(
     }
     if tau <= 0.0 || tau >= 1.0 {
         return Err(GAMError::InvalidParameter(format!(
-            "quantile tau must be in (0, 1), got {}", tau
+            "quantile tau must be in (0, 1), got {}",
+            tau
         )));
     }
 
@@ -1863,8 +1948,8 @@ pub fn fit_pirls_quantile(
     } else {
         let err = 0.05_f64;
         let sigma2_floor = sigma2_hat.max(1e-6);
-        let co_default = err * (2.0 * std::f64::consts::PI * sigma2_floor).sqrt()
-            / (2.0 * 2.0_f64.ln());
+        let co_default =
+            err * (2.0 * std::f64::consts::PI * sigma2_floor).sqrt() / (2.0 * 2.0_f64.ln());
         let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
         co_default * tail_scale
     };
@@ -1950,12 +2035,19 @@ pub fn fit_pirls_quantile(
     let fitted_values = eta.clone();
 
     let mut weights = Array1::<f64>::zeros(n);
+    let mut working_response = Array1::<f64>::zeros(n);
     let mut deviance = 0.0;
     let log2 = 2.0_f64.ln();
     for i in 0..n {
         let r = y[i] - eta[i];
         let s = sigmoid_stable(r * inv_sigma);
         weights[i] = s * (1.0 - s) * inv_sigma * inv_sigma;
+        let g = (s - (1.0 - tau)) * inv_sigma;
+        working_response[i] = if weights[i] > 1e-10 {
+            eta[i] + g / weights[i]
+        } else {
+            eta[i]
+        };
         // Per-obs ELF deviance: 2·(L(r) - log 2)
         let r_over_sigma = r * inv_sigma;
         let softplus = if r_over_sigma > 0.0 {
@@ -1972,6 +2064,7 @@ pub fn fit_pirls_quantile(
         fitted_values,
         linear_predictor: eta,
         weights,
+        working_response,
         deviance,
         iterations: iter,
         converged,
@@ -2049,7 +2142,11 @@ fn fit_pirls_quantile_perobs_sigma(
             let r = y[i] - eta_t[i];
             let u = r * inv_si;
             // Stable softplus.
-            let sp = if u > 0.0 { u + (-u).exp().ln_1p() } else { u.exp().ln_1p() };
+            let sp = if u > 0.0 {
+                u + (-u).exp().ln_1p()
+            } else {
+                u.exp().ln_1p()
+            };
             let l = -r * (1.0 - tau) * inv_si + sp;
             if !l.is_finite() {
                 return f64::INFINITY;
@@ -2083,11 +2180,19 @@ fn fit_pirls_quantile_perobs_sigma(
         let xtwx = compute_xtwx(x, &w);
         let mut a = &xtwx + s_total;
         let mut md: f64 = 1.0;
-        for i in 0..p { md = md.max(a[[i, i]].abs()); }
-        for i in 0..p { a[[i, i]] += ridge_scale * md; }
+        for i in 0..p {
+            md = md.max(a[[i, i]].abs());
+        }
+        for i in 0..p {
+            a[[i, i]] += ridge_scale * md;
+        }
         // X' (W·η + g) — well-defined at saturation.
-        let rhs_pt: Array1<f64> = w.iter().zip(eta.iter()).zip(g.iter())
-            .map(|((&wi, &ei), &gi)| wi * ei + gi).collect();
+        let rhs_pt: Array1<f64> = w
+            .iter()
+            .zip(eta.iter())
+            .zip(g.iter())
+            .map(|((&wi, &ei), &gi)| wi * ei + gi)
+            .collect();
         let rhs = x.t().dot(&rhs_pt);
         let beta_proposed = solve(a, rhs)?;
 
@@ -2096,14 +2201,19 @@ fn fit_pirls_quantile_perobs_sigma(
         // (especially when σ varies widely per-obs), a smaller step
         // prevents the diverge-to-extreme failure mode where weights
         // collapse near the new η and β explodes on the next iter.
-        let direction: Array1<f64> = beta_proposed.iter().zip(beta.iter())
-            .map(|(&bn, &bo)| bn - bo).collect();
+        let direction: Array1<f64> = beta_proposed
+            .iter()
+            .zip(beta.iter())
+            .map(|(&bn, &bo)| bn - bo)
+            .collect();
         let mut alpha = 1.0_f64;
         let mut accepted = false;
         let mut beta_new = beta.clone();
         let mut obj_new = obj_cur;
         for _ in 0..20 {
-            for j in 0..p { beta_new[j] = beta[j] + alpha * direction[j]; }
+            for j in 0..p {
+                beta_new[j] = beta[j] + alpha * direction[j];
+            }
             obj_new = elf_deviance(&beta_new);
             if obj_new.is_finite() && obj_new <= obj_cur + 1e-10 {
                 accepted = true;
@@ -2117,8 +2227,11 @@ fn fit_pirls_quantile_perobs_sigma(
             break;
         }
 
-        let max_change = beta_new.iter().zip(beta.iter())
-            .map(|(b, b_old)| (b - b_old).abs()).fold(0.0_f64, f64::max);
+        let max_change = beta_new
+            .iter()
+            .zip(beta.iter())
+            .map(|(b, b_old)| (b - b_old).abs())
+            .fold(0.0_f64, f64::max);
         beta = beta_new;
         obj_cur = obj_new;
 
@@ -2134,7 +2247,11 @@ fn fit_pirls_quantile_perobs_sigma(
         let inv_si = 1.0 / sigma_per[i];
         let r = y[i] - eta[i];
         let u = r * inv_si;
-        let softplus = if u > 0.0 { u + (-u).exp().ln_1p() } else { u.exp().ln_1p() };
+        let softplus = if u > 0.0 {
+            u + (-u).exp().ln_1p()
+        } else {
+            u.exp().ln_1p()
+        };
         let l = -r * (1.0 - tau) * inv_si + softplus;
         deviance += 2.0 * (l - log2);
     }
@@ -2187,24 +2304,30 @@ pub fn fit_pirls_quantile_lss(
 
     if x_loc.nrows() != n {
         return Err(GAMError::DimensionMismatch(format!(
-            "X_loc has {} rows but y has {} elements", x_loc.nrows(), n
+            "X_loc has {} rows but y has {} elements",
+            x_loc.nrows(),
+            n
         )));
     }
     if sigma_g_per_obs.len() != n {
         return Err(GAMError::DimensionMismatch(format!(
             "sigma_g_per_obs has {} elements but y has {} elements",
-            sigma_g_per_obs.len(), n
+            sigma_g_per_obs.len(),
+            n
         )));
     }
     if tau <= 0.0 || tau >= 1.0 {
         return Err(GAMError::InvalidParameter(format!(
-            "quantile tau must be in (0, 1), got {}", tau
+            "quantile tau must be in (0, 1), got {}",
+            tau
         )));
     }
     if s_loc_total.nrows() != p_loc || s_loc_total.ncols() != p_loc {
         return Err(GAMError::DimensionMismatch(format!(
             "s_loc_total must be ({0}, {0}), got ({1}, {2})",
-            p_loc, s_loc_total.nrows(), s_loc_total.ncols()
+            p_loc,
+            s_loc_total.nrows(),
+            s_loc_total.ncols()
         )));
     }
 
@@ -2213,14 +2336,12 @@ pub fn fit_pirls_quantile_lss(
     // with varHat ≡ mean(σ_G)² (qgam.R:156, varHat from gaulss σ̂_G²).
     // Tail widening at extreme τ — matches fit_pirls_quantile's scalar
     // default to keep IRLS weights well-conditioned.
-    let sigma_g_mean: f64 = sigma_g_per_obs.iter().copied().sum::<f64>()
-        / (n as f64).max(1.0);
+    let sigma_g_mean: f64 = sigma_g_per_obs.iter().copied().sum::<f64>() / (n as f64).max(1.0);
     let sigma_g_mean = sigma_g_mean.max(1e-8);
     let sigma_global = sigma_global.unwrap_or_else(|| {
         let err = 0.05_f64;
         let var_hat = sigma_g_mean * sigma_g_mean;
-        let base = err * (2.0 * std::f64::consts::PI * var_hat).sqrt()
-            / (2.0 * 2.0_f64.ln());
+        let base = err * (2.0 * std::f64::consts::PI * var_hat).sqrt() / (2.0 * 2.0_f64.ln());
         let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
         base * tail_scale
     });
@@ -2229,13 +2350,18 @@ pub fn fit_pirls_quantile_lss(
     // shape, normalises mean to σ_global. σ_G floor of 1e-8 prevents
     // division by zero; no upper floor needed since the IRLS line
     // search handles the upper end via deviance check.
-    let sigma_per_obs: Array1<f64> = sigma_g_per_obs.iter()
+    let sigma_per_obs: Array1<f64> = sigma_g_per_obs
+        .iter()
         .map(|&sg| sigma_global * sg.max(1e-8) / sigma_g_mean)
         .collect();
 
     // Match fit_pirls_quantile's ridge_scale formula.
-    let num_penalties_proxy = (s_loc_total.diag().iter()
-        .filter(|&&v| v.abs() > 0.0).count() as f64).max(1.0);
+    let num_penalties_proxy = (s_loc_total
+        .diag()
+        .iter()
+        .filter(|&&v| v.abs() > 0.0)
+        .count() as f64)
+        .max(1.0);
     let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
         1e-12
     } else {
@@ -2248,14 +2374,22 @@ pub fn fit_pirls_quantile_lss(
     let xtx = compute_xtwx(x_loc, &Array1::ones(n));
     let mut a_init = &xtx + s_loc_total;
     let mut md: f64 = 1.0;
-    for i in 0..p_loc { md = md.max(a_init[[i, i]].abs()); }
-    for i in 0..p_loc { a_init[[i, i]] += ridge_scale * md; }
+    for i in 0..p_loc {
+        md = md.max(a_init[[i, i]].abs());
+    }
+    for i in 0..p_loc {
+        a_init[[i, i]] += ridge_scale * md;
+    }
     let xty = x_loc.t().dot(y);
     let beta_gauss = solve(a_init.clone(), xty)?;
 
     let mu: Array1<f64> = x_loc.dot(&beta_gauss);
-    let mut r_over_sigma: Vec<f64> = y.iter().zip(mu.iter()).zip(sigma_per_obs.iter())
-        .map(|((&yi, &mi), &si)| (yi - mi) / si).collect();
+    let mut r_over_sigma: Vec<f64> = y
+        .iter()
+        .zip(mu.iter())
+        .zip(sigma_per_obs.iter())
+        .map(|((&yi, &mi), &si)| (yi - mi) / si)
+        .collect();
     r_over_sigma.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let qi = ((n as f64 - 1.0) * tau).round() as usize;
     let q_z = r_over_sigma[qi.min(n - 1)];
@@ -2266,11 +2400,16 @@ pub fn fit_pirls_quantile_lss(
     let beta_loc_init = &beta_gauss + &delta_beta;
 
     // ── Per-obs-σ ELF IRLS for β_loc. ──
-    let (beta_loc, eta_loc, deviance, iter, converged) =
-        fit_pirls_quantile_perobs_sigma(
-            y, x_loc, s_loc_total, &sigma_per_obs, tau,
-            &beta_loc_init, max_iter, tolerance,
-        )?;
+    let (beta_loc, eta_loc, deviance, iter, converged) = fit_pirls_quantile_perobs_sigma(
+        y,
+        x_loc,
+        s_loc_total,
+        &sigma_per_obs,
+        tau,
+        &beta_loc_init,
+        max_iter,
+        tolerance,
+    )?;
 
     let eta_scale: Array1<f64> = sigma_per_obs.iter().map(|&s| s.ln()).collect();
 
@@ -2334,24 +2473,29 @@ pub fn fit_pirls_quantile_lss_fs_tune(
 
     if x_loc.nrows() != n {
         return Err(GAMError::DimensionMismatch(format!(
-            "X_loc has {} rows but y has {} elements", x_loc.nrows(), n
+            "X_loc has {} rows but y has {} elements",
+            x_loc.nrows(),
+            n
         )));
     }
     if sigma_g_per_obs.len() != n {
         return Err(GAMError::DimensionMismatch(format!(
             "sigma_g_per_obs has {} elements but y has {} elements",
-            sigma_g_per_obs.len(), n
+            sigma_g_per_obs.len(),
+            n
         )));
     }
     if tau <= 0.0 || tau >= 1.0 {
         return Err(GAMError::InvalidParameter(format!(
-            "quantile tau must be in (0, 1), got {}", tau
+            "quantile tau must be in (0, 1), got {}",
+            tau
         )));
     }
     if penalties_loc.len() != lambda_init.len() {
         return Err(GAMError::DimensionMismatch(format!(
             "penalties_loc has {} entries but lambda_init has {}",
-            penalties_loc.len(), lambda_init.len()
+            penalties_loc.len(),
+            lambda_init.len()
         )));
     }
     for pen in penalties_loc {
@@ -2364,18 +2508,17 @@ pub fn fit_pirls_quantile_lss_fs_tune(
     }
 
     // ── σ_global + per-obs σ — identical to the fixed-λ path. ──
-    let sigma_g_mean: f64 = sigma_g_per_obs.iter().copied().sum::<f64>()
-        / (n as f64).max(1.0);
+    let sigma_g_mean: f64 = sigma_g_per_obs.iter().copied().sum::<f64>() / (n as f64).max(1.0);
     let sigma_g_mean = sigma_g_mean.max(1e-8);
     let sigma_global = sigma_global.unwrap_or_else(|| {
         let err = 0.05_f64;
         let var_hat = sigma_g_mean * sigma_g_mean;
-        let base = err * (2.0 * std::f64::consts::PI * var_hat).sqrt()
-            / (2.0 * 2.0_f64.ln());
+        let base = err * (2.0 * std::f64::consts::PI * var_hat).sqrt() / (2.0 * 2.0_f64.ln());
         let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
         base * tail_scale
     });
-    let sigma_per_obs: Array1<f64> = sigma_g_per_obs.iter()
+    let sigma_per_obs: Array1<f64> = sigma_g_per_obs
+        .iter()
         .map(|&sg| sigma_global * sg.max(1e-8) / sigma_g_mean)
         .collect();
 
@@ -2403,12 +2546,20 @@ pub fn fit_pirls_quantile_lss_fs_tune(
     let xtx = compute_xtwx(x_loc, &Array1::ones(n));
     let mut a_init = &xtx + &s_total;
     let mut md: f64 = 1.0;
-    for i in 0..p_loc { md = md.max(a_init[[i, i]].abs()); }
-    for i in 0..p_loc { a_init[[i, i]] += ridge_scale * md; }
+    for i in 0..p_loc {
+        md = md.max(a_init[[i, i]].abs());
+    }
+    for i in 0..p_loc {
+        a_init[[i, i]] += ridge_scale * md;
+    }
     let beta_gauss = solve(a_init.clone(), x_loc.t().dot(y))?;
     let mu: Array1<f64> = x_loc.dot(&beta_gauss);
-    let mut r_over_sigma: Vec<f64> = y.iter().zip(mu.iter()).zip(sigma_per_obs.iter())
-        .map(|((&yi, &mi), &si)| (yi - mi) / si).collect();
+    let mut r_over_sigma: Vec<f64> = y
+        .iter()
+        .zip(mu.iter())
+        .zip(sigma_per_obs.iter())
+        .map(|((&yi, &mi), &si)| (yi - mi) / si)
+        .collect();
     r_over_sigma.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let qi = ((n as f64 - 1.0) * tau).round() as usize;
     let q_z = r_over_sigma[qi.min(n - 1)];
@@ -2433,11 +2584,16 @@ pub fn fit_pirls_quantile_lss_fs_tune(
             pen.scaled_add_to(&mut s_cur, *lam);
         }
 
-        let (beta_new, eta_new, _dev_new, _iter_n, _conv_n) =
-            fit_pirls_quantile_perobs_sigma(
-                y, x_loc, &s_cur, &sigma_per_obs, tau,
-                &beta_loc, max_inner, tolerance,
-            )?;
+        let (beta_new, eta_new, _dev_new, _iter_n, _conv_n) = fit_pirls_quantile_perobs_sigma(
+            y,
+            x_loc,
+            &s_cur,
+            &sigma_per_obs,
+            tau,
+            &beta_loc,
+            max_inner,
+            tolerance,
+        )?;
         beta_loc = beta_new;
 
         // IRLS weights at converged β: w_i = s(1-s)/σ², σ = sigma_per_obs[i].
@@ -2458,28 +2614,42 @@ pub fn fit_pirls_quantile_lss_fs_tune(
         // A = X'WX + Σ λ_j S_j + ridge ⇒ Cholesky ⇒ A⁻¹.
         let mut a = &xtwx + &s_cur;
         let mut max_diag: f64 = 1.0;
-        for i in 0..p_loc { max_diag = max_diag.max(a[[i, i]].abs()); }
+        for i in 0..p_loc {
+            max_diag = max_diag.max(a[[i, i]].abs());
+        }
         let ridge = ridge_scale * max_diag;
-        for i in 0..p_loc { a[[i, i]] += ridge; }
+        for i in 0..p_loc {
+            a[[i, i]] += ridge;
+        }
         let chol = match a.cholesky(UPLO::Lower) {
             Ok(l) => l,
             Err(_) => {
                 let extra = 1e-3 * max_diag;
-                for i in 0..p_loc { a[[i, i]] += extra; }
-                a.cholesky(UPLO::Lower).map_err(|_| GAMError::SingularMatrix)?
+                for i in 0..p_loc {
+                    a[[i, i]] += extra;
+                }
+                a.cholesky(UPLO::Lower)
+                    .map_err(|_| GAMError::SingularMatrix)?
             }
         };
         let a_inv = chol.inv_into().map_err(|_| GAMError::SingularMatrix)?;
 
         // φ = 1 for ELF (σ is the family parameter, dispersion fixed at 1).
         let new_lambdas = crate::smooth::fellner_schall_step(
-            penalties_loc, &penalty_ranks, &lambdas,
-            &a_inv, &beta_loc, /*phi=*/ 1.0,
-            /*log_step_clamp=*/ 3.0, /*lambda_bounds=*/ (1e-9, 1e7),
+            penalties_loc,
+            &penalty_ranks,
+            &lambdas,
+            &a_inv,
+            &beta_loc,
+            /*phi=*/ 1.0,
+            /*log_step_clamp=*/ 3.0,
+            /*lambda_bounds=*/ (1e-9, 1e7),
         );
 
         // Track max |Δlog λ| for the convergence check.
-        let max_log_step = lambdas.iter().zip(new_lambdas.iter())
+        let max_log_step = lambdas
+            .iter()
+            .zip(new_lambdas.iter())
             .map(|(&old, &new_lam)| (new_lam.ln() - old.ln()).abs())
             .fold(0.0_f64, f64::max);
         lambdas = new_lambdas;
@@ -2496,8 +2666,14 @@ pub fn fit_pirls_quantile_lss_fs_tune(
     }
     let (beta_loc, eta_loc, deviance, iter_final, converged_final) =
         fit_pirls_quantile_perobs_sigma(
-            y, x_loc, &s_final, &sigma_per_obs, tau,
-            &beta_loc, max_inner, tolerance,
+            y,
+            x_loc,
+            &s_final,
+            &sigma_per_obs,
+            tau,
+            &beta_loc,
+            max_inner,
+            tolerance,
         )?;
 
     let eta_scale: Array1<f64> = sigma_per_obs.iter().map(|&s| s.ln()).collect();
@@ -2561,8 +2737,13 @@ pub fn fit_pirls_discretized(
     for i in 0..n {
         let safe_y = match family {
             Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
-            Family::Poisson | Family::QuasiPoisson | Family::Gamma | Family::GammaLog
-            | Family::Tweedie { .. } | Family::InverseGaussian | Family::NegBin { .. } => y[i].max(0.1),
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::Gamma
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => y[i].max(0.1),
             // Identity-link families: initialize η = y directly.
             Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
         };
@@ -2587,20 +2768,9 @@ pub fn fit_pirls_discretized(
     for iteration in 0..max_iter {
         iter = iteration + 1;
 
-        let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
-
-        let mut z = Array1::zeros(n);
-        let mut w = Array1::zeros(n);
-        for i in 0..n {
-            let dmu_deta = family.d_inverse_link(eta[i]);
-            let variance = family.variance(mu[i]);
-            if dmu_deta.abs() < 1e-10 {
-                z[i] = eta[i];
-            } else {
-                z[i] = eta[i] + (y[i] - mu[i]) / dmu_deta;
-            }
-            w[i] = ((dmu_deta * dmu_deta) / variance.max(1e-10)).max(1e-10);
-        }
+        let working = standard_glm_working_quantities(y, &eta, family, true);
+        let z = working.z;
+        let w = working.w;
 
         // X'WX via scatter-gather: O(n*k + m*k^2) instead of O(n*k^2)
         let xtwx = disc.compute_xtwx(&w);
@@ -2641,21 +2811,14 @@ pub fn fit_pirls_discretized(
     let fitted_values: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
     let deviance = compute_deviance(y, &fitted_values, family);
 
-    let weights: Array1<f64> = eta
-        .iter()
-        .map(|&e| {
-            let mu = family.inverse_link(e);
-            let dmu_deta = family.d_inverse_link(e);
-            let variance = family.variance(mu);
-            ((dmu_deta * dmu_deta) / variance.max(1e-10)).max(1e-10)
-        })
-        .collect();
+    let working = standard_glm_working_quantities(y, &eta, family, true);
 
     Ok(PiRLSResult {
         coefficients: beta,
         fitted_values,
         linear_predictor: eta,
-        weights,
+        weights: working.w,
+        working_response: working.z,
         deviance,
         iterations: iter,
         converged,
@@ -2729,6 +2892,7 @@ fn fit_pirls_gaussian_discretized(
         fitted_values,
         linear_predictor: eta,
         weights,
+        working_response: y.clone(),
         deviance,
         iterations: 1,
         converged: true,
@@ -2788,7 +2952,12 @@ mod tests {
                 }
                 let analytic = fam.dvar(mu);
                 let numeric = cd(|m| fam.variance(m), mu, h);
-                assert_close(analytic, numeric, 1e-6, &format!("dvar {:?} mu={}", fam, mu));
+                assert_close(
+                    analytic,
+                    numeric,
+                    1e-6,
+                    &format!("dvar {:?} mu={}", fam, mu),
+                );
             }
         }
     }
@@ -2810,7 +2979,12 @@ mod tests {
                 }
                 let analytic = fam.d2var(mu);
                 let numeric = cd(|m| fam.dvar(m), mu, h);
-                assert_close(analytic, numeric, 1e-6, &format!("d2var {:?} mu={}", fam, mu));
+                assert_close(
+                    analytic,
+                    numeric,
+                    1e-6,
+                    &format!("d2var {:?} mu={}", fam, mu),
+                );
             }
         }
     }
@@ -2834,9 +3008,13 @@ mod tests {
                     continue;
                 }
                 let analytic = fam.d2link(mu);
-                let numeric =
-                    (fam.link(mu + h) - 2.0 * fam.link(mu) + fam.link(mu - h)) / (h * h);
-                assert_close(analytic, numeric, 1e-3, &format!("d2link {:?} mu={}", fam, mu));
+                let numeric = (fam.link(mu + h) - 2.0 * fam.link(mu) + fam.link(mu - h)) / (h * h);
+                assert_close(
+                    analytic,
+                    numeric,
+                    1e-3,
+                    &format!("d2link {:?} mu={}", fam, mu),
+                );
             }
         }
     }
@@ -2858,7 +3036,12 @@ mod tests {
                 }
                 let analytic = fam.d3link(mu);
                 let numeric = cd(|m| fam.d2link(m), mu, h);
-                assert_close(analytic, numeric, 1e-3, &format!("d3link {:?} mu={}", fam, mu));
+                assert_close(
+                    analytic,
+                    numeric,
+                    1e-3,
+                    &format!("d3link {:?} mu={}", fam, mu),
+                );
             }
         }
     }
@@ -2944,8 +3127,14 @@ mod tests {
     #[test]
     fn test_estimate_phi_mgcv_fixed_dispersion() {
         let y = Array1::<f64>::ones(10);
-        assert_eq!(Family::Poisson.estimate_phi_mgcv(&y, 50.0, 3, 1.0, 2.0), 1.0);
-        assert_eq!(Family::Binomial.estimate_phi_mgcv(&y, 50.0, 3, 1.0, 2.0), 1.0);
+        assert_eq!(
+            Family::Poisson.estimate_phi_mgcv(&y, 50.0, 3, 1.0, 2.0),
+            1.0
+        );
+        assert_eq!(
+            Family::Binomial.estimate_phi_mgcv(&y, 50.0, 3, 1.0, 2.0),
+            1.0
+        );
     }
 
     /// estimate_phi_mgcv Gamma: verify F(phi) ≈ 0 at the solved phi.
@@ -2964,7 +3153,10 @@ mod tests {
         let mp_f = mp as f64;
         let f_at_phi = dp + 2.0 * n_f * (digamma(1.0 / phi) + phi.ln()) + mp_f * phi;
         let tol = 1e-8 * (dp.abs() + mp_f + 1.0);
-        println!("Gamma phi = {:.10}, F(phi) = {:.3e}, tol = {:.3e}", phi, f_at_phi, tol);
+        println!(
+            "Gamma phi = {:.10}, F(phi) = {:.3e}, tol = {:.3e}",
+            phi, f_at_phi, tol
+        );
         assert!(
             f_at_phi.abs() < tol,
             "F(phi) = {:.3e} is not near zero (tol {:.3e}); phi = {}",

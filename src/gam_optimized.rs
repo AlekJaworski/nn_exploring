@@ -44,11 +44,7 @@ impl FitCache {
     /// step so our reported λ sits in raw-Z'SZ coordinates (closer to
     /// mgcv's but still not identical because mgcv additionally
     /// diagonalises the penalty via nat.param — that's a follow-up).
-    fn new(
-        x: &Array2<f64>,
-        smooth_terms: &mut [SmoothTerm],
-        mgcv_exact: bool,
-    ) -> Result<Self> {
+    fn new(x: &Array2<f64>, smooth_terms: &mut [SmoothTerm], mgcv_exact: bool) -> Result<Self> {
         let cache_start = Instant::now();
         let n = x.nrows();
 
@@ -299,7 +295,11 @@ impl FitCache {
         // (driven by the outer log σ² Newton block).
         if let crate::pirls::Family::TDist { df, sigma2 } = family {
             let fixed_df = if df > 0.0 { Some(df) } else { None };
-            let fixed_sigma2 = if tdist_outer_sigma2 { Some(sigma2) } else { None };
+            let fixed_sigma2 = if tdist_outer_sigma2 {
+                Some(sigma2)
+            } else {
+                None
+            };
             return fit_pirls_tdist(
                 y,
                 &self.design_matrix,
@@ -585,8 +585,8 @@ impl GAM {
         // Initial θ=0 ⟹ p=1.5 (midpoint of [1.001, 1.999]).
         smoothing_params.tweedie_profile = self.tweedie_profile;
         smoothing_params.tweedie_theta = 0.0; // start at p=1.5
-        // Profile-θ for NegBin: enable the log(θ) Newton step in the outer loop.
-        // Initial log(θ) = log(2.0) (θ=2 is a reasonable starting point).
+                                              // Profile-θ for NegBin: enable the log(θ) Newton step in the outer loop.
+                                              // Initial log(θ) = log(2.0) (θ=2 is a reasonable starting point).
         smoothing_params.negbin_profile = self.negbin_profile;
         if let crate::pirls::Family::NegBin { theta } = self.family {
             smoothing_params.negbin_log_theta = theta.ln();
@@ -607,17 +607,17 @@ impl GAM {
             // enum's σ² so the FIRST PIRLS call uses this seed (otherwise
             // the init `sigma2: 1.0` would feed PIRLS).
             let y_mean: f64 = y.iter().sum::<f64>() / (n as f64).max(1.0);
-            let y_var: f64 = y
-                .iter()
-                .map(|&yi| (yi - y_mean).powi(2))
-                .sum::<f64>()
-                / (n as f64 - 1.0).max(1.0);
+            let y_var: f64 =
+                y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
             let sigma2_seed = y_var.max(1e-6);
             let log_seed = sigma2_seed.ln();
             smoothing_params.tdist_log_sigma2 = log_seed;
             smoothing_params.tdist_log_sigma2_lo = log_seed - 4.605_f64; // ÷100
             smoothing_params.tdist_log_sigma2_hi = log_seed + 4.605_f64; // ×100
-            self.family = crate::pirls::Family::TDist { df, sigma2: sigma2_seed };
+            self.family = crate::pirls::Family::TDist {
+                df,
+                sigma2: sigma2_seed,
+            };
             smoothing_params.family = self.family;
         } else {
             smoothing_params.tdist_log_df = (5.0_f64 - 2.0).ln();
@@ -695,19 +695,7 @@ impl GAM {
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
 
-            let working_response: Array1<f64> = if is_gaussian {
-                y.clone()
-            } else {
-                let mut z = pirls_result.linear_predictor.clone();
-                for i in 0..z.len() {
-                    let dmu_deta =
-                        self.family.d_inverse_link(pirls_result.linear_predictor[i]);
-                    if dmu_deta.abs() > 1e-10 {
-                        z[i] += (y[i] - pirls_result.fitted_values[i]) / dmu_deta;
-                    }
-                }
-                z
-            };
+            let working_response = pirls_result.working_response.clone();
 
             let reml_start = Instant::now();
             let reml_xtwx = if is_gaussian {
@@ -775,9 +763,7 @@ impl GAM {
                     callback_pirls_calls += 1;
                     // Read the latest family from the shared cell — the outer
                     // Newton loop publishes fresh df/σ²/p/θ here between iters.
-                    let family = *family_cell_ref
-                        .lock()
-                        .expect("family_cell mutex poisoned");
+                    let family = *family_cell_ref.lock().expect("family_cell mutex poisoned");
                     let res = cache_ref.run_pirls_with_options(
                         y_ref,
                         trial_lambdas,
@@ -788,35 +774,6 @@ impl GAM {
                         outer_sigma2_profile,
                     )?;
                     callback_pirls_iters += res.iterations;
-                    // z = η + (y - μ)/(dμ/dη) for standard PIRLS. TDist's
-                    // gam.fit5 path uses the scat$Dd Newton working response
-                    // from the negative log-likelihood derivatives, not y.
-                    let mut z = res.linear_predictor.clone();
-                    for i in 0..z.len() {
-                        if outer_sigma2_profile {
-                            if let crate::pirls::Family::TDist { df, sigma2 } = family {
-                                let eta = res.linear_predictor[i];
-                                let r = y_ref[i] - eta;
-                                let sigma2 = sigma2.max(1e-300);
-                                let denom = df * sigma2 + r * r;
-                                let dmu = -2.0 * (df + 1.0) * r / denom;
-                                let observed_dmu2 =
-                                    2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
-                                let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
-                                let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
-                                    observed_dmu2
-                                } else {
-                                    expected_dmu2.max(1e-12)
-                                };
-                                z[i] = eta - dmu / dmu2;
-                                continue;
-                            }
-                        }
-                        let dmu_deta = family.d_inverse_link(res.linear_predictor[i]);
-                        if dmu_deta.abs() > 1e-10 {
-                            z[i] += (y_ref[i] - res.fitted_values[i]) / dmu_deta;
-                        }
-                    }
                     let xtwx = if let Some(ref disc) = cache_ref.discretized {
                         disc.compute_xtwx(&res.weights)
                     } else {
@@ -827,7 +784,7 @@ impl GAM {
                     Ok(crate::smooth::PirlsRefresh {
                         beta: res.coefficients,
                         weights: res.weights,
-                        working_response: z,
+                        working_response: res.working_response,
                         xtwx,
                         sigma2,
                         df,
@@ -905,20 +862,25 @@ impl GAM {
                 y.clone()
             } else if self.tdist_profile {
                 if let crate::pirls::Family::TDist { df, sigma2 } = self.family {
-                    final_result.linear_predictor.iter().enumerate().map(|(i, &eta)| {
-                        let r = y[i] - eta;
-                        let s2 = sigma2.max(1e-300);
-                        let denom = df * s2 + r * r;
-                        let dmu = -2.0 * (df + 1.0) * r / denom;
-                        let obs_dmu2 = 2.0 * (df + 1.0) * (df * s2 - r * r) / (denom * denom);
-                        let exp_dmu2 = 2.0 * (df + 1.0) / (s2 * (df + 3.0));
-                        let dmu2 = if obs_dmu2.is_finite() && obs_dmu2 > 1e-12 {
-                            obs_dmu2
-                        } else {
-                            exp_dmu2.max(1e-12)
-                        };
-                        eta - dmu / dmu2
-                    }).collect()
+                    final_result
+                        .linear_predictor
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &eta)| {
+                            let r = y[i] - eta;
+                            let s2 = sigma2.max(1e-300);
+                            let denom = df * s2 + r * r;
+                            let dmu = -2.0 * (df + 1.0) * r / denom;
+                            let obs_dmu2 = 2.0 * (df + 1.0) * (df * s2 - r * r) / (denom * denom);
+                            let exp_dmu2 = 2.0 * (df + 1.0) / (s2 * (df + 3.0));
+                            let dmu2 = if obs_dmu2.is_finite() && obs_dmu2 > 1e-12 {
+                                obs_dmu2
+                            } else {
+                                exp_dmu2.max(1e-12)
+                            };
+                            eta - dmu / dmu2
+                        })
+                        .collect()
                 } else {
                     y.clone()
                 }
@@ -932,18 +894,18 @@ impl GAM {
                 }
                 z
             };
-            smoothing_params.last_score =
-                crate::reml::reml_criterion_multi_cached_mgcv_exact(
-                    &z_score,
-                    &cache.design_matrix,
-                    &final_result.weights,
-                    &smoothing_params.lambda,
-                    &cache.penalties,
-                    Some(&final_xtwx),
-                    smoothing_params.mp,
-                    self.family,
-                    smoothing_params.y_original.as_ref(),
-                ).ok();
+            smoothing_params.last_score = crate::reml::reml_criterion_multi_cached_mgcv_exact(
+                &z_score,
+                &cache.design_matrix,
+                &final_result.weights,
+                &smoothing_params.lambda,
+                &cache.penalties,
+                Some(&final_xtwx),
+                smoothing_params.mp,
+                self.family,
+                smoothing_params.y_original.as_ref(),
+            )
+            .ok();
 
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
@@ -1038,7 +1000,8 @@ impl GAM {
                             smoothing_params.mp,
                             self.family,
                             smoothing_params.y_original.as_ref(),
-                        ).ok();
+                        )
+                        .ok();
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);
@@ -1070,18 +1033,18 @@ impl GAM {
             } else {
                 crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
             };
-            smoothing_params.last_score =
-                crate::reml::reml_criterion_multi_cached_mgcv_exact(
-                    y,
-                    &cache.design_matrix,
-                    &final_result.weights,
-                    &smoothing_params.lambda,
-                    &cache.penalties,
-                    Some(&final_xtwx),
-                    smoothing_params.mp,
-                    self.family,
-                    smoothing_params.y_original.as_ref(),
-                ).ok();
+            smoothing_params.last_score = crate::reml::reml_criterion_multi_cached_mgcv_exact(
+                y,
+                &cache.design_matrix,
+                &final_result.weights,
+                &smoothing_params.lambda,
+                &cache.penalties,
+                Some(&final_xtwx),
+                smoothing_params.mp,
+                self.family,
+                smoothing_params.y_original.as_ref(),
+            )
+            .ok();
 
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!("[PROFILE] PiRLS iterations: {:.2}ms", total_pirls_time);

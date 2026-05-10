@@ -142,8 +142,7 @@ pub fn glm_deviance(
                 } else if yi >= 1.0 {
                     -2.0 * mu_c.ln()
                 } else {
-                    2.0 * (yi * (yi / mu_c).ln()
-                        + (1.0 - yi) * ((1.0 - yi) / (1.0 - mu_c)).ln())
+                    2.0 * (yi * (yi / mu_c).ln() + (1.0 - yi) * ((1.0 - yi) / (1.0 - mu_c)).ln())
                 }
             }
             Family::Poisson | Family::QuasiPoisson => {
@@ -188,8 +187,7 @@ pub fn glm_deviance(
                 if yi <= 0.0 {
                     2.0 * mu_c.powf(twop) / twop
                 } else {
-                    2.0 * (yi.powf(twop) / (onep * twop)
-                        - yi * mu_c.powf(onep) / onep
+                    2.0 * (yi.powf(twop) / (onep * twop) - yi * mu_c.powf(onep) / onep
                         + mu_c.powf(twop) / twop)
                 }
             }
@@ -268,7 +266,10 @@ pub fn estimate_rank_eigen(penalty: &BlockPenalty) -> usize {
         Ok(t) => t,
         Err(_) => return penalty.estimate_rank().saturating_sub(1).max(1),
     };
-    let max_eig = eigenvalues.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let max_eig = eigenvalues
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
     if max_eig <= 0.0 {
         return 0;
     }
@@ -507,22 +508,9 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         xtwx_owned = compute_xtwx(x, w);
         &xtwx_owned
     };
-    // A = X'WX + ΣλS — NO ridge
-    let mut a = xtwx.clone();
-    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        penalty.scaled_add_to(&mut a, *lambda);
-    }
-    // β = A^{-1} X'Wy (no ridge here either — but we keep a tiny ridge
-    // ONLY for the solve, not in any score term, so ill-conditioned
-    // systems don't blow up. mgcv tolerates this by working in a
-    // QR-decomposed space). For non-Gaussian families, `y` here is the
-    // working response z and `w` are the IRLS weights from PiRLS.
-    let xtwy = compute_xtwy(x, w, y);
-    let mut a_solve = a.clone();
-    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-    let solve_ridge = 1e-12 * max_diag;
-    a_solve.diag_mut().iter_mut().for_each(|x| *x += solve_ridge);
-    let beta = solve(a_solve, xtwy)?;
+    // A = X'WX + ΣλS — NO ridge in score terms. The shared assembly keeps
+    // the tiny solve-only ridge out of determinants/traces.
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
 
     // Deviance numerator. Two paths (item 1 of #47):
     //   - `y_original = None` (default / Gaussian): working-RSS
@@ -533,7 +521,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     //     deviance `D(y_orig, μ̂(λ))` with μ̂ = g⁻¹(Xβ̂(λ)). This is
     //     mgcv's gam.fit3.r:617 score formula and the only one
     //     consistent with the IFT gradient.
-    let fitted = x.dot(&beta);
+    let fitted = &system.fitted;
     let dev_numerator: f64 = match (family, y_original) {
         (crate::pirls::Family::Gaussian, _) | (_, None) => y
             .iter()
@@ -550,16 +538,13 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
 
     let mut bsb = 0.0;
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        bsb += lambda * penalty.quadratic_form(&beta);
+        bsb += lambda * penalty.quadratic_form(&system.beta);
     }
     let dp = dev_numerator + bsb;
 
     // log|A| — no ridge in A. We use the un-ridged A.
-    let log_det_a = determinant(&a)?.ln();
-
-    // Compute trA = tr(A^{-1} X'WX) — no ridge added.
-    let a_inv = inverse(&a)?;
-    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let log_det_a = determinant(&system.a)?.ln();
+    let tr_a = system.tr_a;
     let n_minus_tra = (n as f64) - tr_a;
     // Scale parameter:
     //   - Binomial / Poisson: φ = 1 (known).
@@ -568,7 +553,8 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // For non-Gaussian we evaluate at y_original (the true response).
     let y_for_ls = y_original.unwrap_or(y);
     let scale_est = match family {
-        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        crate::pirls::Family::Binomial
+        | crate::pirls::Family::Poisson
         | crate::pirls::Family::NegBin { .. } => 1.0,
         _ => {
             let phi_init = dev_numerator / n_minus_tra.max(1e-10);
@@ -632,6 +618,49 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     Ok(reml)
 }
 
+struct RemlSystem {
+    a: Array2<f64>,
+    beta: Array1<f64>,
+    fitted: Array1<f64>,
+    a_inv: Array2<f64>,
+    tr_a: f64,
+}
+
+fn assemble_reml_system(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    xtwx: &Array2<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+) -> Result<RemlSystem> {
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve
+        .diag_mut()
+        .iter_mut()
+        .for_each(|d| *d += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+    let fitted = x.dot(&beta);
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+
+    Ok(RemlSystem {
+        a,
+        beta,
+        fitted,
+        a_inv,
+        tr_a,
+    })
+}
+
 /// Closed-form gradient of the mgcv-exact REML score w.r.t. log(λ_j).
 ///
 /// For Gaussian + canonical link at PIRLS convergence the cross-coupling
@@ -661,7 +690,16 @@ pub fn reml_gradient_mgcv_exact_closed_form(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
 ) -> Result<Array1<f64>> {
-    reml_gradient_mgcv_exact_closed_form_inner(y, x, w, lambdas, penalties_blocks, cached_xtwx, family, None)
+    reml_gradient_mgcv_exact_closed_form_inner(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        family,
+        None,
+    )
 }
 
 /// Like `reml_gradient_mgcv_exact_closed_form` but with a caller-supplied
@@ -678,7 +716,16 @@ pub fn reml_gradient_mgcv_exact_closed_form_fixed_sigma2(
     family: crate::pirls::Family,
     fixed_sigma2: f64,
 ) -> Result<Array1<f64>> {
-    reml_gradient_mgcv_exact_closed_form_inner(y, x, w, lambdas, penalties_blocks, cached_xtwx, family, Some(fixed_sigma2))
+    reml_gradient_mgcv_exact_closed_form_inner(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        family,
+        Some(fixed_sigma2),
+    )
 }
 
 #[cfg(feature = "blas")]
@@ -702,40 +749,28 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
         &xtwx_owned
     };
 
-    // A = X'WX + Σλ_jS_j (no ridge — mgcv-exact)
-    let mut a = xtwx.clone();
-    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        penalty.scaled_add_to(&mut a, *lambda);
-    }
-
-    // β = A^-1 X'Wy
-    let xtwy = compute_xtwy(x, w, y);
-    let mut a_solve = a.clone();
-    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-    let solve_ridge = 1e-12 * max_diag;
-    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
-    let beta = solve(a_solve, xtwy)?;
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
 
     // RSS / σ² — same working-RSS approximation as the score function
     // for non-Gaussian (see comment there). Family is plumbed through
     // for future use but not branched on yet.
     let _ = family;
-    let fitted = x.dot(&beta);
+    let fitted = &system.fitted;
     let rss: f64 = y
         .iter()
         .zip(fitted.iter())
         .zip(w.iter())
         .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
         .sum();
-    let a_inv = inverse(&a)?;
-    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let a_inv = &system.a_inv;
+    let tr_a = system.tr_a;
     let scale_est = fixed_scale.unwrap_or_else(|| rss / ((n as f64) - tr_a).max(1e-10));
 
     // Per-smooth gradient
     let mut grad = Array1::<f64>::zeros(m);
     for (j, (lambda, penalty)) in lambdas.iter().zip(penalties_blocks.iter()).enumerate() {
         // β' S_j β = quadratic_form on the smooth's block
-        let bsb_j = penalty.quadratic_form(&beta);
+        let bsb_j = penalty.quadratic_form(&system.beta);
         // tr(A^-1 S_j) — only the smooth's block contributes
         // S_j is sparse: nonzero in [offset, offset+k) × [offset, offset+k)
         // tr(A^-1 S_j) = Σ_{p,q in block} A^-1[p,q] S_j[p-off, q-off]
@@ -751,9 +786,8 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
 
         let rank_j = estimate_rank_eigen(penalty);
         // REML1[j] = λ_j β'S_jβ / (2σ²) + λ_j tr(A^-1 S_j) / 2 - rank_j/2
-        grad[j] = lambda * bsb_j / (2.0 * scale_est)
-            + lambda * tr_a_inv_s / 2.0
-            - (rank_j as f64) / 2.0;
+        grad[j] =
+            lambda * bsb_j / (2.0 * scale_est) + lambda * tr_a_inv_s / 2.0 - (rank_j as f64) / 2.0;
     }
     Ok(grad)
 }
@@ -799,26 +833,17 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     };
 
     // A = X'WX + ΣλS, β = A^-1 X'Wy, σ² = RSS/(n-trA), A^-1
-    let mut a = xtwx.clone();
-    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        penalty.scaled_add_to(&mut a, *lambda);
-    }
-    let xtwy = compute_xtwy(x, w, y);
-    let mut a_solve = a.clone();
-    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-    let solve_ridge = 1e-12 * max_diag;
-    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
-    let beta = solve(a_solve, xtwy)?;
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
     let _ = family;
-    let fitted = x.dot(&beta);
+    let fitted = &system.fitted;
     let rss: f64 = y
         .iter()
         .zip(fitted.iter())
         .zip(w.iter())
         .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
         .sum();
-    let a_inv = inverse(&a)?;
-    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+    let a_inv = &system.a_inv;
+    let tr_a = system.tr_a;
     let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
 
     // Pre-compute per-smooth quantities:
@@ -834,7 +859,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     let mut ainvs_per_j: Vec<Array2<f64>> = Vec::with_capacity(m);
     let mut block_offsets: Vec<usize> = Vec::with_capacity(m);
     let mut block_sizes: Vec<usize> = Vec::with_capacity(m);
-    let p = a.nrows();
+    let p = system.a.nrows();
     for penalty in penalties_blocks.iter() {
         let block = penalty.block_view();
         let off = penalty.offset;
@@ -847,7 +872,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
         for r in 0..k {
             let mut s = 0.0;
             for c in 0..k {
-                s += block[[r, c]] * beta[off + c];
+                s += block[[r, c]] * system.beta[off + c];
             }
             s_beta[off + r] = s;
         }
@@ -856,7 +881,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
         // β' S_j β
         let mut bsb = 0.0;
         for r in 0..k {
-            bsb += beta[off + r] * s_beta_per_j.last().unwrap()[off + r];
+            bsb += system.beta[off + r] * s_beta_per_j.last().unwrap()[off + r];
         }
         bsb_per_j.push(bsb);
 
@@ -911,7 +936,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
                 // (A^-1 S_i β)[r]
                 let mut ainvs_i_beta_r = 0.0;
                 for c in 0..k_i {
-                    ainvs_i_beta_r += ainvs_per_j[i][[r, c]] * beta[off_i + c];
+                    ainvs_i_beta_r += ainvs_per_j[i][[r, c]] * system.beta[off_i + c];
                 }
                 bsb_cross += sj_r * ainvs_i_beta_r;
             }
@@ -922,8 +947,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
             let mut tr_cross = 0.0;
             for r in 0..k_i {
                 for pp in 0..k_j {
-                    tr_cross +=
-                        ainvs_per_j[i][[off_j + pp, r]] * ainvs_per_j[j][[off_i + r, pp]];
+                    tr_cross += ainvs_per_j[i][[off_j + pp, r]] * ainvs_per_j[j][[off_i + r, pp]];
                 }
             }
 
@@ -982,7 +1006,12 @@ fn trace_product_dense(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
 }
 
 #[cfg(feature = "blas")]
-fn add_weighted_xtx_inplace(out: &mut Array2<f64>, x: &Array2<f64>, diag: &Array1<f64>, scale: f64) {
+fn add_weighted_xtx_inplace(
+    out: &mut Array2<f64>,
+    x: &Array2<f64>,
+    diag: &Array1<f64>,
+    scale: f64,
+) {
     let n = x.nrows();
     let p = x.ncols();
     for i in 0..n {
@@ -1021,9 +1050,17 @@ fn tdist_dd_arrays(
     df: f64,
     sigma2: f64,
 ) -> (
-    Array1<f64>, Array1<f64>, Array1<f64>, Array1<f64>,
-    [Array1<f64>; 2], [Array1<f64>; 2], [Array1<f64>; 2], [Array1<f64>; 2],
-    [Array1<f64>; 3], [Array1<f64>; 3], [Array1<f64>; 3],
+    Array1<f64>,
+    Array1<f64>,
+    Array1<f64>,
+    Array1<f64>,
+    [Array1<f64>; 2],
+    [Array1<f64>; 2],
+    [Array1<f64>; 2],
+    [Array1<f64>; 2],
+    [Array1<f64>; 3],
+    [Array1<f64>; 3],
+    [Array1<f64>; 3],
 ) {
     let n = y.len();
     let nu = df.max(2.0 + 1e-8);
@@ -1040,9 +1077,21 @@ fn tdist_dd_arrays(
     let mut det_th = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
     let mut det2_th = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
     let mut det3_th = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
-    let mut dth2 = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
-    let mut det_th2 = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
-    let mut det2_th2 = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut dth2 = [
+        Array1::<f64>::zeros(n),
+        Array1::<f64>::zeros(n),
+        Array1::<f64>::zeros(n),
+    ];
+    let mut det_th2 = [
+        Array1::<f64>::zeros(n),
+        Array1::<f64>::zeros(n),
+        Array1::<f64>::zeros(n),
+    ];
+    let mut det2_th2 = [
+        Array1::<f64>::zeros(n),
+        Array1::<f64>::zeros(n),
+        Array1::<f64>::zeros(n),
+    ];
 
     for i in 0..n {
         let ym = y[i] - eta[i];
@@ -1076,36 +1125,50 @@ fn tdist_dd_arrays(
         det2_th[1][i] = 4.0 * (-nu1nusig2a + ff1 * 5.0 - 4.0 * ff1 * f1ym);
 
         dth2[0][i] = nu2 * a.ln()
-            + nu2nu * ym * ym * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym) / nusig2a;
+            + nu2nu * ym * ym * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym)
+                / nusig2a;
         dth2[1][i] = 2.0 * (fym - ym * ymsig2a - fymf1ym) * nu2nu;
         dth2[2][i] = 4.0 * fym * (1.0 - f1ym);
 
         let term = 2.0 * nu2nu - 2.0 * nu1nu * nu2nu - 1.0 + nu1nu;
-        det_th2[0][i] = 2.0 * f1 * nu2
-            * (term - 2.0 * nu2nu * f1ym + 4.0 * fym * nu2nu / nu - fym / nu - 2.0 * fymf1ym * nu2nu / nu);
-        det_th2[1][i] = 4.0 * (-f + ymsig2a + 3.0 * fymf1 - ymsig2a * f1ym - 2.0 * fymf1 * f1ym) * nu2nu;
+        det_th2[0][i] = 2.0
+            * f1
+            * nu2
+            * (term - 2.0 * nu2nu * f1ym + 4.0 * fym * nu2nu / nu
+                - fym / nu
+                - 2.0 * fymf1ym * nu2nu / nu);
+        det_th2[1][i] =
+            4.0 * (-f + ymsig2a + 3.0 * fymf1 - ymsig2a * f1ym - 2.0 * fymf1 * f1ym) * nu2nu;
         det_th2[2][i] = 8.0 * f * (-1.0 + 3.0 * f1ym - 2.0 * f1ym * f1ym);
         det3_th[0][i] = 4.0
             * (-6.0 * f / nusig2a + 3.0 * f1 / sig2a + 18.0 * ff1 * f1
-                - 4.0 * f1ymf1 / sig2a - 12.0 * nu1 * ym * f1.powi(4))
+                - 4.0 * f1ymf1 / sig2a
+                - 12.0 * nu1 * ym * f1.powi(4))
             * nu2nu;
         det3_th[1][i] = 48.0 * f * (-1.0 / nusig2a + 3.0 * f1 * f1 - 2.0 * f1ymf1 * f1);
-        det2_th2[0][i] = 2.0 * nu2
+        det2_th2[0][i] = 2.0
+            * nu2
             * (-term + 10.0 * nu2nu * f1ym - 16.0 * fym * nu2nu / nu - 2.0 * f1ym
-                + 5.0 * nu1nu * f1ym - 8.0 * nu2nu * f1ym * f1ym
-                + 26.0 * fymf1ym * nu2nu / nu - 4.0 * nu1nu * f1ym * f1ym
+                + 5.0 * nu1nu * f1ym
+                - 8.0 * nu2nu * f1ym * f1ym
+                + 26.0 * fymf1ym * nu2nu / nu
+                - 4.0 * nu1nu * f1ym * f1ym
                 - 12.0 * nu1nu * nu2nu * f1ym * f1ym * f1ym)
             / nusig2a;
         det2_th2[1][i] = 4.0
-            * (nu1nusig2a - 1.0 / sig2a - 11.0 * nu1 * f1 * f1 + 5.0 * f1ym / sig2a
-                + 22.0 * nu1 * fymf1 * f1 - 4.0 * f1ym * f1ym / sig2a
+            * (nu1nusig2a - 1.0 / sig2a - 11.0 * nu1 * f1 * f1
+                + 5.0 * f1ym / sig2a
+                + 22.0 * nu1 * fymf1 * f1
+                - 4.0 * f1ym * f1ym / sig2a
                 - 12.0 * nu1 * fymf1 * fymf1)
             * nu2nu;
         det2_th2[2][i] = 8.0
             * (nu1nusig2a - 11.0 * nu1 * f1 * f1 + 22.0 * nu1 * fymf1 * f1
                 - 12.0 * nu1 * fymf1 * fymf1);
     }
-    (det, det2, det3, det4, dth, det_th, det2_th, det3_th, dth2, det_th2, det2_th2)
+    (
+        det, det2, det3, det4, dth, det_th, det2_th, det3_th, dth2, det_th2, det2_th2,
+    )
 }
 
 /// Full mgcv `gdi2`-style derivative assembly for scat. Native parameter
@@ -1123,7 +1186,11 @@ fn tdist_gdi2_native(
 ) -> Result<(Array1<f64>, Array2<f64>)> {
     let (df, sigma2) = match family {
         crate::pirls::Family::TDist { df, sigma2 } => (df.max(2.0 + 1e-8), sigma2.max(1e-300)),
-        _ => return Err(GAMError::InvalidParameter("TDist gdi2 called for non-TDist family".into())),
+        _ => {
+            return Err(GAMError::InvalidParameter(
+                "TDist gdi2 called for non-TDist family".into(),
+            ))
+        }
     };
     let ntheta = 2;
     let m = lambdas.len();
@@ -1131,7 +1198,12 @@ fn tdist_gdi2_native(
     let p = x.ncols();
 
     let xtwx_owned;
-    let xtwx = if let Some(c) = cached_xtwx { c } else { xtwx_owned = compute_xtwx(x, w); &xtwx_owned };
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
     let mut amat = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         penalty.scaled_add_to(&mut amat, *lambda);
@@ -1174,7 +1246,8 @@ fn tdist_gdi2_native(
         d1[i] = det.dot(&eta1[i]) + if i < ntheta { dth[i].sum() } else { 0.0 };
         p1[i] = 2.0 * b1[i].dot(&s_beta);
         if i >= ntheta {
-            p1[i] += lambdas[i - ntheta] * beta.dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
+            p1[i] +=
+                lambdas[i - ntheta] * beta.dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
         }
         ldet1[i] = trace_product_dense(&a_inv, &a1[i]);
     }
@@ -1184,7 +1257,8 @@ fn tdist_gdi2_native(
     let nu2 = df - 2.0;
     let nu2nu = nu2 / df;
     let mut ls1 = Array1::<f64>::zeros(ntot);
-    ls1[0] = (y_original.len() as f64) * (nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0 - 0.5 * nu2nu);
+    ls1[0] = (y_original.len() as f64)
+        * (nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0 - 0.5 * nu2nu);
     ls1[1] = -(y_original.len() as f64);
     let mut ls2 = Array2::<f64>::zeros((ntot, ntot));
     ls2[[0, 0]] = (y_original.len() as f64)
@@ -1207,18 +1281,27 @@ fn tdist_gdi2_native(
             if k < ntheta {
                 rhs = rhs - x.t().dot(&(&det2_th[k] * &eta1[i]));
             } else {
-                rhs = rhs - 2.0 * lambdas[k - ntheta] * penalty_dot_vec(&penalties[k - ntheta], &b1[i]);
+                rhs = rhs
+                    - 2.0 * lambdas[k - ntheta] * penalty_dot_vec(&penalties[k - ntheta], &b1[i]);
             }
             if i < ntheta {
                 rhs = rhs - x.t().dot(&(&det2_th[i] * &eta1[k]));
             } else {
-                rhs = rhs - 2.0 * lambdas[i - ntheta] * penalty_dot_vec(&penalties[i - ntheta], &b1[k]);
+                rhs = rhs
+                    - 2.0 * lambdas[i - ntheta] * penalty_dot_vec(&penalties[i - ntheta], &b1[k]);
             }
             if i < ntheta && k < ntheta {
-                let idx = if i == 0 && k == 0 { 0 } else if i == 0 && k == 1 { 1 } else { 2 };
+                let idx = if i == 0 && k == 0 {
+                    0
+                } else if i == 0 && k == 1 {
+                    1
+                } else {
+                    2
+                };
                 rhs = rhs - x.t().dot(&det_th2[idx]);
             } else if i == k {
-                rhs = rhs - 2.0 * lambdas[i - ntheta] * penalty_dot_vec(&penalties[i - ntheta], &beta);
+                rhs = rhs
+                    - 2.0 * lambdas[i - ntheta] * penalty_dot_vec(&penalties[i - ntheta], &beta);
             }
             let bik = 0.5 * a_inv.dot(&rhs);
             let eik = x.dot(&bik);
@@ -1236,7 +1319,13 @@ fn tdist_gdi2_native(
         for k in i..ntot {
             let mut dij = (&det2 * &eta1[i] * &eta1[k]).sum() + det.dot(&eta2[i][k]);
             if i < ntheta && k < ntheta {
-                let idx = if i == 0 && k == 0 { 0 } else if i == 0 && k == 1 { 1 } else { 2 };
+                let idx = if i == 0 && k == 0 {
+                    0
+                } else if i == 0 && k == 1 {
+                    1
+                } else {
+                    2
+                };
                 dij += dth2[idx].sum();
             }
             if i < ntheta {
@@ -1248,15 +1337,21 @@ fn tdist_gdi2_native(
             d2[[i, k]] = dij;
             d2[[k, i]] = dij;
 
-            let mut pij = 2.0 * b2[i][k].dot(&s_beta) + 2.0 * b1[i].dot(&penalty_dot_all(penalties, lambdas, &b1[k]));
+            let mut pij = 2.0 * b2[i][k].dot(&s_beta)
+                + 2.0 * b1[i].dot(&penalty_dot_all(penalties, lambdas, &b1[k]));
             if k >= ntheta {
-                pij += 2.0 * lambdas[k - ntheta] * b1[i].dot(&penalty_dot_vec(&penalties[k - ntheta], &beta));
+                pij += 2.0
+                    * lambdas[k - ntheta]
+                    * b1[i].dot(&penalty_dot_vec(&penalties[k - ntheta], &beta));
             }
             if i >= ntheta {
-                pij += 2.0 * lambdas[i - ntheta] * b1[k].dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
+                pij += 2.0
+                    * lambdas[i - ntheta]
+                    * b1[k].dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
             }
             if i == k && i >= ntheta {
-                pij += lambdas[i - ntheta] * beta.dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
+                pij +=
+                    lambdas[i - ntheta] * beta.dot(&penalty_dot_vec(&penalties[i - ntheta], &beta));
             }
             p2[[i, k]] = pij;
             p2[[k, i]] = pij;
@@ -1270,14 +1365,21 @@ fn tdist_gdi2_native(
                 w2 = w2 + &det3_th[k] * &eta1[i];
             }
             if i < ntheta && k < ntheta {
-                let idx = if i == 0 && k == 0 { 0 } else if i == 0 && k == 1 { 1 } else { 2 };
+                let idx = if i == 0 && k == 0 {
+                    0
+                } else if i == 0 && k == 1 {
+                    1
+                } else {
+                    2
+                };
                 w2 = w2 + &det2_th2[idx];
             }
             add_weighted_xtx_inplace(&mut a2, x, &w2, 0.5);
             if i == k && i >= ntheta {
                 add_scaled_penalty_dense(&mut a2, &penalties[i - ntheta], lambdas[i - ntheta]);
             }
-            let lij = trace_product_dense(&a_inv, &a2) - trace_product_dense(&a_inv.dot(&a1[i]), &a_inv.dot(&a1[k]));
+            let lij = trace_product_dense(&a_inv, &a2)
+                - trace_product_dense(&a_inv.dot(&a1[i]), &a_inv.dot(&a1[k]));
             ldet2[[i, k]] = lij;
             ldet2[[k, i]] = lij;
         }
@@ -1510,7 +1612,10 @@ fn compute_sigma2_at(
 ) -> Result<f64> {
     use crate::pirls::Family;
     // Fixed dispersion families (Quasi variants are NOT fixed — they profile φ)
-    if matches!(family, Family::Binomial | Family::Poisson | Family::NegBin { .. }) {
+    if matches!(
+        family,
+        Family::Binomial | Family::Poisson | Family::NegBin { .. }
+    ) {
         return Ok(1.0);
     }
     let n = y.len();
@@ -1529,7 +1634,10 @@ fn compute_sigma2_at(
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;
-    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    a_solve
+        .diag_mut()
+        .iter_mut()
+        .for_each(|d| *d += solve_ridge);
     let beta = crate::linalg::solve(a_solve, xtwy)?;
     let fitted = x.dot(&beta);
     let y_for = y_original.unwrap_or(y);
@@ -1541,7 +1649,8 @@ fn compute_sigma2_at(
             .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
             .sum(),
         (fam, Some(y_orig)) => {
-            let mu: ndarray::Array1<f64> = fitted.iter().map(|&eta| fam.inverse_link(eta)).collect();
+            let mu: ndarray::Array1<f64> =
+                fitted.iter().map(|&eta| fam.inverse_link(eta)).collect();
             glm_deviance(y_orig, &mu, fam)
         }
     };
@@ -1613,7 +1722,10 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;
-    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    a_solve
+        .diag_mut()
+        .iter_mut()
+        .for_each(|d| *d += solve_ridge);
     let beta = solve(a_solve, xtwy)?;
 
     // Scale estimate for Dp/(2σ²) — must match the score function's σ²
@@ -1649,11 +1761,10 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     // families, use estimate_phi_mgcv (dp/(n-mp)) which is the correct
     // profiled dispersion for extended-family REML.
     let scale_est = match family {
-        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        crate::pirls::Family::Binomial
+        | crate::pirls::Family::Poisson
         | crate::pirls::Family::NegBin { .. } => 1.0,
-        crate::pirls::Family::Gaussian => {
-            dev_numerator / ((n as f64) - tr_a).max(1e-10)
-        }
+        crate::pirls::Family::Gaussian => dev_numerator / ((n as f64) - tr_a).max(1e-10),
         _ => {
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
             family.estimate_phi_mgcv(y_for_grad, dp_for_phi, mp, 1.0, phi_init)
@@ -1779,9 +1890,8 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         } else {
             0.0
         };
-        grad[k] = d1_k / (2.0 * scale_est)
-            + (tk_kkt + lam_k * tr_a_inv_s) / 2.0
-            - (rank_k as f64) / 2.0;
+        grad[k] =
+            d1_k / (2.0 * scale_est) + (tk_kkt + lam_k * tr_a_inv_s) / 2.0 - (rank_k as f64) / 2.0;
     }
 
     // σ²-chain correction: adds (∂REML/∂σ²) · ∂σ̂²/∂ρ_k to each grad[k].
@@ -1790,17 +1900,17 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     if enable_sigma_chain
         && !matches!(
             family,
-            crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
-            | crate::pirls::Family::NegBin { .. }
+            crate::pirls::Family::Binomial
+                | crate::pirls::Family::Poisson
+                | crate::pirls::Family::NegBin { .. }
         )
     {
         // Use dp_for_phi and mp already computed above.
         let dp = dp_for_phi;
 
         let dls_dsig2 = family.dls_dsigma2(y_for_grad, scale_est);
-        let drem_dsig2 = -dp / (2.0 * scale_est * scale_est)
-            - dls_dsig2
-            - (mp as f64) / (2.0 * scale_est);
+        let drem_dsig2 =
+            -dp / (2.0 * scale_est * scale_est) - dls_dsig2 - (mp as f64) / (2.0 * scale_est);
 
         let eps = 1e-4_f64;
         for k in 0..m {
@@ -1931,7 +2041,10 @@ pub fn reml_hessian_mgcv_exact_ift(
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;
-    a_solve.diag_mut().iter_mut().for_each(|d| *d += solve_ridge);
+    a_solve
+        .diag_mut()
+        .iter_mut()
+        .for_each(|d| *d += solve_ridge);
     let beta = solve(a_solve, xtwy)?;
     let fitted = x.dot(&beta);
     // Same σ² convention as the score (item 1 of #47): GLM deviance when
@@ -1967,7 +2080,8 @@ pub fn reml_hessian_mgcv_exact_ift(
         .sum();
     let dp_hess = dev_numerator + bsb_hess;
     let scale_est = match family {
-        crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
+        crate::pirls::Family::Binomial
+        | crate::pirls::Family::Poisson
         | crate::pirls::Family::NegBin { .. } => 1.0,
         _ => {
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
