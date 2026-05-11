@@ -2587,29 +2587,14 @@ fn compute_tk_kkt_vec(
         &xtwx_owned
     };
 
-    // A = X'WX + Σλ_jS_j
-    let mut a = xtwx.clone();
-    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        penalty.scaled_add_to(&mut a, *lambda);
-    }
-    // β = A⁻¹ X'Wy
-    let xtwy = compute_xtwy(x, w, y);
-    let mut a_solve = a.clone();
-    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-    let solve_ridge = 1e-12 * max_diag;
-    a_solve
-        .diag_mut()
-        .iter_mut()
-        .for_each(|d| *d += solve_ridge);
-    let beta = solve(a_solve, xtwy)?;
-    let a_inv = inverse(&a)?;
-    let p = a.nrows();
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
+    let p = system.a.nrows();
 
-    let b1 = compute_b1_ift(&a_inv, &beta, lambdas, penalties_blocks);
+    let b1 = compute_b1_ift(&system.a_inv, &system.beta, lambdas, penalties_blocks);
     let eta1 = x.dot(&b1);
 
     // lev_uw[i] = x_i' A⁻¹ x_i
-    let xa = x.dot(&a_inv);
+    let xa = x.dot(&system.a_inv);
     let mut lev_uw = Array1::<f64>::zeros(n);
     for i in 0..n {
         let mut s = 0.0;
@@ -2622,11 +2607,11 @@ fn compute_tk_kkt_vec(
     // a1[i] = dw/dη (gdi.c:2535 / 2556).
     let mut a1 = Array1::<f64>::zeros(n);
     if !matches!(family, crate::pirls::Family::Gaussian) {
-        let eta = x.dot(&beta);
         let use_fisher = family.is_canonical_link();
         for i in 0..n {
-            let mu_i = family.inverse_link(eta[i]);
-            let dmu_deta = family.d_inverse_link(eta[i]);
+            let eta_i = system.fitted[i];
+            let mu_i = family.inverse_link(eta_i);
+            let dmu_deta = family.d_inverse_link(eta_i);
             if dmu_deta.abs() < 1e-12 {
                 continue;
             }

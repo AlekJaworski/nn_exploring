@@ -272,7 +272,11 @@ fn run_test_case(
         y_original,
     )
     .unwrap();
-    // Brute-force reference (uses h=1e-4 too, same step → same truncation)
+    // Brute-force reference uses h_ref=1e-6 — two orders below the helper's
+    // h=1e-4. Same-h reference only proves implementation consistency, not
+    // FD-convergence rigor. With h_ref << h_helper, the helper's O(h²)
+    // truncation dominates the disagreement, so a small max-rel proves the
+    // helper's h is small enough.
     let h_ref = fd_tk_kkt_brute(
         y,
         x,
@@ -282,7 +286,7 @@ fn run_test_case(
         family,
         y_original,
         mp,
-        1.0e-4_f64,
+        1.0e-6_f64,
     );
 
     let m = lambdas.len();
