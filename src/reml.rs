@@ -512,7 +512,8 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // the tiny solve-only ridge out of determinants/traces.
     let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
 
-    // Deviance numerator. Two paths (item 1 of #47):
+    // Deviance numerator, β'(ΣλS)β, Dp and σ² from the shared score-parts
+    // helper. Two deviance paths (item 1 of #47):
     //   - `y_original = None` (default / Gaussian): working-RSS
     //     `Σ w_i (y_i - X_iβ)²`. For Gaussian (w=I, y=y_orig) this IS
     //     the true deviance. For non-Gaussian it's the working-response
@@ -521,46 +522,30 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     //     deviance `D(y_orig, μ̂(λ))` with μ̂ = g⁻¹(Xβ̂(λ)). This is
     //     mgcv's gam.fit3.r:617 score formula and the only one
     //     consistent with the IFT gradient.
-    let fitted = &system.fitted;
-    let dev_numerator: f64 = match (family, y_original) {
-        (crate::pirls::Family::Gaussian, _) | (_, None) => y
-            .iter()
-            .zip(fitted.iter())
-            .zip(w.iter())
-            .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
-            .sum(),
-        (fam, Some(y_orig)) => {
-            // μ̂ = g⁻¹(η̂) with η̂ = Xβ
-            let mu: Array1<f64> = fitted.iter().map(|&eta| fam.inverse_link(eta)).collect();
-            glm_deviance(y_orig, &mu, fam)
-        }
-    };
-
-    let mut bsb = 0.0;
-    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        bsb += lambda * penalty.quadratic_form(&system.beta);
-    }
-    let dp = dev_numerator + bsb;
+    // Scale convention:
+    //   - Binomial / Poisson / NegBin: φ = 1 (known).
+    //   - Gaussian / Gamma / etc.: mgcv's profiled φ̂ solving dlr.dlphi = 0.
+    let parts = RemlScoreParts::from_system(
+        &system,
+        y,
+        w,
+        lambdas,
+        penalties_blocks,
+        family,
+        y_original,
+        mp,
+        n,
+    );
+    let dev_numerator = parts.dev_num;
+    let bsb = parts.bsb;
+    let dp = parts.dp;
+    let scale_est = parts.sigma2;
 
     // log|A| — no ridge in A. We use the un-ridged A.
     let log_det_a = determinant(&system.a)?.ln();
     let tr_a = system.tr_a;
     let n_minus_tra = (n as f64) - tr_a;
-    // Scale parameter:
-    //   - Binomial / Poisson: φ = 1 (known).
-    //   - Gaussian / Gamma: mgcv's profiled φ̂ solving dlr.dlphi = 0.
-    // `y_for_ls` must be computed before this so estimate_phi_mgcv can use y.len().
-    // For non-Gaussian we evaluate at y_original (the true response).
     let y_for_ls = y_original.unwrap_or(y);
-    let scale_est = match family {
-        crate::pirls::Family::Binomial
-        | crate::pirls::Family::Poisson
-        | crate::pirls::Family::NegBin { .. } => 1.0,
-        _ => {
-            let phi_init = dev_numerator / n_minus_tra.max(1e-10);
-            family.estimate_phi_mgcv(y_for_ls, dp, mp, 1.0, phi_init)
-        }
-    };
 
     // log|S+| terms — use eigen-based rank (robust to centring)
     let mut log_lambda_sum = 0.0;
@@ -596,7 +581,6 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // true response) since the working response `z` is not what mgcv's
     // ls function takes.
     let _ = p;
-    // y_for_ls was already computed above (used in estimate_phi_mgcv).
     let ls1 = family.saturated_log_likelihood(y_for_ls, scale_est);
     let log_det_h = log_det_a;
     let log_det_s = log_lambda_sum + log_pseudo_det_sum;
@@ -624,6 +608,31 @@ struct RemlSystem {
     fitted: Array1<f64>,
     a_inv: Array2<f64>,
     tr_a: f64,
+}
+
+impl RemlSystem {
+    /// Working-RSS deviance numerator: Σ w_i (y_i - x_iβ)². For Gaussian
+    /// + canonical link this is the true deviance; for non-Gaussian families
+    /// this is the IRLS working-response approximation used by the closed-form
+    /// gradient/Hessian and as the Gaussian/None branch of the score function.
+    fn working_rss(&self, y: &Array1<f64>, w: &Array1<f64>) -> f64 {
+        y.iter()
+            .zip(self.fitted.iter())
+            .zip(w.iter())
+            .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+            .sum()
+    }
+
+    /// β'(ΣλS)β = Σ λ_j β'S_jβ — the penalty quadratic form, used in
+    /// `Dp = D + β'(ΣλS)β` and to form the dispersion estimate.
+    #[cfg(feature = "blas")]
+    fn penalty_quadratic(&self, lambdas: &[f64], penalties_blocks: &[BlockPenalty]) -> f64 {
+        lambdas
+            .iter()
+            .zip(penalties_blocks.iter())
+            .map(|(l, pen)| l * pen.quadratic_form(&self.beta))
+            .sum()
+    }
 }
 
 fn assemble_reml_system(
@@ -659,6 +668,98 @@ fn assemble_reml_system(
         a_inv,
         tr_a,
     })
+}
+
+/// Score-formula scalar quantities derived from a `RemlSystem`.
+///
+/// Centralises the mgcv-exact convention shared by the criterion and the
+/// closed-form gradient/Hessian:
+///   - `dev_num`: deviance numerator. Working-RSS for Gaussian or when no
+///     original response is supplied; true GLM deviance D(y_orig, μ̂) when
+///     `y_original` is passed for a non-Gaussian family.
+///   - `bsb`: β'(ΣλS)β (penalty quadratic).
+///   - `dp`: dev_num + bsb (the penalised deviance entering Dp/(2σ²)).
+///   - `sigma2`: scale estimate. Binomial/Poisson/NegBin → 1. Gaussian →
+///     RSS/(n - trA). Other dispersion-bearing families → mgcv's profiled
+///     φ̂ via `estimate_phi_mgcv`.
+#[cfg(feature = "blas")]
+struct RemlScoreParts {
+    dev_num: f64,
+    bsb: f64,
+    dp: f64,
+    sigma2: f64,
+}
+
+#[cfg(feature = "blas")]
+impl RemlScoreParts {
+    /// Compute the family-aware deviance/scale parts at the converged β.
+    /// Matches the `reml_criterion_multi_cached_mgcv_exact` and IFT path's
+    /// σ² convention (item 1 of #47): for non-Gaussian + true response the
+    /// deviance is `glm_deviance(y_orig, μ̂)`; otherwise working-RSS is used.
+    fn from_system(
+        system: &RemlSystem,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        lambdas: &[f64],
+        penalties_blocks: &[BlockPenalty],
+        family: crate::pirls::Family,
+        y_original: Option<&Array1<f64>>,
+        mp: usize,
+        n: usize,
+    ) -> Self {
+        let dev_num: f64 = match (family, y_original) {
+            (crate::pirls::Family::Gaussian, _) | (_, None) => system.working_rss(y, w),
+            (fam, Some(y_orig)) => {
+                let mu: Array1<f64> = system
+                    .fitted
+                    .iter()
+                    .map(|&eta| fam.inverse_link(eta))
+                    .collect();
+                glm_deviance(y_orig, &mu, fam)
+            }
+        };
+        let bsb = system.penalty_quadratic(lambdas, penalties_blocks);
+        let dp = dev_num + bsb;
+        let y_for_phi = y_original.unwrap_or(y);
+        let sigma2 = match family {
+            crate::pirls::Family::Binomial
+            | crate::pirls::Family::Poisson
+            | crate::pirls::Family::NegBin { .. } => 1.0,
+            _ => {
+                let phi_init = dev_num / ((n as f64) - system.tr_a).max(1e-10);
+                family.estimate_phi_mgcv(y_for_phi, dp, mp, 1.0, phi_init)
+            }
+        };
+        Self {
+            dev_num,
+            bsb,
+            dp,
+            sigma2,
+        }
+    }
+
+    /// Gaussian-style scale used by the closed-form gradient/Hessian.
+    /// Mirrors the historical inline path: σ² = RSS / max(n - trA, 1e-10).
+    /// `fixed_sigma2` overrides the computation (used when differentiating
+    /// the score at a fixed σ² base point so FD-of-gradient and CF Hessian
+    /// use the same σ² convention exactly).
+    fn gaussian_only(
+        system: &RemlSystem,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        n: usize,
+        fixed_sigma2: Option<f64>,
+    ) -> Self {
+        let dev_num = system.working_rss(y, w);
+        let sigma2 = fixed_sigma2
+            .unwrap_or_else(|| dev_num / ((n as f64) - system.tr_a).max(1e-10));
+        Self {
+            dev_num,
+            bsb: 0.0,
+            dp: 0.0,
+            sigma2,
+        }
+    }
 }
 
 /// Closed-form gradient of the mgcv-exact REML score w.r.t. log(λ_j).
@@ -755,16 +856,9 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
     // for non-Gaussian (see comment there). Family is plumbed through
     // for future use but not branched on yet.
     let _ = family;
-    let fitted = &system.fitted;
-    let rss: f64 = y
-        .iter()
-        .zip(fitted.iter())
-        .zip(w.iter())
-        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
-        .sum();
+    let parts = RemlScoreParts::gaussian_only(&system, y, w, n, fixed_scale);
     let a_inv = &system.a_inv;
-    let tr_a = system.tr_a;
-    let scale_est = fixed_scale.unwrap_or_else(|| rss / ((n as f64) - tr_a).max(1e-10));
+    let scale_est = parts.sigma2;
 
     // Per-smooth gradient
     let mut grad = Array1::<f64>::zeros(m);
@@ -835,16 +929,9 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     // A = X'WX + ΣλS, β = A^-1 X'Wy, σ² = RSS/(n-trA), A^-1
     let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
     let _ = family;
-    let fitted = &system.fitted;
-    let rss: f64 = y
-        .iter()
-        .zip(fitted.iter())
-        .zip(w.iter())
-        .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
-        .sum();
+    let parts = RemlScoreParts::gaussian_only(&system, y, w, n, None);
     let a_inv = &system.a_inv;
-    let tr_a = system.tr_a;
-    let scale_est = rss / ((n as f64) - tr_a).max(1e-10);
+    let scale_est = parts.sigma2;
 
     // Pre-compute per-smooth quantities:
     //   S_j_beta      = S_j β              (length p, sparse on j_range)
