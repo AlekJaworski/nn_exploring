@@ -2767,6 +2767,14 @@ pub fn tk_kkt_hessian_analytical(
     let m = lambdas.len();
     let p = x.ncols();
 
+    // When `MGCV_TK_HESS_FULL=1` the helper switches from FD-equivalent
+    // (matches `tk_kkt_hessian_fd` to machine precision) to the full
+    // mgcv `det2` formula with all three W-co-variation pieces enabled.
+    // The FD-equivalent default is the safer A/B-baseline; the full path
+    // is what mgcv's gdi.c actually computes for `det2[k,j]` from `Tk` and
+    // `Tkm`.
+    let full_w_chain = std::env::var("MGCV_TK_HESS_FULL").is_ok();
+
     // --- A = X'WX + Σλ_jS_j, β = A⁻¹ X'Wy, A⁻¹ ---
     let xtwx_owned;
     let xtwx = if let Some(c) = cached_xtwx {
@@ -2848,6 +2856,9 @@ pub fn tk_kkt_hessian_analytical(
                 // 2-smooth fixture (see test_tk_kkt_hessian_analytical.rs).
                 a2[i] = -a1[i] * (g2n / g1)
                     - w[i] * (v2n - v1n * v1n + 2.0 * g3n - 2.0 * g2n * g2n) / (g1 * g1);
+                if full_w_chain {
+                    a2[i] += a1[i] * a1[i] / w[i];
+                }
             } else {
                 // Full Newton (gdi.c:2543-2556).
                 let y_for_resid = y_original.unwrap_or(y);
@@ -2873,6 +2884,9 @@ pub fn tk_kkt_hessian_analytical(
                         * (alpha1 * alpha1 - alpha2 + v2n - v1n * v1n
                             + 2.0 * g3n - 2.0 * g2n * g2n)
                         / (g1 * g1);
+                if full_w_chain {
+                    a2[i] += a1[i] * a1[i] / w[i];
+                }
             }
         }
     }
@@ -2904,7 +2918,7 @@ pub fn tk_kkt_hessian_analytical(
     // FD path. The full mgcv ift1 b2 carries this piece because IRLS weights
     // co-evolve with λ during a re-fit — that's the IFT-truth, not what
     // `compute_tk_kkt_vec` sees.
-    let include_w_piece_in_b2 = false;
+    let include_w_piece_in_b2 = full_w_chain;
     for k in 0..m {
         for j in k..m {
             // rhs = − λ_k · S_k · b1[:,j] − λ_j · S_j · b1[:,k]   (+ FD-only)
@@ -2987,7 +3001,7 @@ pub fn tk_kkt_hessian_analytical(
     // Term 2 (`-tr(C_k C_j)`) comes from the W-piece of ∂A/∂ρ_j inside
     // ∂lev_uw/∂ρ_j. As with the b2 W-piece above, this is absent when w is
     // held fixed across λ perturbations (the FD definition).
-    let include_w_piece_in_lev_uw_deriv = false;
+    let include_w_piece_in_lev_uw_deriv = full_w_chain;
     let mut hess_tk = Array2::<f64>::zeros((m, m));
     for k in 0..m {
         for j in 0..m {
