@@ -165,8 +165,14 @@ def _should_write_results(records: list[dict[str, Any]]) -> bool:
         return True
 
     fixture_names = {p.stem for p in _discover_fixture_paths()}
-    parity_names = {r.get("name") for r in records if "bar_a" in r}
-    return bool(fixture_names) and parity_names == fixture_names
+    if not fixture_names:
+        return False
+    section_keys = ("bar_a", "stage4", "stage4_link", "perf", "trajectory")
+    for key in section_keys:
+        names = {r.get("name") for r in records if key in r}
+        if names == fixture_names:
+            return True
+    return False
 
 
 def _write_results(records: list[dict[str, Any]]) -> None:
