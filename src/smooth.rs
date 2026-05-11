@@ -1611,8 +1611,35 @@ impl SmoothingParameter {
             // Near convergence (small gradient), Newton step is likely good - use fewer halvings
             // Far from convergence, may need more exploration
             let stalled_score = iter >= 3 && reml_change < 1.0e-4;
+            // Workaround patch: with MGCV_TK_GRAD/InvGauss/Binomial families
+            // the analytical Tk·KK' gradient term is included but the Hessian
+            // historically did NOT include ∂Tk/∂ρ_j, so the Newton direction
+            // became inconsistent with the gradient near saturation. This
+            // patch capped the line search to 1 halving in the stalled-score
+            // branch to short-circuit the inconsistent-direction line search.
+            //
+            // The new `MGCV_TK_HESS_FD=1` Hessian augmentation makes the
+            // Newton direction consistent with the gradient. When that flag
+            // is set, relax the stalled-score cap so the optimizer can do a
+            // proper line search. `MGCV_STALLED_MAX_HALF` overrides the cap
+            // explicitly for experimentation (any non-empty value parses as a
+            // u32 with fallback 1 on parse error).
+            let stalled_cap = std::env::var("MGCV_STALLED_MAX_HALF")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| {
+                    if std::env::var("MGCV_TK_HESS_FD").is_ok() {
+                        // With consistent Hessian, give the line search the
+                        // standard near-convergence budget. The stalled-score
+                        // exit at the bottom of the loop still triggers if
+                        // none of these steps improves the score.
+                        10
+                    } else {
+                        1
+                    }
+                });
             let max_half = if stalled_score {
-                1 // If score barely moved last iter, do not burn time on a deep flat search.
+                stalled_cap
             } else if grad_norm_linf < 0.1 {
                 10 // Near convergence - fewer line search iterations
             } else if grad_norm_linf < 1.0 {

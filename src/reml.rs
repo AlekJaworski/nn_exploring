@@ -2518,7 +2518,205 @@ pub fn reml_hessian_mgcv_exact_ift(
             }
         }
     }
+
+    // Optional Tk·KK' Hessian contribution. The analytical gradient at line
+    // ~2127 adds `tk_kkt[k] = Σᵢ a1·η₁[:,k]·sign(w)·lev_uw` to ∂log|H|/∂ρ_k,
+    // so for self-consistency the Hessian needs ∂tk_kkt[k]/∂ρ_j / 2 on every
+    // (k,j) entry. The exact analytical form requires second-order IFT
+    // quantities (a2, b2, ∂lev_uw/∂ρ) which are not yet ported. We instead
+    // central-FD differentiate `tk_kkt` itself.
+    //
+    // Gated behind MGCV_TK_HESS_FD until parity confirms it is safe to
+    // default-on. Same family gating as the gradient term (tk_kkt is zero for
+    // other families with MGCV_TK_GRAD unset, so the FD contribution is also
+    // zero by construction).
+    let tk_hess_fd = std::env::var("MGCV_TK_HESS_FD").is_ok();
+    let tk_hess_active = tk_hess_fd
+        && (matches!(
+            family,
+            crate::pirls::Family::InverseGaussian
+                | crate::pirls::Family::Binomial
+                | crate::pirls::Family::QuasiBinomial
+        ) || std::env::var("MGCV_TK_GRAD").is_ok());
+    if tk_hess_active {
+        let tk_contrib = tk_kkt_hessian_fd(
+            y,
+            x,
+            w,
+            lambdas,
+            penalties_blocks,
+            cached_xtwx,
+            family,
+            y_original,
+        )?;
+        for k in 0..m {
+            for j in 0..m {
+                hess[[k, j]] += tk_contrib[[k, j]] / 2.0;
+            }
+        }
+    }
+
     Ok(hess)
+}
+
+/// Compute the analytical Tk·KK' gradient term at a given λ.
+///
+/// Returns a length-m vector with
+///   `tk_kkt[k] = Σᵢ a1[i] · η₁[i,k] · sign(w[i]) · lev_uw[i]`
+/// matching the inline computation in `reml_gradient_mgcv_exact_ift_inner`.
+/// This is the missing piece of mgcv's `∂log|H|/∂ρ_k` (gdi.c:857) used by
+/// `tk_kkt_hessian_fd` to FD-differentiate ∂tk_kkt/∂ρ_j.
+#[cfg(feature = "blas")]
+fn compute_tk_kkt_vec(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Result<Array1<f64>> {
+    let n = y.len();
+    let m = lambdas.len();
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx(x, w);
+        &xtwx_owned
+    };
+
+    // A = X'WX + Σλ_jS_j
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+    // β = A⁻¹ X'Wy
+    let xtwy = compute_xtwy(x, w, y);
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    a_solve
+        .diag_mut()
+        .iter_mut()
+        .for_each(|d| *d += solve_ridge);
+    let beta = solve(a_solve, xtwy)?;
+    let a_inv = inverse(&a)?;
+    let p = a.nrows();
+
+    let b1 = compute_b1_ift(&a_inv, &beta, lambdas, penalties_blocks);
+    let eta1 = x.dot(&b1);
+
+    // lev_uw[i] = x_i' A⁻¹ x_i
+    let xa = x.dot(&a_inv);
+    let mut lev_uw = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let mut s = 0.0;
+        for j in 0..p {
+            s += xa[[i, j]] * x[[i, j]];
+        }
+        lev_uw[i] = s;
+    }
+
+    // a1[i] = dw/dη (gdi.c:2535 / 2556).
+    let mut a1 = Array1::<f64>::zeros(n);
+    if !matches!(family, crate::pirls::Family::Gaussian) {
+        let eta = x.dot(&beta);
+        let use_fisher = family.is_canonical_link();
+        for i in 0..n {
+            let mu_i = family.inverse_link(eta[i]);
+            let dmu_deta = family.d_inverse_link(eta[i]);
+            if dmu_deta.abs() < 1e-12 {
+                continue;
+            }
+            let g1 = 1.0 / dmu_deta;
+            let v = family.variance(mu_i).max(1e-300);
+            let v1n = family.dvar(mu_i) / v;
+            let v2n = family.d2var(mu_i) / v;
+            let g2n = family.d2link(mu_i) * dmu_deta;
+            let g3n = family.d3link(mu_i) * dmu_deta;
+            if use_fisher {
+                a1[i] = -w[i] * (v1n + 2.0 * g2n) / g1;
+            } else {
+                let y_for_resid = y_original.unwrap_or(y);
+                let c_resid = y_for_resid[i] - mu_i;
+                let alpha_raw = crate::pirls::newton_irls_alpha(c_resid, v1n, g2n);
+                let alpha = if alpha_raw <= 0.0 { 1.0 } else { alpha_raw };
+                let xx = v2n - v1n * v1n + g3n - g2n * g2n;
+                let alpha1 = (-(v1n + g2n) + c_resid * xx) / alpha;
+                a1[i] = w[i] * (alpha1 - v1n - 2.0 * g2n) / g1;
+            }
+        }
+    }
+
+    let mut tk = Array1::<f64>::zeros(m);
+    for k in 0..m {
+        let mut s = 0.0;
+        for i in 0..n {
+            s += a1[i] * eta1[[i, k]] * w[i].signum() * lev_uw[i];
+        }
+        tk[k] = s;
+    }
+    Ok(tk)
+}
+
+/// Central-FD Hessian contribution from the Tk·KK' gradient term.
+///
+/// Returns an m×m matrix where entry `[k,j] = ∂tk_kkt[k]/∂ρ_j`. The full
+/// Hessian-of-REML contribution is this matrix divided by 2 (matching the
+/// `tk_kkt/2` factor in the gradient assembly).
+///
+/// Perturbs each ρ_j = log(λ_j) by ±h=1e-4 and central-differences the
+/// analytical `tk_kkt` vector. Cost: 2m extra `compute_tk_kkt_vec` calls per
+/// Hessian, each of which is one A⁻¹ build + a few matmuls.
+#[cfg(feature = "blas")]
+pub fn tk_kkt_hessian_fd(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+) -> Result<Array2<f64>> {
+    let m = lambdas.len();
+    let mut out = Array2::<f64>::zeros((m, m));
+    let h = 1.0e-4_f64;
+    let log_lam: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
+    for j in 0..m {
+        let mut lp = log_lam.clone();
+        lp[j] += h;
+        let mut lm = log_lam.clone();
+        lm[j] -= h;
+        let lam_plus: Vec<f64> = lp.iter().map(|l| l.exp()).collect();
+        let lam_minus: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
+        let tk_plus = compute_tk_kkt_vec(
+            y,
+            x,
+            w,
+            &lam_plus,
+            penalties_blocks,
+            cached_xtwx,
+            family,
+            y_original,
+        )?;
+        let tk_minus = compute_tk_kkt_vec(
+            y,
+            x,
+            w,
+            &lam_minus,
+            penalties_blocks,
+            cached_xtwx,
+            family,
+            y_original,
+        )?;
+        for k in 0..m {
+            out[[k, j]] = (tk_plus[k] - tk_minus[k]) / (2.0 * h);
+        }
+    }
+    Ok(out)
 }
 
 /// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation
