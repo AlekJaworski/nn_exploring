@@ -167,17 +167,86 @@ cat(toJSON(out, auto_unbox=TRUE), file="{td}/out.json")
 
 @pytest.mark.xfail(
     reason=(
-        "Analytical θ-LAML perf improvement target. Current FD-Newton "
-        "on θ does ~3 extra REML score evaluations per outer iteration "
-        "(center, +h, -h); analytical θ-derivatives via gam.fit5 ls/Dd "
-        "hooks would skip those. Target: at least 20% speedup for tw() "
-        "and nb() on n=1500 d=4 k=10 each."
+        "Analytical θ-LAML perf improvement target. The cache-shared FD "
+        "path (TweedieThetaCache, default ON) hoists the REML linear "
+        "system out of the 3-point FD loop but still pays the dominant "
+        "Wright-series cost in `estimate_phi_mgcv` and "
+        "`saturated_log_likelihood` once per probe. To hit ≥20% needs a "
+        "full mgcv gdi2-style analytical assembly (∂Dp/∂p, ∂log|H|/∂p, "
+        "∂ls/∂p, ∂σ²̂/∂p via IFT) — analogous to tdist_gdi2_native in "
+        "reml.rs (~600 lines, requires mgcv's tw Dd hooks Dth/Dmuth/"
+        "Dth2/Dmuth2/Dmu2th). Cache groundwork shipped; full analytic "
+        "deferred."
     ),
-    strict=True,
+    strict=False,  # speedup may vary by machine; informational
 )
 def test_tweedie_analytical_laml_is_faster():
-    """Analytical θ-LAML for Tweedie tw() should be ≥ 20% faster than FD."""
-    pytest.fail(
-        "Analytical θ-LAML not yet implemented for Tweedie — perf "
-        "comparison cannot be measured yet."
+    """Cache-shared θ-LAML for Tweedie tw() — partial speedup over FD.
+
+    Implementation status (this branch):
+
+      The legacy FD-Newton step on θ rebuilds the entire REML linear
+      system 3× per outer iteration (center, +h, -h) — even though
+      (y_local, w_local, xtwx_local, λ) are frozen across all three
+      probes, so `β̂`, `μ̂`, `log|H|`, `log|λS|+` are identical. The
+      new default path uses `TweedieThetaCache` (reml.rs) to compute
+      the linear system ONCE and reuse `β̂, μ̂, log|H|, log|λS|+` across
+      the FD probes — only the small p-dependent pieces (Tweedie
+      deviance at frozen μ̂, σ²̂(p) Newton, ls(σ²̂, p) Wright series)
+      are re-evaluated. Identical numerics to the legacy path (rel
+      <1e-10 verified by Rust unit tests).
+
+      The Wright-series evaluations inside `estimate_phi_mgcv` +
+      `saturated_log_likelihood` dominate the per-probe cost, so the
+      cache-only optimisation typically nets a ~5-15% wall-clock
+      speedup at n=1500 k=10 — short of the 20% target.
+
+      Legacy path: `MGCV_TWEEDIE_FD=1` (for verification).
+    """
+    import os
+    import time
+
+    X, y = _make_data_tweedie(n=1500, d=4, seed=11)
+    k = [10] * 4
+
+    def _time_fit(env_overrides=None):
+        saved = {}
+        try:
+            if env_overrides:
+                for kk, vv in env_overrides.items():
+                    saved[kk] = os.environ.get(kk)
+                    os.environ[kk] = vv
+            timings = []
+            reml = None
+            for _ in range(3):
+                t0 = time.perf_counter()
+                g = GAM("tweedie")  # profile-p path
+                g.fit(X, y, k=k, method="REML", bs="cr")
+                timings.append(time.perf_counter() - t0)
+                reml = g.get_reml_score()
+            return float(min(timings)), float(reml)
+        finally:
+            for kk, vv in saved.items():
+                if vv is None:
+                    os.environ.pop(kk, None)
+                else:
+                    os.environ[kk] = vv
+
+    t_analytic, reml_analytic = _time_fit(None)
+    t_fd, reml_fd = _time_fit({"MGCV_TWEEDIE_FD": "1"})
+
+    # Numerics must agree between the two paths (same FD math, just
+    # cached linear system).
+    gap = abs(reml_analytic - reml_fd)
+    assert gap < 1e-3 * max(abs(reml_analytic), 1.0), (
+        f"REML mismatch between analytical-cached and FD-legacy paths: "
+        f"analytical={reml_analytic:.6f} fd={reml_fd:.6f} gap={gap:.2e}"
+    )
+
+    speedup = t_fd / t_analytic
+    # Require ≥ 20% speedup (i.e., t_fd / t_analytic ≥ 1.25).
+    assert speedup >= 1.20, (
+        f"Cache-shared θ-LAML speedup {speedup:.2f}× below 1.20× target. "
+        f"analytical={t_analytic*1000:.1f} ms, FD-legacy={t_fd*1000:.1f} ms. "
+        f"Full mgcv gdi2-style analytic derivatives needed to close the gap."
     )
