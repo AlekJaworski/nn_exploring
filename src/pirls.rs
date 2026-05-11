@@ -1009,6 +1009,66 @@ struct WorkingQuantities {
     w: Array1<f64>,
 }
 
+/// Newton IRLS curvature factor `α = 1 + c_resid · (V₁ⁿ + g₂ⁿ)`.
+///
+/// `c_resid = y - μ`, `v1n = V'(μ)/V(μ)`, `g2n = g''(μ) · g'(μ)⁻¹ = d2link·dmu_deta`.
+/// Callers handle the `α ≤ 0` case (pirls falls back to Fisher per-obs; reml's
+/// `a1` computation clamps `α` to 1 to stay on the Newton form). Centralised so
+/// the InvGauss + log alpha-clamp fix applies wherever the curvature term is
+/// used.
+#[inline]
+pub(crate) fn newton_irls_alpha(c_resid: f64, v1n: f64, g2n: f64) -> f64 {
+    1.0 + c_resid * (v1n + g2n)
+}
+
+/// Per-observation IRLS working weight `w` and working response `z`.
+///
+/// Encapsulates the standard GLM IRLS step for one observation: compute μ,
+/// dμ/dη, V(μ), Fisher weight `wf = (dμ/dη)² / V(μ)`, optionally apply the
+/// Newton curvature correction `α`, and fall back to Fisher when `α ≤ 0`
+/// (e.g. InvGauss + log has α<0 on ~43% of obs for `α = 2y/μ − 1`).
+///
+/// `use_fisher` should be `true` whenever the caller wants pure Fisher
+/// scoring (canonical-link families always do; non-canonical links use
+/// Newton in the inner loop but Fisher for the final reporting pass).
+#[inline]
+pub(crate) fn compute_irls_wz(
+    eta_i: f64,
+    y_i: f64,
+    family: Family,
+    use_fisher: bool,
+) -> (f64, f64) {
+    let mu = family.inverse_link(eta_i);
+    let dmu_deta = family.d_inverse_link(eta_i);
+    let variance = family.variance(mu);
+    let var_safe = variance.max(1e-10);
+    if dmu_deta.abs() < 1e-10 {
+        return (1e-10, eta_i);
+    }
+
+    let wf = (dmu_deta * dmu_deta) / var_safe;
+    if use_fisher {
+        let z = eta_i + (y_i - mu) / dmu_deta;
+        let w = wf.max(1e-10);
+        return (w, z);
+    }
+
+    let c_resid = y_i - mu;
+    let v1n = family.dvar(mu) / var_safe;
+    let g2n = family.d2link(mu) * dmu_deta;
+    let alpha = newton_irls_alpha(c_resid, v1n, g2n);
+    // Cholesky needs PSD weights; when Newton curvature goes negative,
+    // fall back to Fisher scoring for that observation.
+    if alpha <= 0.0 {
+        let z = eta_i + c_resid / dmu_deta;
+        let w = wf.max(1e-10);
+        return (w, z);
+    }
+    let z = eta_i + c_resid / (dmu_deta * alpha);
+    let w = wf * alpha;
+    (w, z)
+}
+
 fn standard_glm_working_quantities(
     y: &Array1<f64>,
     eta: &Array1<f64>,
@@ -1021,36 +1081,9 @@ fn standard_glm_working_quantities(
     let mut w = Array1::zeros(n);
 
     for i in 0..n {
-        let mu = family.inverse_link(eta[i]);
-        let dmu_deta = family.d_inverse_link(eta[i]);
-        let variance = family.variance(mu);
-        let var_safe = variance.max(1e-10);
-        if dmu_deta.abs() < 1e-10 {
-            z[i] = eta[i];
-            w[i] = 1e-10;
-            continue;
-        }
-
-        let wf = (dmu_deta * dmu_deta) / var_safe;
-        if use_fisher {
-            z[i] = eta[i] + (y[i] - mu) / dmu_deta;
-            w[i] = wf.max(1e-10);
-            continue;
-        }
-
-        let c_resid = y[i] - mu;
-        let dvar = family.dvar(mu);
-        let d2link = family.d2link(mu);
-        let alpha = 1.0 + c_resid * (dvar / var_safe + d2link * dmu_deta);
-        // Cholesky needs PSD weights; when Newton curvature goes negative,
-        // keep the existing fallback to Fisher scoring for that observation.
-        if alpha <= 0.0 {
-            z[i] = eta[i] + c_resid / dmu_deta;
-            w[i] = wf.max(1e-10);
-            continue;
-        }
-        z[i] = eta[i] + c_resid / (dmu_deta * alpha);
-        w[i] = wf * alpha;
+        let (wi, zi) = compute_irls_wz(eta[i], y[i], family, use_fisher);
+        w[i] = wi;
+        z[i] = zi;
     }
 
     WorkingQuantities { z, w }
