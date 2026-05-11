@@ -13,7 +13,7 @@ use crate::reml::{
     reml_gradient_mgcv_exact_ift, reml_gradient_multi_qr_adaptive,
     reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
     reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
-    tdist_shape_derivatives_gamfit4,
+    tdist_shape_derivatives_gamfit4, tweedie_theta_derivatives_cached, TweedieThetaCache,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -1801,7 +1801,17 @@ impl SmoothingParameter {
             // θ ↔ p mapping (misc.c:212-224, a=1.001, b=1.999):
             //   θ > 0: p = (b + a·exp(-θ))/(exp(-θ)+1)
             //   θ ≤ 0: p = (b·exp(θ)+a)/(exp(θ)+1)
-            // Gradient dlr/dθ via FD on REML score at θ ± h (with PIRLS refresh).
+            //
+            // Gradient dlr/dθ via FD on REML score at θ ± h. The fast path
+            // (default) caches the linear system once via `TweedieThetaCache`
+            // since (y_local, w_local, xtwx_local, lambdas) are frozen for
+            // this step — β̂, μ̂, log|H|, log|S|+ are identical across the 3
+            // probes, so we only redo the cheap (p, σ²̂(p))-pieces. Roughly
+            // 3× faster than the old per-probe `dispatch_reml_score_with_family`
+            // path, which redundantly rebuilt the system each call.
+            //
+            // The legacy FD path remains behind `MGCV_TWEEDIE_FD=1` for parity
+            // verification.
             // -----------------------------------------------------------------------
             if self.tweedie_profile {
                 let theta = self.tweedie_theta;
@@ -1820,18 +1830,19 @@ impl SmoothingParameter {
                         (b * e + a) / (e + 1.0)
                     }
                 }
+                let tw_theta_to_p_clamped =
+                    |th: f64| -> f64 { tw_theta_to_p(th).max(1.001_f64).min(1.999_f64) };
 
-                // Inline helper: evaluate REML score at trial θ using
-                // the frozen working data (y_local, w_local, xtwx_local)
-                // from the start-of-iteration PIRLS refresh. We do NOT
-                // re-run PIRLS for the θ step; the current working linearisation
-                // is a good approximation since p changes slowly.
-                // Temporarily set self.family so that `dispatch_reml_score_with_family`
-                // uses the trial p for the score formula (ls, estimate_phi_mgcv).
-                macro_rules! tw_eval {
+                // Choose the fast cached path (default) or the legacy FD path
+                // (env override) for verification.
+                let use_fd_legacy = std::env::var("MGCV_TWEEDIE_FD").is_ok();
+                let y_for_ls_ref: &Array1<f64> = self.y_original.as_ref().unwrap_or(&y_local);
+
+                // Inline helper for the legacy / verification FD path.
+                macro_rules! tw_eval_fd {
                     ($th_trial:expr) => {{
                         let th_trial: f64 = $th_trial;
-                        let p_trial = tw_theta_to_p(th_trial).max(1.001_f64).min(1.999_f64);
+                        let p_trial = tw_theta_to_p_clamped(th_trial);
                         let trial_fam = crate::pirls::Family::Tweedie { p: p_trial };
                         dispatch_reml_score_with_family(
                             self,
@@ -1846,17 +1857,47 @@ impl SmoothingParameter {
                     }};
                 }
 
-                // FD gradient and curvature wrt θ, evaluated at the updated λ.
-                // Also compute the center score (at current θ, updated λ) for
-                // the line-search comparison baseline.
-                let reml_center = tw_eval!(theta);
-                let reml_plus = tw_eval!(theta + h_th);
-                let reml_minus = tw_eval!(theta - h_th);
+                // Build derivative pieces. The cached path returns
+                // (rc, dlr/dθ, d²lr/dθ²) sharing one linear-system assembly.
+                let derivs = if !use_fd_legacy && self.mgcv_exact_score {
+                    match TweedieThetaCache::build(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &xtwx_local,
+                        &current_lambdas,
+                        penalties,
+                        self.mp,
+                        y_for_ls_ref,
+                    ) {
+                        Ok(cache) => {
+                            let r = tweedie_theta_derivatives_cached(
+                                &cache,
+                                theta,
+                                h_th,
+                                tw_theta_to_p_clamped,
+                            );
+                            // Stash the cache for the line-search refine step.
+                            r.map(|(rc, g, h)| (rc, g, h, Some(cache)))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    // Legacy path: 3 full dispatch calls.
+                    let rc_r = tw_eval_fd!(theta);
+                    let rp_r = tw_eval_fd!(theta + h_th);
+                    let rm_r = tw_eval_fd!(theta - h_th);
+                    match (rc_r, rp_r, rm_r) {
+                        (Ok(rc), Ok(rp), Ok(rm)) => {
+                            let dlr = (rp - rm) / (2.0 * h_th);
+                            let d2lr = (rp - 2.0 * rc + rm) / (h_th * h_th);
+                            Ok((rc, dlr, d2lr, None::<TweedieThetaCache>))
+                        }
+                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+                    }
+                };
 
-                if let (Ok(rc), Ok(rp), Ok(rm)) = (reml_center, reml_plus, reml_minus) {
-                    let dlr_dth = (rp - rm) / (2.0 * h_th);
-                    let d2lr_dth2 = (rp - 2.0 * rc + rm) / (h_th * h_th);
-
+                if let Ok((rc, dlr_dth, d2lr_dth2, cache_opt)) = derivs {
                     // Newton step: δθ = -g / |H| with |H| floored for stability
                     let denom = d2lr_dth2.abs().max(1e-4);
                     let delta_theta = -(dlr_dth / denom);
@@ -1864,14 +1905,24 @@ impl SmoothingParameter {
 
                     // Line-search on θ: try full step, then half-step.
                     // Compare against rc (REML at current θ with updated λ).
+                    // Reuse the cache for the candidate evaluations when we
+                    // have one — same frozen system, just a different p.
+                    let eval_at = |th_trial: f64| -> Result<f64> {
+                        if let Some(cache) = cache_opt.as_ref() {
+                            cache.score_at_p(tw_theta_to_p_clamped(th_trial))
+                        } else {
+                            tw_eval_fd!(th_trial)
+                        }
+                    };
+
                     let mut accepted_theta = theta;
                     let candidate = theta + delta_theta;
-                    if let Ok(r_new) = tw_eval!(candidate) {
+                    if let Ok(r_new) = eval_at(candidate) {
                         if r_new < rc {
                             accepted_theta = candidate;
                         } else {
                             let half_cand = theta + delta_theta * 0.5;
-                            if let Ok(r_half) = tw_eval!(half_cand) {
+                            if let Ok(r_half) = eval_at(half_cand) {
                                 if r_half < rc {
                                     accepted_theta = half_cand;
                                 }
@@ -1880,7 +1931,7 @@ impl SmoothingParameter {
                     }
 
                     self.tweedie_theta = accepted_theta;
-                    let new_p = tw_theta_to_p(accepted_theta).max(1.001).min(1.999);
+                    let new_p = tw_theta_to_p_clamped(accepted_theta);
                     // Near p=2 the Wright series becomes intractable; freeze profiling.
                     if new_p > 1.97 {
                         self.tweedie_profile = false;
@@ -1896,8 +1947,12 @@ impl SmoothingParameter {
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
-                            "[PROFILE]   Tweedie profile-p: θ {:.4}→{:.4} p={:.4} dlr/dθ={:.4e}",
-                            theta, accepted_theta, new_p, dlr_dth
+                            "[PROFILE]   Tweedie profile-p: θ {:.4}→{:.4} p={:.4} dlr/dθ={:.4e}{}",
+                            theta,
+                            accepted_theta,
+                            new_p,
+                            dlr_dth,
+                            if use_fd_legacy { " [FD-legacy]" } else { " [analytical-cached]" }
                         );
                     }
                 }

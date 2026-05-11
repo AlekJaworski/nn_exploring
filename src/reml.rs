@@ -661,6 +661,152 @@ fn assemble_reml_system(
     })
 }
 
+/// Frozen pieces of the Tweedie REML score that DO NOT depend on the working
+/// parameter θ (and therefore on the Tweedie index p). Used by the analytical
+/// θ-derivative path to avoid recomputing the linear system across the three
+/// FD trials (center / +h / -h).
+///
+/// Invariants — the caller pinky-promises that `(y_local, w_local, xtwx_local,
+/// lambdas, penalties)` are held FIXED across the trial evaluations. When this
+/// is true, mgcv's REML formula
+///
+/// ```text
+///   REML = Dp/(2σ²) + log|H|/2 - log|λS|+/2 - ls + Mp/2·log(2π·σ²)
+/// ```
+///
+/// has the following constant pieces:
+///   - β̂ and μ̂ = Xβ̂  (from the frozen linear system)
+///   - `bsb = β̂'(Σ λ_j S_j) β̂`
+///   - `log_det_h = log|X'WX + ΣλS|`
+///   - `log_det_s = log|λS|+` (depends only on λ, not on family)
+///   - `mp` and `y_for_ls.len()`
+///
+/// What still varies with p (small fast pieces):
+///   - `D(y_orig, μ̂; p)` — Tweedie deviance at frozen μ̂ (O(n) closed form)
+///   - `σ²̂(p)` — Newton on `dlr/dφ = 0` with Wright series
+///   - `ls(y, σ²̂, p)` — Wright series
+///
+/// Together these are ~5% of the cost of a full `dispatch_reml_score_with_family`
+/// call, so caching the linear algebra and looping only over the small p-pieces
+/// gives a 3× speedup on the θ-FD step (3 evaluations: center, +h, -h).
+#[cfg(feature = "blas")]
+pub struct TweedieThetaCache<'a> {
+    pub y_for_ls: &'a Array1<f64>,
+    pub fitted: Array1<f64>,
+    pub bsb: f64,
+    pub log_det_h: f64,
+    pub log_det_s: f64,
+    pub mp: usize,
+    /// `tr(A⁻¹ X'WX)` — effective degrees of freedom. Stored so that
+    /// `score_at_p` uses the same `phi_init = dev_numerator / (n - tr_a)`
+    /// as `reml_criterion_multi_cached_mgcv_exact` (for byte-identical
+    /// numerics across cached and direct paths).
+    pub tr_a: f64,
+}
+
+#[cfg(feature = "blas")]
+impl<'a> TweedieThetaCache<'a> {
+    /// Build the cache for a fixed (y_local, w_local, xtwx_local, lambdas)
+    /// state. Performs ONE linear system assembly + factorisation; reused
+    /// across all trial p values during the θ-Newton FD step.
+    pub fn build(
+        y_local: &Array1<f64>,
+        x: &Array2<f64>,
+        w_local: &Array1<f64>,
+        xtwx_local: &Array2<f64>,
+        lambdas: &[f64],
+        penalties: &[BlockPenalty],
+        mp: usize,
+        y_for_ls: &'a Array1<f64>,
+    ) -> Result<Self> {
+        let system = assemble_reml_system(y_local, x, w_local, xtwx_local, lambdas, penalties)?;
+        let mut bsb = 0.0;
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            bsb += lambda * penalty.quadratic_form(&system.beta);
+        }
+        let log_det_h = determinant(&system.a)?.ln();
+        let mut log_lambda_sum = 0.0;
+        let mut log_pseudo_det_sum = 0.0;
+        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
+            if *lambda > 1e-10 {
+                let rank_s = estimate_rank_eigen(penalty);
+                if rank_s > 0 {
+                    log_lambda_sum += (rank_s as f64) * lambda.ln();
+                }
+            }
+            log_pseudo_det_sum += pseudo_determinant(penalty)?;
+        }
+        let log_det_s = log_lambda_sum + log_pseudo_det_sum;
+        Ok(TweedieThetaCache {
+            y_for_ls,
+            fitted: system.fitted,
+            bsb,
+            log_det_h,
+            log_det_s,
+            mp,
+            tr_a: system.tr_a,
+        })
+    }
+
+    /// Evaluate the REML score for a Tweedie family with index `p`, reusing
+    /// the frozen linear-system pieces. Cost: O(n) for the deviance + Wright
+    /// series for σ²̂ + ls. Roughly 3× cheaper than a fresh
+    /// `reml_criterion_multi_cached_mgcv_exact` call when the linear system
+    /// is the dominant cost (small to moderate p, n ≥ 500).
+    pub fn score_at_p(&self, p: f64) -> Result<f64> {
+        let family = crate::pirls::Family::Tweedie { p };
+        // μ̂ = g⁻¹(η̂) with η̂ = Xβ̂ (frozen across p)
+        let mu: Array1<f64> = self.fitted.iter().map(|&eta| family.inverse_link(eta)).collect();
+        let dev_numerator = glm_deviance(self.y_for_ls, &mu, family);
+        let dp = dev_numerator + self.bsb;
+        // Profile σ̂² for this trial p — `phi_init` matches the direct path
+        // (`reml_criterion_multi_cached_mgcv_exact`) so the Newton iteration
+        // starts from the same point and converges bit-identically.
+        let n_minus_tra = (self.y_for_ls.len() as f64) - self.tr_a;
+        let phi_init = dev_numerator / n_minus_tra.max(1e-10);
+        let scale_est = family.estimate_phi_mgcv(self.y_for_ls, dp, self.mp, 1.0, phi_init);
+        let ls1 = family.saturated_log_likelihood(self.y_for_ls, scale_est);
+        let formula = family.score_formula();
+        Ok(formula.assemble(
+            dp,
+            ls1,
+            self.log_det_h,
+            self.log_det_s,
+            scale_est,
+            self.mp,
+        ))
+    }
+}
+
+/// Compute the FD gradient and curvature of the Tweedie REML score with
+/// respect to the working parameter θ (the unconstrained log-odds-ratio
+/// parameter mapping into the (a,b) interval that gives p). Reuses the
+/// frozen linear system across the three FD probes (center, +h, -h), so
+/// each `score_at_p` call only does O(n) + Wright-series work — no extra
+/// linear algebra.
+///
+/// Returns `(reml_center, dlr_dth, d2lr_dth2)`.
+///
+/// `theta_to_p` is the same θ→p map mgcv uses (smooth.rs has the closure;
+/// passed in for clarity since the mapping is family- but not call-specific).
+#[cfg(feature = "blas")]
+pub fn tweedie_theta_derivatives_cached(
+    cache: &TweedieThetaCache<'_>,
+    theta: f64,
+    h: f64,
+    theta_to_p: impl Fn(f64) -> f64,
+) -> Result<(f64, f64, f64)> {
+    let p_center = theta_to_p(theta);
+    let p_plus = theta_to_p(theta + h);
+    let p_minus = theta_to_p(theta - h);
+    let rc = cache.score_at_p(p_center)?;
+    let rp = cache.score_at_p(p_plus)?;
+    let rm = cache.score_at_p(p_minus)?;
+    let dlr_dth = (rp - rm) / (2.0 * h);
+    let d2lr_dth2 = (rp - 2.0 * rc + rm) / (h * h);
+    Ok((rc, dlr_dth, d2lr_dth2))
+}
+
 /// Closed-form gradient of the mgcv-exact REML score w.r.t. log(λ_j).
 ///
 /// For Gaussian + canonical link at PIRLS convergence the cross-coupling
@@ -5635,4 +5781,294 @@ mod tests {
     }
 
     // TODO: Add test for blockwise once it's updated to match new API
+
+    /// Verify the cached Tweedie θ-derivative path matches a direct
+    /// `reml_criterion_multi_cached_mgcv_exact` evaluation across the three
+    /// FD probes that the Newton step uses (center / +h / -h). The cache only
+    /// hoists the LINEAR SYSTEM out of the loop; the per-probe (p, σ²̂)-pieces
+    /// should be bit-for-bit identical (rel < 1e-10).
+    ///
+    /// Fixture: small synthetic Tweedie problem, n=400 d=2 k=10, p=1.5.
+    #[test]
+    fn test_tweedie_theta_cache_matches_full_dispatch() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        // Build a 2-smooth design with k=10 each, n=400.
+        let n = 400;
+        let d = 2;
+        let k_basis = 10;
+        let p_dim = d * k_basis;
+
+        let mut x = Array2::<f64>::zeros((n, p_dim));
+        let mut y_orig = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let mut eta = 0.0;
+            for j in 0..d {
+                let xij: f64 = rng.gen();
+                // Simple polynomial basis fill (we only need a well-conditioned
+                // matrix; the exact basis is immaterial for the analytic-vs-FD
+                // comparison).
+                for kk in 0..k_basis {
+                    x[[i, j * k_basis + kk]] =
+                        ((kk as f64 + 1.0) * std::f64::consts::PI * xij).sin();
+                }
+                eta += (2.0 * std::f64::consts::PI * xij).sin();
+            }
+            let mu = eta.exp();
+            // Tweedie-like response: gamma + 20% atom at zero, μ-scaled.
+            let g: f64 = (rng.gen::<f64>() + 0.1) * mu / 2.0;
+            y_orig[i] = if rng.gen::<f64>() < 0.2 { 0.0 } else { g };
+        }
+        let w = Array1::<f64>::ones(n);
+
+        // Block-diagonal second-difference-ish penalty per smooth.
+        let mut penalties = Vec::with_capacity(d);
+        for j in 0..d {
+            let mut s = Array2::<f64>::zeros((p_dim, p_dim));
+            let start = j * k_basis;
+            for i in start..(start + k_basis) {
+                s[[i, i]] = 2.0;
+                if i > start {
+                    s[[i, i - 1]] = -1.0;
+                    s[[i - 1, i]] = -1.0;
+                }
+            }
+            penalties.push(BlockPenalty::new(s, 0, p_dim));
+        }
+        let lambdas = vec![0.5, 0.7];
+        let mp = 1 + 2 * d; // intercept + nullspace per smooth (rough)
+
+        let p_tweedie = 1.5_f64;
+        let family = crate::pirls::Family::Tweedie { p: p_tweedie };
+
+        // Reference: full dispatch path (rebuilds linear system each call).
+        let xtwx = compute_xtwx(&x, &w);
+        let ref_center = reml_criterion_multi_cached_mgcv_exact(
+            &y_orig,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+            Some(&xtwx),
+            mp,
+            family,
+            Some(&y_orig),
+        )
+        .expect("reference REML failed");
+
+        // Cached path.
+        let cache = TweedieThetaCache::build(
+            &y_orig,
+            &x,
+            &w,
+            &xtwx,
+            &lambdas,
+            &penalties,
+            mp,
+            &y_orig,
+        )
+        .expect("cache build failed");
+        let cached_center = cache.score_at_p(p_tweedie).expect("cached score failed");
+
+        let rel = (ref_center - cached_center).abs() / ref_center.abs().max(1.0);
+        assert!(
+            rel < 1e-10,
+            "tweedie cache center-score mismatch: ref={} cached={} rel={:.3e}",
+            ref_center,
+            cached_center,
+            rel
+        );
+
+        // Verify across three FD probes.
+        let theta_to_p = |th: f64| -> f64 {
+            let a = 1.001_f64;
+            let b = 1.999_f64;
+            let p = if th > 0.0 {
+                let e = (-th).exp();
+                (b + a * e) / (e + 1.0)
+            } else {
+                let e = th.exp();
+                (b * e + a) / (e + 1.0)
+            };
+            p.max(1.001).min(1.999)
+        };
+        let h = 1e-3;
+        for &theta in &[-0.5_f64, 0.0, 0.5] {
+            for &dth in &[0.0_f64, h, -h] {
+                let p = theta_to_p(theta + dth);
+                let fam_p = crate::pirls::Family::Tweedie { p };
+                let r_ref = reml_criterion_multi_cached_mgcv_exact(
+                    &y_orig,
+                    &x,
+                    &w,
+                    &lambdas,
+                    &penalties,
+                    Some(&xtwx),
+                    mp,
+                    fam_p,
+                    Some(&y_orig),
+                )
+                .expect("ref score failed");
+                let r_cached = cache.score_at_p(p).expect("cached score failed");
+                let rel = (r_ref - r_cached).abs() / r_ref.abs().max(1.0);
+                assert!(
+                    rel < 1e-10,
+                    "θ={} dθ={} p={}: ref={} cached={} rel={:.3e}",
+                    theta,
+                    dth,
+                    p,
+                    r_ref,
+                    r_cached,
+                    rel
+                );
+            }
+        }
+    }
+
+    /// Verify that the FD-on-cache derivative matches the FD-via-full-dispatch
+    /// derivative (which is what the legacy `MGCV_TWEEDIE_FD=1` path computes).
+    /// The two should agree to rel < 1e-3 since the only difference is round-off
+    /// from reusing the factored linear system vs re-factoring.
+    #[test]
+    fn test_tweedie_theta_derivatives_match_fd_legacy() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+
+        let n = 400;
+        let d = 2;
+        let k_basis = 10;
+        let p_dim = d * k_basis;
+
+        let mut x = Array2::<f64>::zeros((n, p_dim));
+        let mut y_orig = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let mut eta = 0.0;
+            for j in 0..d {
+                let xij: f64 = rng.gen();
+                for kk in 0..k_basis {
+                    x[[i, j * k_basis + kk]] =
+                        ((kk as f64 + 1.0) * std::f64::consts::PI * xij).sin();
+                }
+                eta += (2.0 * std::f64::consts::PI * xij).sin();
+            }
+            let mu = eta.exp();
+            let g: f64 = (rng.gen::<f64>() + 0.1) * mu / 2.0;
+            y_orig[i] = if rng.gen::<f64>() < 0.2 { 0.0 } else { g };
+        }
+        let w = Array1::<f64>::ones(n);
+
+        let mut penalties = Vec::with_capacity(d);
+        for j in 0..d {
+            let mut s = Array2::<f64>::zeros((p_dim, p_dim));
+            let start = j * k_basis;
+            for i in start..(start + k_basis) {
+                s[[i, i]] = 2.0;
+                if i > start {
+                    s[[i, i - 1]] = -1.0;
+                    s[[i - 1, i]] = -1.0;
+                }
+            }
+            penalties.push(BlockPenalty::new(s, 0, p_dim));
+        }
+        let lambdas = vec![0.5, 0.7];
+        let mp = 1 + 2 * d;
+        let xtwx = compute_xtwx(&x, &w);
+
+        let theta_to_p = |th: f64| -> f64 {
+            let a = 1.001_f64;
+            let b = 1.999_f64;
+            let p = if th > 0.0 {
+                let e = (-th).exp();
+                (b + a * e) / (e + 1.0)
+            } else {
+                let e = th.exp();
+                (b * e + a) / (e + 1.0)
+            };
+            p.max(1.001).min(1.999)
+        };
+
+        let theta = 0.0_f64;
+        let h = 1e-3;
+
+        let p_center = theta_to_p(theta);
+        let p_plus = theta_to_p(theta + h);
+        let p_minus = theta_to_p(theta - h);
+
+        let score_dispatch = |p: f64| -> f64 {
+            let fam = crate::pirls::Family::Tweedie { p };
+            reml_criterion_multi_cached_mgcv_exact(
+                &y_orig,
+                &x,
+                &w,
+                &lambdas,
+                &penalties,
+                Some(&xtwx),
+                mp,
+                fam,
+                Some(&y_orig),
+            )
+            .expect("dispatch failed")
+        };
+        let rc_fd = score_dispatch(p_center);
+        let rp_fd = score_dispatch(p_plus);
+        let rm_fd = score_dispatch(p_minus);
+        let grad_fd = (rp_fd - rm_fd) / (2.0 * h);
+        let hess_fd = (rp_fd - 2.0 * rc_fd + rm_fd) / (h * h);
+
+        let cache = TweedieThetaCache::build(
+            &y_orig,
+            &x,
+            &w,
+            &xtwx,
+            &lambdas,
+            &penalties,
+            mp,
+            &y_orig,
+        )
+        .expect("cache build failed");
+        let (rc_c, grad_c, hess_c) =
+            tweedie_theta_derivatives_cached(&cache, theta, h, theta_to_p)
+                .expect("cached FD failed");
+
+        // Center scores should be ~bit-identical.
+        let rel_center = (rc_fd - rc_c).abs() / rc_fd.abs().max(1.0);
+        assert!(
+            rel_center < 1e-10,
+            "center mismatch: fd={} cached={} rel={:.3e}",
+            rc_fd,
+            rc_c,
+            rel_center
+        );
+        // Gradient: rel < 1e-3 (FD math is the same; only float-roundoff diff)
+        let rel_grad = (grad_fd - grad_c).abs() / grad_fd.abs().max(1.0);
+        assert!(
+            rel_grad < 1e-3,
+            "gradient mismatch: fd={} cached={} rel={:.3e}",
+            grad_fd,
+            grad_c,
+            rel_grad
+        );
+        // Hessian (second-difference): rel < 1e-2 since it's much more sensitive
+        // to round-off than the gradient (FD division by h² amplifies noise).
+        let rel_hess = (hess_fd - hess_c).abs() / hess_fd.abs().max(1.0);
+        assert!(
+            rel_hess < 1e-2,
+            "hessian mismatch: fd={} cached={} rel={:.3e}",
+            hess_fd,
+            hess_c,
+            rel_hess
+        );
+
+        println!(
+            "Tweedie θ-derivatives: grad rel diff {:.3e}, hess rel diff {:.3e}",
+            rel_grad, rel_hess
+        );
+    }
 }
