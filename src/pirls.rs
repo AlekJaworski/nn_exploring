@@ -316,6 +316,54 @@ impl Family {
         }
     }
 
+    /// Third derivative of variance function: d³V/dμ³.
+    /// Used by mgcv's α₂ derivative (`gdi.c:2546`) needed for the analytical
+    /// Tk·KK' Hessian contribution (full Newton path).
+    pub fn d3var(&self, mu: f64) -> f64 {
+        match self {
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
+            Family::Binomial | Family::QuasiBinomial => 0.0,
+            Family::Poisson | Family::QuasiPoisson => 0.0,
+            Family::Gamma | Family::GammaLog => 0.0,
+            Family::Tweedie { p } => p * (p - 1.0) * (p - 2.0) * mu.powf(p - 3.0),
+            // d³V/dμ³ = 6 for V(μ) = μ³
+            Family::InverseGaussian => 6.0,
+            Family::NegBin { .. } => 0.0,
+        }
+    }
+
+    /// Fourth derivative of link function: d⁴g/dμ⁴.
+    /// Used by mgcv's α₂ derivative (`gdi.c:2546`) — the analytical Tk·KK'
+    /// Hessian contribution under the full Newton path.
+    pub fn d4link(&self, mu: f64) -> f64 {
+        match self {
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
+            Family::Binomial | Family::QuasiBinomial => {
+                // d3link = 2/μ³ + 2/(1-μ)³
+                // d4link = -6/μ⁴ + d/dμ[2(1-μ)⁻³] = -6/μ⁴ + 6/(1-μ)⁴
+                let one_minus = 1.0 - mu;
+                let m2 = mu * mu;
+                let om2 = one_minus * one_minus;
+                -6.0 / (m2 * m2) + 6.0 / (om2 * om2)
+            }
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => {
+                // d3link = 2/μ³ → d4link = -6/μ⁴
+                let m2 = mu * mu;
+                -6.0 / (m2 * m2)
+            }
+            Family::Gamma => {
+                // d3link = -6/μ⁴ → d4link = 24/μ⁵
+                let m2 = mu * mu;
+                24.0 / (m2 * m2 * mu)
+            }
+        }
+    }
+
     /// Which REML/LAML score formula this family uses.
     ///
     /// Two structurally different formulas live in mgcv: the gam.fit3 REML
