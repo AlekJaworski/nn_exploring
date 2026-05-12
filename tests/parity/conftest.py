@@ -79,18 +79,23 @@ _NB_PROFILE_V1_REASON = (
     "train absdiff <1e-3."
 )
 
-_REPARAM_PENDING_REASON = (
-    "Tk·KK' analytical Hessian is default-on for InvGauss / Binomial / "
-    "QuasiBinomial. On saturating-λ or marginal fixtures, the outer Newton "
-    "over-steps because the model matrix and penalty roots are not in mgcv's "
-    "stable similarity basis (`gam.reparam` / C_get_stableS in gdi.c:550-792, "
-    "applied at gam.fit3.r:144-170). Closure requires porting that "
-    "reparametrisation; tracked in `mgcv_rust - Reparametrization port` note."
+_SATURATING_LAMBDA_STOP_REASON = (
+    "Saturating-λ outer-Newton stopping behaviour on the 4th smooth "
+    "(λ_4 ≈ 22118, near-saturating). Rust converges via REML-change-tol "
+    "(1e-7) at iter 9 with grad_Linf = 6.62e-4 on dim 3; mgcv's converged "
+    "grad on the same dim is -1.59e-4. The Newton step shrinks near "
+    "saturation (huge H_33 eigenvalue), REML stops changing, optimizer "
+    "halts ~4.6% off mgcv on λ_4. Closure needs mgcv's step-blending / "
+    "post-Newton walk (gam.fit3.r:1473-1614 or 1675-1688). "
+    "NOT a reparam issue: design matrix X matches mgcv to 1.94e-15 and "
+    "MGCV_REPARAM=1 is a no-op on this fixture. Verified via "
+    "scripts/python/diagnostics/binomial_n2000_bisect.py + Critical "
+    "Finding 2026-05-14."
 )
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_mgcv_exact_predictions_link_scale": {
-        "4d_binomial_logit_n2000_k8_cr": _REPARAM_PENDING_REASON,
+        "4d_binomial_logit_n2000_k8_cr": _SATURATING_LAMBDA_STOP_REASON,
     },
 }
 
