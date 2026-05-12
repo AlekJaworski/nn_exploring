@@ -1290,6 +1290,118 @@ impl PyGAM {
         Ok(numpy::PyArray2::from_owned_array(py, hess))
     }
 
+    /// Re-runs PIRLS at the given λ (using raw `y` and the fitter's cached
+    /// design matrix), then evaluates the mgcv-exact REML score, IFT
+    /// gradient, and IFT Hessian at the freshly-converged (β, W, z).
+    ///
+    /// Diagnostic-only — exposes what the outer Newton would see at λ. The
+    /// regular `evaluate_reml_*` entry points reuse stale weights from the
+    /// last `fit()` call which is fine for Gaussian (W=I) but produces a
+    /// β that is NOT the PIRLS solution at the new λ for GLM families.
+    #[cfg(feature = "blas")]
+    fn evaluate_reml_at_sp_freshly_fit<'py>(
+        &self,
+        py: Python<'py>,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let design_matrix = self
+            .inner
+            .design_matrix
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        let total_cols = design_matrix.ncols();
+        let mut penalties: Vec<crate::block_penalty::BlockPenalty> = Vec::new();
+        let mut col_offset = 1usize;
+        let mut mp: usize = 1;
+        for smooth in &self.inner.smooth_terms {
+            let nb = smooth.num_basis();
+            let pen_block = crate::block_penalty::BlockPenalty::new(
+                smooth.penalty.clone(),
+                col_offset,
+                total_cols,
+            );
+            let rank_s = crate::reml::estimate_rank_eigen(&pen_block);
+            let null_dim = nb.saturating_sub(rank_s);
+            mp += null_dim;
+            penalties.push(pen_block);
+            col_offset += nb;
+        }
+        let y_raw = y.as_array().to_owned();
+
+        let pirls = crate::pirls::fit_pirls(
+            &y_raw,
+            design_matrix,
+            &lambdas,
+            &penalties,
+            self.inner.family,
+            100,
+            1e-8,
+        )
+        .map_err(|e| PyValueError::new_err(format!("fit_pirls failed: {}", e)))?;
+
+        let w_fresh = &pirls.weights;
+        let z_fresh = &pirls.working_response;
+
+        let reml = crate::reml::reml_criterion_multi_cached_mgcv_exact(
+            z_fresh,
+            design_matrix,
+            w_fresh,
+            &lambdas,
+            &penalties,
+            None,
+            mp,
+            self.inner.family,
+            Some(&y_raw),
+        )
+        .map_err(|e| PyValueError::new_err(format!("reml score failed: {}", e)))?;
+
+        let grad = crate::reml::reml_gradient_mgcv_exact_ift(
+            z_fresh,
+            design_matrix,
+            w_fresh,
+            &lambdas,
+            &penalties,
+            None,
+            self.inner.family,
+            Some(&y_raw),
+        )
+        .map_err(|e| PyValueError::new_err(format!("ift gradient failed: {}", e)))?;
+
+        let hess = crate::reml::reml_hessian_mgcv_exact_ift(
+            z_fresh,
+            design_matrix,
+            w_fresh,
+            &lambdas,
+            &penalties,
+            None,
+            self.inner.family,
+            Some(&y_raw),
+        )
+        .map_err(|e| PyValueError::new_err(format!("ift hessian failed: {}", e)))?;
+
+        let result = pyo3::types::PyDict::new(py);
+        result.set_item("reml", reml)?;
+        result.set_item("grad", numpy::PyArray1::from_owned_array(py, grad))?;
+        result.set_item("hess", numpy::PyArray2::from_owned_array(py, hess))?;
+        result.set_item(
+            "beta",
+            numpy::PyArray1::from_owned_array(py, pirls.coefficients),
+        )?;
+        result.set_item(
+            "weights",
+            numpy::PyArray1::from_owned_array(py, pirls.weights),
+        )?;
+        result.set_item(
+            "working_response",
+            numpy::PyArray1::from_owned_array(py, pirls.working_response),
+        )?;
+        result.set_item("deviance", pirls.deviance)?;
+        result.set_item("iterations", pirls.iterations)?;
+        result.set_item("converged", pirls.converged)?;
+        Ok(result)
+    }
+
     /// Per-smooth centred penalty matrix as stored on SmoothTerm.
     /// Returns a list of ndarrays, one per smooth (each is the
     /// post-centring penalty Z'SZ, after any pre-Z normalisation if
