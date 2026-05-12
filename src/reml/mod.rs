@@ -292,17 +292,55 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
 ) -> Result<f64> {
     let n = y.len();
     let p = x.ncols();
-    // X'WX (cached or computed)
+    // Optional internal reparametrisation: when `MGCV_REPARAM=1`, work in
+    // mgcv's stable similarity basis (gam.fit3.r:144-180). Rotates x and
+    // penalties via `T = U1 · diag-padded(Qs, I_Mp)` and replaces the
+    // per-block `log|S+|` accumulation with the rotated `det`. REML is
+    // basis-invariant analytically; numerically the rotated path matches
+    // mgcv more closely at saturating λ where the un-rotated linear
+    // system is poorly conditioned. Gate falls in R2-f once validated.
+    let reparam_active = std::env::var("MGCV_REPARAM").is_ok();
+    let rot_state: Option<(
+        Array2<f64>,
+        Vec<BlockPenalty>,
+        f64,
+    )> = if reparam_active {
+        let (u1, mp_detected) = crate::reparam::compute_total_penalty_space(penalties_blocks, p)?;
+        let _ = mp_detected; // caller-supplied `mp` wins for now; this is for diagnostics.
+        let rot = crate::reparam::apply_reparam(x, penalties_blocks, lambdas, &u1, mp_detected, 0)?;
+        // Wrap each rotated component as a full-p × full-p BlockPenalty so
+        // the existing `assemble_reml_system` + `compute_xtwx` machinery
+        // can consume it unchanged. The rotated S_i = rs_rot · rs_rot' is
+        // dense across all p columns — block-sparse fast paths no longer
+        // apply, by design (per "rewrites not fallbacks" directive).
+        let rotated_pens: Vec<BlockPenalty> = rot
+            .rs_rot
+            .iter()
+            .map(|rs| BlockPenalty::new(rs.dot(&rs.t()), 0, p))
+            .collect();
+        Some((rot.x_rot, rotated_pens, rot.det))
+    } else {
+        None
+    };
+    let (x_use, pens_use): (&Array2<f64>, &[BlockPenalty]) = match &rot_state {
+        Some((x_rot, pens_rot, _)) => (x_rot, pens_rot.as_slice()),
+        None => (x, penalties_blocks),
+    };
+    // X'WX (cached or computed). Rotated case rebuilds — cached_xtwx is
+    // in the un-rotated basis and not reusable here.
     let xtwx_owned;
-    let xtwx = if let Some(cached) = cached_xtwx {
+    let xtwx = if reparam_active {
+        xtwx_owned = compute_xtwx(x_use, w);
+        &xtwx_owned
+    } else if let Some(cached) = cached_xtwx {
         cached
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx(x_use, w);
         &xtwx_owned
     };
     // A = X'WX + ΣλS — NO ridge in score terms. The shared assembly keeps
     // the tiny solve-only ridge out of determinants/traces.
-    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
+    let system = assemble_reml_system(y, x_use, w, xtwx, lambdas, pens_use)?;
 
     // Deviance numerator, β'(ΣλS)β, Dp and σ² from the shared score-parts
     // helper. Two deviance paths (item 1 of #47):
@@ -322,7 +360,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         y,
         w,
         lambdas,
-        penalties_blocks,
+        pens_use,
         family,
         y_original,
         mp,
@@ -362,9 +400,9 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         if w_score.iter().any(|w| !w.is_finite()) {
             determinant(&system.a)?.ln()
         } else {
-            let xtwx_score = compute_xtwx(x, &w_score);
+            let xtwx_score = compute_xtwx(x_use, &w_score);
             let mut a_score = xtwx_score;
-            for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+            for (lambda, penalty) in lambdas.iter().zip(pens_use.iter()) {
                 penalty.scaled_add_to(&mut a_score, *lambda);
             }
             crate::linalg::log_abs_det_symmetric(&a_score)
@@ -375,17 +413,26 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     let n_minus_tra = (n as f64) - tr_a;
     let y_for_ls = y_original.unwrap_or(y);
 
-    // log|S+| terms — use eigen-based rank (robust to centring)
+    // log|S+| terms. Two computation paths produce the same scalar value
+    // (analytically `log|Σ λᵢ Sᵢ|₊` is basis-invariant):
+    //   * Rotated: `det` from `apply_reparam` is exactly `log|Σ λᵢ Sᵢ_rot|₊`.
+    //   * Un-rotated: per-block accumulation `Σ rankᵢ·log(λᵢ) + Σ log|Sᵢ|₊`,
+    //     valid only when the un-rotated penalty blocks live in disjoint
+    //     column subspaces (= our standard GAM setup).
     let mut log_lambda_sum = 0.0;
     let mut log_pseudo_det_sum = 0.0;
-    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
-        if *lambda > 1e-10 {
-            let rank_s = estimate_rank_eigen(penalty);
-            if rank_s > 0 {
-                log_lambda_sum += (rank_s as f64) * lambda.ln();
+    if let Some((_, _, det_rot)) = &rot_state {
+        log_pseudo_det_sum = *det_rot;
+    } else {
+        for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+            if *lambda > 1e-10 {
+                let rank_s = estimate_rank_eigen(penalty);
+                if rank_s > 0 {
+                    log_lambda_sum += (rank_s as f64) * lambda.ln();
+                }
             }
+            log_pseudo_det_sum += pseudo_determinant(penalty)?;
         }
-        log_pseudo_det_sum += pseudo_determinant(penalty)?;
     }
 
     // mgcv's formula (gam.fit3.r:616-617):
