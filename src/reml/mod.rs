@@ -1933,13 +1933,36 @@ pub fn reml_gradient_mgcv_exact_ift(
             k.saturating_sub(rank_s)
         })
         .sum::<usize>();
+    // Optional internal reparametrisation (MGCV_REPARAM=1) — see the
+    // matching block in `reml_criterion_multi_cached_mgcv_exact`. Gradient
+    // values are analytically basis-invariant; the rotated basis gives
+    // better conditioning at saturating λ. Cached_xtwx is in the
+    // un-rotated basis and is dropped on the rotated path.
+    let p = x.ncols();
+    let rot_state = if std::env::var("MGCV_REPARAM").is_ok() {
+        let (u1, mp_detected) = crate::reparam::compute_total_penalty_space(penalties_blocks, p)?;
+        let rot = crate::reparam::apply_reparam(x, penalties_blocks, lambdas, &u1, mp_detected, 0)?;
+        let rotated_pens: Vec<BlockPenalty> = rot
+            .rs_rot
+            .iter()
+            .map(|rs| BlockPenalty::new(rs.dot(&rs.t()), 0, p))
+            .collect();
+        Some((rot.x_rot, rotated_pens))
+    } else {
+        None
+    };
+    let (x_use, pens_use): (&Array2<f64>, &[BlockPenalty]) = match &rot_state {
+        Some((x_rot, pens_rot)) => (x_rot, pens_rot.as_slice()),
+        None => (x, penalties_blocks),
+    };
+    let cached_xtwx_use = if rot_state.is_some() { None } else { cached_xtwx };
     reml_gradient_mgcv_exact_ift_inner(
         y,
-        x,
+        x_use,
         w,
         lambdas,
-        penalties_blocks,
-        cached_xtwx,
+        pens_use,
+        cached_xtwx_use,
         family,
         y_original,
         enable_sigma_chain,
@@ -1981,6 +2004,35 @@ pub fn reml_hessian_mgcv_exact_ift(
 ) -> Result<Array2<f64>> {
     let n = y.len();
     let m = lambdas.len();
+    // Optional internal reparametrisation (MGCV_REPARAM=1). Hessian
+    // values are basis-invariant; rotated basis gives better
+    // conditioning at saturating λ. We SHADOW `x`, `penalties_blocks`,
+    // and `cached_xtwx` so the rest of the body sees rotated quantities
+    // without per-line edits. Mp counting still uses the un-rotated
+    // shape (kept in `mp_pens_for_rank`).
+    let p = x.ncols();
+    let rot_state = if std::env::var("MGCV_REPARAM").is_ok() {
+        let (u1, mp_detected) = crate::reparam::compute_total_penalty_space(penalties_blocks, p)?;
+        let rot = crate::reparam::apply_reparam(x, penalties_blocks, lambdas, &u1, mp_detected, 0)?;
+        let rotated_pens: Vec<BlockPenalty> = rot
+            .rs_rot
+            .iter()
+            .map(|rs| BlockPenalty::new(rs.dot(&rs.t()), 0, p))
+            .collect();
+        Some((rot.x_rot, rotated_pens))
+    } else {
+        None
+    };
+    let mp_pens_for_rank: &[BlockPenalty] = penalties_blocks;
+    let (x, penalties_blocks): (&Array2<f64>, &[BlockPenalty]) = match &rot_state {
+        Some((x_rot, pens_rot)) => (x_rot, pens_rot.as_slice()),
+        None => (x, penalties_blocks),
+    };
+    let cached_xtwx: Option<&Array2<f64>> = if rot_state.is_some() {
+        None
+    } else {
+        cached_xtwx
+    };
     let xtwx_owned;
     let xtwx = if let Some(c) = cached_xtwx {
         c
@@ -2020,8 +2072,10 @@ pub fn reml_hessian_mgcv_exact_ift(
     };
     let a_inv = inverse(&a)?;
     let tr_a = (xtwx.dot(&a_inv)).diag().sum();
-    // Compute mp and dp for estimate_phi_mgcv (matches lib.rs:1131-1144)
-    let mp_hess: usize = 1 + penalties_blocks
+    // Compute mp and dp for estimate_phi_mgcv (matches lib.rs:1131-1144).
+    // Use the un-rotated penalty shapes — `block_view().nrows()` on a
+    // rotated wrapper would return `p` instead of the smooth's basis size.
+    let mp_hess: usize = 1 + mp_pens_for_rank
         .iter()
         .map(|pen| {
             let k = pen.block_view().nrows();
