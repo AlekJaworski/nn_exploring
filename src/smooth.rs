@@ -332,7 +332,7 @@ fn compute_xtwy_helper(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Arr
 /// space and the REML objective is essentially flat).
 ///
 /// Port of mgcv's flat-set detection from
-/// `mgcv_analysis/mgcv/R/gam.fit3.r:1672`:
+/// `mgcv_analysis/mgcv/R/gam.fit3.r:1664`:
 ///
 /// ```r
 /// flat <- which(abs(grad2) < abs(grad)*100)   # candidates for reduction
@@ -344,17 +344,24 @@ fn compute_xtwy_helper(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Arr
 /// vanished, so further Newton motion in that coordinate amplifies
 /// noise rather than reduces the objective.
 ///
+/// **Intended use:** post-convergence variance walk (mgcv's actual
+/// edge.correct mechanism, `gam.fit3.r:1661-1705`). NOT for in-loop
+/// step-clamping — the `|H_ii| < |grad|·100` test relies on |grad|
+/// being small (at convergence); applied in-loop with O(1) gradients
+/// it trivially flags every smooth. mgcv runs this detection once,
+/// AFTER outer Newton converges, and only writes variance-reporting
+/// attributes (never changes predictions). See
+/// `project_edge_correct_is_custom` memory + Critical Finding 2026-05-14.
+///
 /// Returns a vector of length `grad.len()`; `out[i] = true` means
 /// smooth `i` is in the flat / saturating-λ set.
 ///
 /// Notes:
 /// - In the trivial-gradient case (|grad_i| == 0) we return `false` for
 ///   that dimension: the smooth is already at a stationary point so
-///   there's nothing to clamp. mgcv's expression `|grad2| < |grad|·100`
-///   yields `0 < 0` (false) when both are zero, matching this behavior.
+///   there's nothing to clamp.
 /// - The Hessian is expected to be the *raw* (pre-preconditioned,
-///   pre-ridged) Hessian, so this should be called *before* the
-///   diagonal-preconditioning step in the Newton loop.
+///   pre-ridged) Hessian.
 pub fn detect_saturating_smooths(grad: &Array1<f64>, hess: &Array2<f64>) -> Vec<bool> {
     let m = grad.len();
     let mut out = vec![false; m];
@@ -1329,57 +1336,6 @@ impl SmoothingParameter {
                 eprintln!("[SMOOTH_DEBUG] Gradient: {:?}", gradient);
             }
 
-            // -----------------------------------------------------------------
-            // edge.correct saturation detection (mgcv gam.fit3.r:1672).
-            //
-            // Detect smooths whose log-λ has reached working infinity using the
-            // raw (pre-preconditioned) Hessian:
-            //   flat[i] = |hess[i,i]| < |grad[i]| * 100
-            //
-            // When `MGCV_EDGE_CORRECT=1` is set, the Newton step's component
-            // for any detected smooth is clamped to zero — the saturating-λ
-            // dimension's curvature is degenerate and further motion just
-            // amplifies noise (and pulls the Tk·KK' contribution further
-            // into the boundary trap). Default behavior is unchanged.
-            //
-            // See `mgcv_rust - Tk·KK' edge.correct regression 2026-05-10.md`
-            // for why this is the prerequisite for default-on Tk·KK'.
-            // -----------------------------------------------------------------
-            let edge_correct = std::env::var("MGCV_EDGE_CORRECT").is_ok();
-            // mgcv's `flat <- which(abs(grad2) < abs(grad)*100)` (gam.fit3.r:1664)
-            // is applied AFTER outer-Newton convergence, where |grad| is small.
-            // Applying it in-loop with large early-iter gradients makes the test
-            // trivially pass for any normal Hessian (|H_ii| < |grad|·100 holds
-            // when |grad| is O(1) and H_ii is O(1)), clamping every step to
-            // zero and stalling the optimizer (verified on gamma_log /
-            // nb_profile / 4d_binomial — all 3 break with edge.correct on).
-            //
-            // Guard: only apply the saturation mask when the gradient is small
-            // enough that the formula is meaningful. Threshold matches mgcv's
-            // own near-convergence tol so we only clamp on smooths that are
-            // near a stationary point.
-            let saturating_mask: Vec<bool> = if edge_correct {
-                let near_conv_threshold = (current_reml.abs() + 1.0) * 1.0e-4;
-                let raw_mask = detect_saturating_smooths(&gradient, &hessian);
-                raw_mask
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &flag)| flag && gradient[i].abs() < near_conv_threshold)
-                    .collect()
-            } else {
-                vec![false; m]
-            };
-            if edge_correct
-                && std::env::var("MGCV_PROFILE").is_ok()
-                && saturating_mask.iter().any(|&b| b)
-            {
-                let flat: Vec<usize> = (0..m).filter(|&i| saturating_mask[i]).collect();
-                eprintln!(
-                    "[PROFILE]   edge.correct: saturating smooths detected: {:?} (|H_ii| < |g_i|*100)",
-                    flat
-                );
-            }
-
             // ===================================================================
             // CRITICAL: Condition Hessian like mgcv to ensure stable convergence
             // ===================================================================
@@ -1688,31 +1644,6 @@ impl SmoothingParameter {
             let mut step = Array1::<f64>::zeros(m);
             for (ki, &ai) in active.iter().enumerate() {
                 step[ai] = step_sub_precond[ki] / diag_precond[ai];
-            }
-
-            // edge.correct clamp: zero out step components for smooths flagged
-            // as saturating (mgcv gam.fit3.r:1672 candidates-for-reduction).
-            // Gated behind MGCV_EDGE_CORRECT so default behavior is unaffected.
-            // Note: mgcv's full edge.correct (line 1669-1713) is a *post-Newton*
-            // variance refinement; here we use the same detection criterion
-            // to freeze the saturating coordinate during the outer iteration,
-            // matching the planning note's recommendation in
-            // `mgcv_rust - Plan Edge Correct.md` ("force a unit-log step in
-            // that direction without line search" / saturation-freeze).
-            if edge_correct {
-                let mut clamped = 0;
-                for i in 0..m {
-                    if saturating_mask[i] && step[i] != 0.0 {
-                        step[i] = 0.0;
-                        clamped += 1;
-                    }
-                }
-                if clamped > 0 && std::env::var("MGCV_PROFILE").is_ok() {
-                    eprintln!(
-                        "[PROFILE]   edge.correct: clamped step on {} saturating smooth(s)",
-                        clamped
-                    );
-                }
             }
 
             // Limit step size (Wood 2011: max step = 4-5 in log space)
