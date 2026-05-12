@@ -19,6 +19,8 @@ pub mod pirls;
 pub mod reml;
 #[cfg(feature = "blas")]
 pub mod reml_optimized;
+#[cfg(feature = "blas")]
+pub mod reparam;
 pub mod smooth;
 pub mod utils;
 
@@ -1968,6 +1970,70 @@ fn fit_quantile_lss_retune_py<'py>(
 }
 
 #[cfg(feature = "python")]
+/// Validation hook for `gam_reparam_core` — direct port of mgcv's
+/// `get_stableS` (gdi.c:550-792). Inputs match the R wrapper at
+/// `gam.fit3.r:9-63`. Used by
+/// `scripts/python/diagnostics/get_stableS_oracle.py` to diff Rust
+/// against `mgcv:::gam.reparam` byte-for-byte.
+#[cfg(feature = "blas")]
+#[pyfunction]
+#[pyo3(signature = (rs_flat, rs_ncol, q, log_sp, deriv, fixed_penalty=false))]
+fn gam_reparam_core_py<'py>(
+    py: Python<'py>,
+    rs_flat: PyReadonlyArray1<f64>,
+    rs_ncol: Vec<usize>,
+    q: usize,
+    log_sp: PyReadonlyArray1<f64>,
+    deriv: u8,
+    fixed_penalty: bool,
+) -> PyResult<Py<PyAny>> {
+    use ndarray::Array2;
+    use numpy::{PyArray1, PyArray2};
+    use pyo3::types::PyDict;
+
+    // Unpack the flat (column-major-packed) buffer into per-component rs.
+    let flat = rs_flat.as_array();
+    let mut rs: Vec<Array2<f64>> = Vec::with_capacity(rs_ncol.len());
+    let mut offset = 0usize;
+    for &nc in &rs_ncol {
+        let mut block = Array2::<f64>::zeros((q, nc));
+        for j in 0..nc {
+            for i in 0..q {
+                block[[i, j]] = flat[offset + i + q * j];
+            }
+        }
+        offset += q * nc;
+        rs.push(block);
+    }
+    let sp: Vec<f64> = log_sp.as_array().iter().map(|x| x.exp()).collect();
+    let (d_tol, r_tol) = reparam::default_tolerances();
+
+    let result = reparam::gam_reparam_core(&rs, &sp, deriv, d_tol, r_tol, fixed_penalty)
+        .map_err(|e| PyValueError::new_err(format!("gam_reparam_core failed: {}", e)))?;
+
+    let out = PyDict::new(py);
+    out.set_item("S", PyArray2::from_owned_array(py, result.s))?;
+    out.set_item("Qs", PyArray2::from_owned_array(py, result.qs))?;
+    let rs_py: Vec<_> = result
+        .rs
+        .into_iter()
+        .map(|r| PyArray2::from_owned_array(py, r))
+        .collect();
+    out.set_item("rs", rs_py)?;
+    out.set_item("det", result.det)?;
+    if let Some(d1) = result.det1 {
+        out.set_item("det1", PyArray1::from_owned_array(py, d1))?;
+    } else {
+        out.set_item("det1", py.None())?;
+    }
+    if let Some(d2) = result.det2 {
+        out.set_item("det2", PyArray2::from_owned_array(py, d2))?;
+    } else {
+        out.set_item("det2", py.None())?;
+    }
+    Ok(out.into())
+}
+
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGAM>()?;
@@ -1977,6 +2043,8 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reml_hessian_multi_qr_py, m)?)?;
     #[cfg(feature = "blas")]
     m.add_function(wrap_pyfunction!(newton_pirls_py, m)?)?;
+    #[cfg(feature = "blas")]
+    m.add_function(wrap_pyfunction!(gam_reparam_core_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_raw_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_retune_py, m)?)?;
     Ok(())
