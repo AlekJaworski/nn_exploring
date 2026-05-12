@@ -1356,17 +1356,37 @@ impl PyGAM {
         )
         .map_err(|e| PyValueError::new_err(format!("reml score failed: {}", e)))?;
 
-        let grad = crate::reml::reml_gradient_mgcv_exact_ift(
-            z_fresh,
-            design_matrix,
-            w_fresh,
-            &lambdas,
-            &penalties,
-            None,
-            self.inner.family,
-            Some(&y_raw),
-        )
-        .map_err(|e| PyValueError::new_err(format!("ift gradient failed: {}", e)))?;
+        // For non-canonical-link dispersion-bearing GLMs (e.g. InvGauss+log),
+        // mgcv's gdi2 evaluates the IFT gradient with the raw Newton W and the
+        // PIRLS-converged β; PIRLS's stored weights are Fisher-fallback so the
+        // generic `reml_gradient_mgcv_exact_ift` (which re-solves β from input
+        // W) gives the wrong gradient. The Newton-at-β path matches mgcv.
+        let use_newton_at_beta = !self.inner.family.is_canonical_link()
+            && !matches!(self.inner.family, crate::pirls::Family::Gaussian);
+        let grad = if use_newton_at_beta {
+            crate::reml::reml_gradient_mgcv_exact_ift_newton_at_beta(
+                design_matrix,
+                &y_raw,
+                &pirls.coefficients,
+                &lambdas,
+                &penalties,
+                self.inner.family,
+                mp,
+            )
+            .map_err(|e| PyValueError::new_err(format!("ift gradient (Newton-at-β) failed: {}", e)))?
+        } else {
+            crate::reml::reml_gradient_mgcv_exact_ift(
+                z_fresh,
+                design_matrix,
+                w_fresh,
+                &lambdas,
+                &penalties,
+                None,
+                self.inner.family,
+                Some(&y_raw),
+            )
+            .map_err(|e| PyValueError::new_err(format!("ift gradient failed: {}", e)))?
+        };
 
         let hess = crate::reml::reml_hessian_mgcv_exact_ift(
             z_fresh,

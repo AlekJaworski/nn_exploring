@@ -2002,6 +2002,162 @@ pub fn reml_gradient_mgcv_exact_ift(
     )
 }
 
+/// IFT-based REML gradient at a known PIRLS-converged β, using mgcv's
+/// **Newton-weight A** for the log|H| / IFT pieces.
+///
+/// Mirrors what `gdi2` does inside `gam.fit3` (gam.fit3.r:511-522, "full
+/// Newton" branch): the W feeding log|X'WX + S| is the raw Newton form
+/// `wf · α` with no Fisher fallback, so A may be indefinite. All IFT
+/// pieces (a1, η₁, b1, lev_uw, λ·tr(A⁻¹·S_k), tk_kkt) are derived against
+/// this same indefinite A.
+///
+/// β is taken as input — not re-solved — because the indefinite Newton A
+/// has no Cholesky-friendly inverse and the PIRLS-converged β already gives
+/// the right fixed point.
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_ift_newton_at_beta(
+    x: &Array2<f64>,
+    y_raw: &Array1<f64>,
+    beta: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    family: crate::pirls::Family,
+    mp: usize,
+) -> Result<Array1<f64>> {
+    let n = y_raw.len();
+    let m = lambdas.len();
+    let p = x.ncols();
+
+    let eta = x.dot(beta);
+    let w_newton = crate::pirls::compute_newton_score_weights(y_raw, &eta, family);
+
+    // X'WX with possibly-negative w. `compute_xtwx` uses sqrt(w) which goes
+    // NaN on neg-w paths, so compute the signed matmul directly:
+    // X'WX = X' · (diag(w) · X)  with no square root.
+    let mut wx = x.to_owned();
+    for i in 0..n {
+        let wi = w_newton[i];
+        for j in 0..p {
+            wx[[i, j]] *= wi;
+        }
+    }
+    let xtwx = x.t().dot(&wx);
+
+    let mut a = xtwx.clone();
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        penalty.scaled_add_to(&mut a, *lambda);
+    }
+    let a_inv = inverse(&a)?;
+    let tr_a = (xtwx.dot(&a_inv)).diag().sum();
+
+    let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
+    let dev_numerator = glm_deviance(y_raw, &mu, family);
+    let bsb_total: f64 = lambdas
+        .iter()
+        .zip(penalties_blocks.iter())
+        .map(|(l, pen)| l * pen.quadratic_form(beta))
+        .sum();
+    let dp = dev_numerator + bsb_total;
+    let scale_est = match family {
+        crate::pirls::Family::Binomial
+        | crate::pirls::Family::Poisson
+        | crate::pirls::Family::NegBin { .. } => 1.0,
+        crate::pirls::Family::Gaussian => dev_numerator / ((n as f64) - tr_a).max(1e-10),
+        _ => {
+            let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
+            family.estimate_phi_mgcv(y_raw, dp, mp, 1.0, phi_init)
+        }
+    };
+
+    let b1 = compute_b1_ift(&a_inv, beta, lambdas, penalties_blocks);
+    let eta1 = x.dot(&b1);
+
+    let xa = x.dot(&a_inv);
+    let mut lev_uw = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let mut s = 0.0;
+        for j in 0..p {
+            s += xa[[i, j]] * x[[i, j]];
+        }
+        lev_uw[i] = s;
+    }
+
+    let mut a1 = Array1::<f64>::zeros(n);
+    if !matches!(family, crate::pirls::Family::Gaussian) {
+        let use_fisher = family.is_canonical_link();
+        for i in 0..n {
+            let mu_i = mu[i];
+            let dmu_deta = family.d_inverse_link(eta[i]);
+            if dmu_deta.abs() < 1e-12 {
+                continue;
+            }
+            let g1 = 1.0 / dmu_deta;
+            let v = family.variance(mu_i).max(1e-300);
+            let v1n = family.dvar(mu_i) / v;
+            let v2n = family.d2var(mu_i) / v;
+            let g2n = family.d2link(mu_i) * dmu_deta;
+            let g3n = family.d3link(mu_i) * dmu_deta;
+            if use_fisher {
+                a1[i] = -w_newton[i] * (v1n + 2.0 * g2n) / g1;
+            } else {
+                let c_resid = y_raw[i] - mu_i;
+                let alpha_raw = crate::pirls::newton_irls_alpha(c_resid, v1n, g2n);
+                let alpha = if alpha_raw <= 0.0 { 1.0 } else { alpha_raw };
+                let xx = v2n - v1n * v1n + g3n - g2n * g2n;
+                let alpha1 = (-(v1n + g2n) + c_resid * xx) / alpha;
+                a1[i] = w_newton[i] * (alpha1 - v1n - 2.0 * g2n) / g1;
+            }
+        }
+    }
+
+    let dev_grad_beta =
+        compute_dev_grad_beta(y_raw, x, &w_newton, beta, family, Some(y_raw));
+
+    let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        let s_j_beta = penalty.dot_vec(beta);
+        for r in 0..p {
+            sum_lambda_s_beta[r] += lambda * s_j_beta[r];
+        }
+    }
+
+    let mut grad = Array1::<f64>::zeros(m);
+    for (k, (lambda, penalty)) in lambdas.iter().zip(penalties_blocks.iter()).enumerate() {
+        let bsb_k = penalty.quadratic_form(beta);
+        let lam_k = *lambda;
+        let block = penalty.block_view();
+        let off = penalty.offset;
+        let kk = block.nrows();
+        let mut tr_a_inv_s = 0.0;
+        for p_idx in 0..kk {
+            for q_idx in 0..kk {
+                tr_a_inv_s += a_inv[[off + p_idx, off + q_idx]] * block[[q_idx, p_idx]];
+            }
+        }
+        let mut dev_dot_b1 = 0.0;
+        for r in 0..p {
+            dev_dot_b1 += dev_grad_beta[r] * b1[[r, k]];
+        }
+        let mut sls_dot_b1 = 0.0;
+        for r in 0..p {
+            sls_dot_b1 += sum_lambda_s_beta[r] * b1[[r, k]];
+        }
+        let d1_k = dev_dot_b1 + lam_k * bsb_k + 2.0 * sls_dot_b1;
+        let rank_k = estimate_rank_eigen(penalty);
+
+        // gdi.c:856 — tk_kkt[k] = Σᵢ Tk[i,k]·diagKKt[i] where
+        //   Tk[i,k] = a1[i]·η₁[i,k]/|w[i]|   (gdi.c:2624,2628)
+        //   diagKKt[i] = (KK')[i,i] = |w[i]|·lev_uw[i]
+        // The |w| factors cancel, leaving Σ a1·η₁·lev_uw with NO sign(w).
+        let tk_kkt: f64 = (0..n).map(|i| a1[i] * eta1[[i, k]] * lev_uw[i]).sum();
+
+        grad[k] =
+            d1_k / (2.0 * scale_est) + (tk_kkt + lam_k * tr_a_inv_s) / 2.0 - (rank_k as f64) / 2.0;
+    }
+
+    Ok(grad)
+}
+
 /// IFT-based Hessian of the mgcv-exact REML score w.r.t. log(λ_k, λ_j).
 ///
 /// Differentiates the IFT gradient once more. The full Hessian assembly
