@@ -1346,8 +1346,26 @@ impl SmoothingParameter {
             // for why this is the prerequisite for default-on Tk·KK'.
             // -----------------------------------------------------------------
             let edge_correct = std::env::var("MGCV_EDGE_CORRECT").is_ok();
+            // mgcv's `flat <- which(abs(grad2) < abs(grad)*100)` (gam.fit3.r:1664)
+            // is applied AFTER outer-Newton convergence, where |grad| is small.
+            // Applying it in-loop with large early-iter gradients makes the test
+            // trivially pass for any normal Hessian (|H_ii| < |grad|·100 holds
+            // when |grad| is O(1) and H_ii is O(1)), clamping every step to
+            // zero and stalling the optimizer (verified on gamma_log /
+            // nb_profile / 4d_binomial — all 3 break with edge.correct on).
+            //
+            // Guard: only apply the saturation mask when the gradient is small
+            // enough that the formula is meaningful. Threshold matches mgcv's
+            // own near-convergence tol so we only clamp on smooths that are
+            // near a stationary point.
             let saturating_mask: Vec<bool> = if edge_correct {
-                detect_saturating_smooths(&gradient, &hessian)
+                let near_conv_threshold = (current_reml.abs() + 1.0) * 1.0e-4;
+                let raw_mask = detect_saturating_smooths(&gradient, &hessian);
+                raw_mask
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &flag)| flag && gradient[i].abs() < near_conv_threshold)
+                    .collect()
             } else {
                 vec![false; m]
             };

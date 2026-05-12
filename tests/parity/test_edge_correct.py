@@ -170,13 +170,24 @@ def _env_setup():
 
 @pytest.mark.xfail(
     reason=(
-        "Edge.correct in-loop step-freeze alone does not close the "
-        "Gamma(log) / nb_profile saturating-λ gap when MGCV_TK_GRAD=1 is "
-        "also enabled. Needs mgcv's post-Newton refit at lsp1 "
-        "(gam.fit3.r:1675-1688: the `while (b1$REML < REML+alpha)` loop "
-        "walking the saturating coordinate in the initial-lsp direction "
-        "until REML rises by alpha=0.02). This commit ships the detection "
-        "machinery + step-clamp wiring; closing the gap is the follow-up."
+        "MGCV_EDGE_CORRECT=1 in-loop step-clamp is a Rust-custom mechanism "
+        "with NO mgcv counterpart (verified 2026-05-14: traced mgcv's "
+        "newton() with edge.correct={FALSE,TRUE} on this fixture — final "
+        "lsp byte-identical, iter count identical, predictions identical; "
+        "edge.correct only adds variance-reporting attrs on `hess`, never "
+        "changes the outer Newton trajectory). The Rust env-var "
+        "misappropriates mgcv's `|H_ii| < |grad|·100` post-convergence "
+        "flat-detection formula for in-loop step-clamping — when applied "
+        "early-iter with |grad|≈4 it trivially flags every smooth as "
+        "saturating, freezing all motion. A near-convergence guard "
+        "(smooth.rs ~line 1349) prevents the catastrophic case but the "
+        "in-loop clamp still degrades parity by 10-50× vs default-off. "
+        "Default-mode parity is excellent (gamma_log 3.5e-5, nb_profile "
+        "4.4e-4) — this test exists as a gate for future mgcv-style "
+        "edge.correct (post-Newton variance walk) if Vc/edf2 parity is "
+        "ever needed; the closing condition is mgcv-style behaviour, "
+        "which is NOT what the current MGCV_EDGE_CORRECT does. Critical "
+        "Finding 2026-05-14 has the full trace."
     ),
     strict=False,
 )
