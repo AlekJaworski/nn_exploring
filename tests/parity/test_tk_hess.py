@@ -34,25 +34,7 @@ FIXTURES_DIR = HERE / "fixtures"
 @pytest.mark.parametrize(
     "fixture_name,family",
     [
-        pytest.param(
-            "2d_invgauss_log_n800_k10_cr.json",
-            "inverse.gaussian",
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Tk·KK' analytical Hessian default-on regresses λ_2 on "
-                    "this saturating-λ fixture (rust ~482.97 vs mgcv ~504.45; "
-                    "max rel pred ≈ 4.4e-3 > rtol=1e-3). Score formula is "
-                    "correct (Rust REML's minimum is at mgcv's λ — verified by "
-                    "scripts/python/diagnostics/invgauss_n800_substep_diff.py); "
-                    "outer Newton over-steps λ_2 because the model matrix and "
-                    "penalty roots are not in mgcv's stable similarity basis "
-                    "(`gam.reparam` / `C_get_stableS` not yet ported, see "
-                    "gdi.c:550-792 and gam.fit3.r:144-170). Closure tracked "
-                    "in `mgcv_rust - Reparametrization port` note."
-                ),
-                strict=True,
-            ),
-        ),
+        ("2d_invgauss_log_n800_k10_cr.json", "inverse.gaussian"),
         ("2d_binomial_logit_n1000_k10_cr.json", "binomial"),
     ],
 )

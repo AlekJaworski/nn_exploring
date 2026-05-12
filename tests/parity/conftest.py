@@ -89,14 +89,7 @@ _REPARAM_PENDING_REASON = (
 )
 
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
-    "test_parity": {
-        "2d_invgauss_log_n800_k10_cr": _REPARAM_PENDING_REASON,
-    },
-    "test_mgcv_exact_predictions": {
-        "2d_invgauss_log_n800_k10_cr": _REPARAM_PENDING_REASON,
-    },
     "test_mgcv_exact_predictions_link_scale": {
-        "2d_invgauss_log_n800_k10_cr": _REPARAM_PENDING_REASON,
         "4d_binomial_logit_n2000_k8_cr": _REPARAM_PENDING_REASON,
     },
 }

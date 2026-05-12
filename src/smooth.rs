@@ -1034,6 +1034,11 @@ impl SmoothingParameter {
         // is Some. For Gaussian (callback=None) they stay constant.
         let mut y_local: Array1<f64> = y.to_owned();
         let mut w_local: Array1<f64> = w.to_owned();
+        // PIRLS-converged β at the current λ. None until the first refresh;
+        // used by the Newton-at-β IFT gradient path for non-canonical-link
+        // GLMs where Fisher-fallback W in the regular IFT formula gives the
+        // wrong tk_kkt.
+        let mut beta_local: Option<Array1<f64>> = None;
         let mut xtwx_local: Array2<f64> = if let Some(cached) = cached_xtwx {
             cached.clone()
         } else {
@@ -1097,6 +1102,7 @@ impl SmoothingParameter {
             // Gaussian (callback=None) skip — W=I, z=y, no refresh needed.
             if let Some(cb) = pirls_callback.as_mut() {
                 let refresh = cb(&lambdas)?;
+                beta_local = Some(refresh.beta);
                 y_local = refresh.working_response;
                 w_local = refresh.weights;
                 xtwx_local = refresh.xtwx;
@@ -1183,16 +1189,48 @@ impl SmoothingParameter {
                         &mut pirls_callback,
                     )?
                 } else if use_ift {
-                    reml_gradient_mgcv_exact_ift(
-                        &y_local,
-                        x,
-                        &w_local,
-                        &lambdas,
-                        penalties,
-                        Some(&xtwx_local),
-                        self.family,
-                        self.y_original.as_ref(),
-                    )?
+                    // For non-canonical-link non-Gaussian GLMs, use the
+                    // Newton-at-β path: w_local is PIRLS Fisher-fallback (no
+                    // negs) but mgcv's gdi2 evaluates the gradient with raw
+                    // Newton W (~43% neg entries for InvGauss+log) at the
+                    // PIRLS-converged β. Without this, the tk_kkt term is
+                    // computed against the wrong A. Falls back to the legacy
+                    // Fisher-W IFT for canonical link / Gaussian where the
+                    // two coincide.
+                    let use_newton_at_beta = !self.family.is_canonical_link()
+                        && !matches!(self.family, crate::pirls::Family::Gaussian)
+                        && beta_local.is_some()
+                        && self.y_original.is_some();
+                    if use_newton_at_beta {
+                        let mp_dim: usize = 1 + penalties
+                            .iter()
+                            .map(|pen| {
+                                let k = pen.block_view().nrows();
+                                let rank_s = crate::reml::estimate_rank_eigen(pen);
+                                k.saturating_sub(rank_s)
+                            })
+                            .sum::<usize>();
+                        crate::reml::reml_gradient_mgcv_exact_ift_newton_at_beta(
+                            x,
+                            self.y_original.as_ref().unwrap(),
+                            beta_local.as_ref().unwrap(),
+                            &lambdas,
+                            penalties,
+                            self.family,
+                            mp_dim,
+                        )?
+                    } else {
+                        reml_gradient_mgcv_exact_ift(
+                            &y_local,
+                            x,
+                            &w_local,
+                            &lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            self.family,
+                            self.y_original.as_ref(),
+                        )?
+                    }
                 } else {
                     reml_gradient_mgcv_exact_closed_form(
                         &y_local,
