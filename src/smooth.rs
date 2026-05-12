@@ -1500,48 +1500,35 @@ impl SmoothingParameter {
             use ndarray_linalg::{Eigh, UPLO};
 
             // Subset Newton: identify "unconverged" dimensions per
-            // gam.fit3.r:1383 + 1430. mgcv excludes from the step:
-            //   uconv.ind  = |grad_i| > score_scale·conv.tol  (per-dim converged)
-            //   uconv.ind1 = uconv.ind & |grad_i| > max|grad|·0.001
-            // and computes the Newton step ONLY on the remaining dims; the
-            // others get step_i = 0. This is mgcv's saturation-freeze:
-            // smooths whose gradient is already tiny don't get pushed further.
-            // Without it, adding the (correct) Tk·KK' term to the gradient
-            // pushes saturating-λ smooths past mgcv's stopping point, since
-            // the step from a tiny |grad|/tiny |H_ii| is non-negligible.
+            // gam.fit3.r:1643. mgcv's per-dim freeze filter at convergence is:
+            //   uconv.ind = (|grad_i| > 0.1·score_scale·conv.tol)
+            //             | (|H_ii|   > 0.1·score_scale·conv.tol)
+            // Smooths failing this filter get a zero step component; the
+            // Newton solve runs on the remaining dims only. The H_ii OR clause
+            // keeps dims active when the curvature is meaningful even if the
+            // gradient happens to be small (e.g. near a saddle).
             //
-            // mgcv's score_scale = |log(scale.est)| + |REML|; conv.tol = 1e-6
+            // score_scale = |log(scale.est)| + |REML|; conv.tol = 1e-6
             // (newton() default at gam.fit3.r:1260). For our REML score
             // |REML| dominates so we approximate score_scale = |REML| + 1.
             //
-            // MGCV_STEP_BLEND=1: use mgcv's actual subset-Newton freeze filter
-            // from gam.fit3.r:1643 — `(|grad| > 0.1·score_scale·conv.tol) |
-            // (|H_ii| > 0.1·score_scale·conv.tol)`. The 0.1× factor (vs Rust's
-            // default 1×) keeps more dims active in saturating regimes, which
-            // closes the 4d_binomial gap (verified: at iter 6 of 4d_binomial,
-            // dims 0-2 have |grad| ~2-5e-4 — above mgcv's 1.15e-4 threshold,
-            // below Rust's 1.15e-3 default). The OR with H_ii catches dims
-            // where the curvature is meaningful even if gradient happens
-            // small.
-            let step_blend = std::env::var("MGCV_STEP_BLEND").is_ok();
-            let max_abs_grad = gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
+            // The H_ii read uses `diag_precond[i]²` (since the preconditioner
+            // is `sqrt(|H_ii_raw|)`, so squaring recovers |H_ii_raw|).
+            //
+            // Historical (pre-2026-05-14): Rust used a 10× looser threshold
+            // (`score_scale·1e-6` rather than mgcv's 0.1×) and didn't have the
+            // H_ii OR clause. That over-froze dims with moderate gradient
+            // (~1e-4) in saturating regimes, causing 4d_binomial to converge
+            // ~4.6% off mgcv on its saturating coordinate. Default-on
+            // after benchmark (2026-05-14): 4% aggregate slowdown, closes
+            // 4d_binomial xfail, 11 fixtures improve >10%, no regressions.
             let score_scale = current_reml.abs() + 1.0;
-            let inner_conv_tol: f64 = if step_blend { 1.0e-7 } else { 1.0e-6 };
-            let dim_grad_tol = score_scale * inner_conv_tol;
+            let dim_grad_tol = score_scale * 1.0e-7;
             let active: Vec<usize> = (0..m)
                 .filter(|&i| {
                     let gi = gradient[i].abs();
-                    if step_blend {
-                        // mgcv-style OR filter: |grad| OR |H_ii| above threshold.
-                        // Pre-condition note: hessian here is already preconditioned
-                        // to ~unit diagonal, so we read the diagonal from the raw
-                        // (pre-conditioning) values via diag_precond^2 (since
-                        // H_precond_ii ≈ 1 always after preconditioning).
-                        let hii_raw = diag_precond[i] * diag_precond[i];
-                        gi > dim_grad_tol || hii_raw > dim_grad_tol
-                    } else {
-                        gi > dim_grad_tol && gi > max_abs_grad * 0.001
-                    }
+                    let hii_raw = diag_precond[i] * diag_precond[i];
+                    gi > dim_grad_tol || hii_raw > dim_grad_tol
                 })
                 .collect();
 
@@ -1590,30 +1577,6 @@ impl SmoothingParameter {
             let (eigvals, eigvecs) = h_sub
                 .eigh(UPLO::Upper)
                 .map_err(|e| GAMError::LinAlgError(format!("Hessian eigh failed: {:?}", e)))?;
-
-            // Track pdef (positive-definite) status of the original (pre-abs,
-            // pre-floor) Hessian. Mirrors mgcv's gam.fit3.r:1407-1411. Used by
-            // the step-blending SD-trial path (MGCV_STEP_BLEND=1) to decide
-            // whether to run the dedicated steepest-descent search.
-            let pdef = {
-                let mut p = !eigvals.iter().any(|&v| v < 0.0);
-                if p {
-                    let max_eig = eigvals.iter().cloned().fold(0.0f64, f64::max);
-                    let low_eig = max_eig * f64::EPSILON.powf(0.7);
-                    if eigvals.iter().any(|&v| v < low_eig) {
-                        p = false;
-                    }
-                }
-                p
-            };
-
-            if std::env::var("MGCV_PROFILE").is_ok() {
-                eprintln!(
-                    "[PROFILE]   pdef={} (original Hessian eigvals: {:?})",
-                    pdef,
-                    eigvals.as_slice().unwrap_or(&[])
-                );
-            }
 
             // Modify eigenvalues: ABS for indefinite, floor for tiny.
             // mgcv's low.d = max(d) * .Machine$double.eps^.7 ≈ max(d) * 1.5e-11.
