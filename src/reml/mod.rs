@@ -1650,6 +1650,31 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     enable_sigma_chain: bool,
     mp: usize,
 ) -> Result<Array1<f64>> {
+    reml_gradient_mgcv_exact_ift_inner_at_beta(
+        y, x, w, lambdas, penalties_blocks, cached_xtwx, family, y_original,
+        enable_sigma_chain, mp, None,
+    )
+}
+
+/// Inner gradient assembly that optionally accepts an explicit `beta_provided`
+/// (the PIRLS-converged β). When `None` falls back to the re-solve path used
+/// for Gaussian / Fisher-only callers. When `Some`, skips the β re-solve — use
+/// this when `w` carries raw Newton weights with possible negative entries
+/// (X'WX + λS is then indefinite and the internal solve would diverge).
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+    enable_sigma_chain: bool,
+    mp: usize,
+    beta_provided: Option<&Array1<f64>>,
+) -> Result<Array1<f64>> {
     let n = y.len();
     let m = lambdas.len();
     let xtwx_owned;
@@ -1666,16 +1691,23 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         penalty.scaled_add_to(&mut a, *lambda);
     }
 
-    // β = A^{-1} X'Wy
-    let xtwy = compute_xtwy(x, w, y);
-    let mut a_solve = a.clone();
-    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-    let solve_ridge = 1e-12 * max_diag;
-    a_solve
-        .diag_mut()
-        .iter_mut()
-        .for_each(|d| *d += solve_ridge);
-    let beta = solve(a_solve, xtwy)?;
+    // β: either supplied (PIRLS-converged) or recovered by solving the
+    // weighted normal equations β = A⁻¹ X'Wy. The supplied path is needed
+    // when w may be indefinite (raw Newton weights with neg entries) — the
+    // re-solve would otherwise produce garbage on an indefinite system.
+    let beta: Array1<f64> = if let Some(b) = beta_provided {
+        b.clone()
+    } else {
+        let xtwy = compute_xtwy(x, w, y);
+        let mut a_solve = a.clone();
+        let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+        let solve_ridge = 1e-12 * max_diag;
+        a_solve
+            .diag_mut()
+            .iter_mut()
+            .for_each(|d| *d += solve_ridge);
+        solve(a_solve, xtwy)?
+    };
 
     // Scale estimate for Dp/(2σ²) — must match the score function's σ²
     // convention (reml_criterion_multi_cached_mgcv_exact, item 1 of #47).
