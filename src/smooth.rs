@@ -1539,14 +1539,35 @@ impl SmoothingParameter {
             // mgcv's score_scale = |log(scale.est)| + |REML|; conv.tol = 1e-6
             // (newton() default at gam.fit3.r:1260). For our REML score
             // |REML| dominates so we approximate score_scale = |REML| + 1.
+            //
+            // MGCV_STEP_BLEND=1: use mgcv's actual subset-Newton freeze filter
+            // from gam.fit3.r:1643 — `(|grad| > 0.1·score_scale·conv.tol) |
+            // (|H_ii| > 0.1·score_scale·conv.tol)`. The 0.1× factor (vs Rust's
+            // default 1×) keeps more dims active in saturating regimes, which
+            // closes the 4d_binomial gap (verified: at iter 6 of 4d_binomial,
+            // dims 0-2 have |grad| ~2-5e-4 — above mgcv's 1.15e-4 threshold,
+            // below Rust's 1.15e-3 default). The OR with H_ii catches dims
+            // where the curvature is meaningful even if gradient happens
+            // small.
+            let step_blend = std::env::var("MGCV_STEP_BLEND").is_ok();
             let max_abs_grad = gradient.iter().map(|g| g.abs()).fold(0.0f64, f64::max);
-            let inner_conv_tol: f64 = 1.0e-6;
             let score_scale = current_reml.abs() + 1.0;
+            let inner_conv_tol: f64 = if step_blend { 1.0e-7 } else { 1.0e-6 };
             let dim_grad_tol = score_scale * inner_conv_tol;
             let active: Vec<usize> = (0..m)
                 .filter(|&i| {
                     let gi = gradient[i].abs();
-                    gi > dim_grad_tol && gi > max_abs_grad * 0.001
+                    if step_blend {
+                        // mgcv-style OR filter: |grad| OR |H_ii| above threshold.
+                        // Pre-condition note: hessian here is already preconditioned
+                        // to ~unit diagonal, so we read the diagonal from the raw
+                        // (pre-conditioning) values via diag_precond^2 (since
+                        // H_precond_ii ≈ 1 always after preconditioning).
+                        let hii_raw = diag_precond[i] * diag_precond[i];
+                        gi > dim_grad_tol || hii_raw > dim_grad_tol
+                    } else {
+                        gi > dim_grad_tol && gi > max_abs_grad * 0.001
+                    }
                 })
                 .collect();
 
@@ -1595,6 +1616,30 @@ impl SmoothingParameter {
             let (eigvals, eigvecs) = h_sub
                 .eigh(UPLO::Upper)
                 .map_err(|e| GAMError::LinAlgError(format!("Hessian eigh failed: {:?}", e)))?;
+
+            // Track pdef (positive-definite) status of the original (pre-abs,
+            // pre-floor) Hessian. Mirrors mgcv's gam.fit3.r:1407-1411. Used by
+            // the step-blending SD-trial path (MGCV_STEP_BLEND=1) to decide
+            // whether to run the dedicated steepest-descent search.
+            let pdef = {
+                let mut p = !eigvals.iter().any(|&v| v < 0.0);
+                if p {
+                    let max_eig = eigvals.iter().cloned().fold(0.0f64, f64::max);
+                    let low_eig = max_eig * f64::EPSILON.powf(0.7);
+                    if eigvals.iter().any(|&v| v < low_eig) {
+                        p = false;
+                    }
+                }
+                p
+            };
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!(
+                    "[PROFILE]   pdef={} (original Hessian eigvals: {:?})",
+                    pdef,
+                    eigvals.as_slice().unwrap_or(&[])
+                );
+            }
 
             // Modify eigenvalues: ABS for indefinite, floor for tiny.
             // mgcv's low.d = max(d) * .Machine$double.eps^.7 ≈ max(d) * 1.5e-11.
