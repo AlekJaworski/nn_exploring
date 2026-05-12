@@ -1117,6 +1117,50 @@ pub(crate) fn compute_irls_wz(
     (w, z)
 }
 
+/// Per-observation Newton weight for REML score evaluation. Unlike
+/// `compute_irls_wz` (which falls back to Fisher when `α ≤ 0` to keep the
+/// inner-loop Cholesky PSD), this returns the raw Newton weight `wf · α`
+/// regardless of sign. mgcv stores the analogous quantity as
+/// `g$working.weights` (negative entries occur for log-link InvGauss in
+/// ~43% of obs) and uses it for `log|H| = log|X'WX + S|` in the REML
+/// formula. Pairs with `log_abs_det_symmetric` in `linalg.rs` for the
+/// possibly-indefinite log-det.
+#[inline]
+pub(crate) fn compute_newton_score_weight(eta_i: f64, y_i: f64, family: Family) -> f64 {
+    let mu = family.inverse_link(eta_i);
+    let dmu_deta = family.d_inverse_link(eta_i);
+    let variance = family.variance(mu);
+    let var_safe = variance.max(1e-10);
+    if dmu_deta.abs() < 1e-10 {
+        return 0.0;
+    }
+    let wf = (dmu_deta * dmu_deta) / var_safe;
+    if family.is_canonical_link() {
+        return wf;
+    }
+    let c_resid = y_i - mu;
+    let v1n = family.dvar(mu) / var_safe;
+    let g2n = family.d2link(mu) * dmu_deta;
+    let alpha = newton_irls_alpha(c_resid, v1n, g2n);
+    wf * alpha
+}
+
+/// Vectorised `compute_newton_score_weight`. Returns the `g$working.weights`
+/// analog at converged η: full Newton weights with no Fisher fallback for
+/// negative α. Used by REML score evaluation to match mgcv's gam.fit3
+/// `log|X'WX+S|` exactly under non-canonical links.
+pub fn compute_newton_score_weights(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    family: Family,
+) -> Array1<f64> {
+    Array1::from_iter(
+        eta.iter()
+            .zip(y.iter())
+            .map(|(&e, &yi)| compute_newton_score_weight(e, yi, family)),
+    )
+}
+
 fn standard_glm_working_quantities(
     y: &Array1<f64>,
     eta: &Array1<f64>,

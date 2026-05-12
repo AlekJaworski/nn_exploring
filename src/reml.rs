@@ -541,8 +541,44 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     let dp = parts.dp;
     let scale_est = parts.sigma2;
 
-    // log|A| — no ridge in A. We use the un-ridged A.
-    let log_det_a = determinant(&system.a)?.ln();
+    // log|H| — mgcv's REML formula (gam.fit3.r:621) uses log|X'W·X + S|
+    // with W = NEWTON weights `wf · α` (gam.fit3.r:511-522, "full Newton"
+    // branch; gdi.c handles the possibly-indefinite assembly via its
+    // pivoted-QR `neg_w` path). PIRLS internally falls back to Fisher
+    // weights when α≤0 to keep its Cholesky PSD, so the `w` we received
+    // here is Fisher. For canonical links Newton == Fisher and we keep
+    // the un-ridged log|det(A)|. For non-canonical links we rebuild A
+    // with the Newton score weights at the converged β and use
+    // `log_abs_det_symmetric` (Σ log|λ_i|) to handle a possibly
+    // indefinite spectrum. This closes the InvGauss log-link mgcv parity
+    // gap (~0.22 in log|H|, the entire 0.11 REML offset).
+    let log_det_a = if family.is_canonical_link() {
+        determinant(&system.a)?.ln()
+    } else {
+        // Newton α depends on residuals y_orig - μ̂ at the original y, so
+        // route through y_original when the caller supplied it.
+        let y_for_newton = y_original.unwrap_or(y);
+        let w_score = crate::pirls::compute_newton_score_weights(
+            y_for_newton,
+            &system.fitted,
+            family,
+        );
+        // Guard against extreme α blow-up at intermediate λ during Newton
+        // line search: if any w_score is non-finite, fall back to the
+        // Fisher-weighted log|A|. Matches mgcv's effective behaviour at
+        // problematic iterates without aborting the outer loop.
+        if w_score.iter().any(|w| !w.is_finite()) {
+            determinant(&system.a)?.ln()
+        } else {
+            let xtwx_score = compute_xtwx(x, &w_score);
+            let mut a_score = xtwx_score;
+            for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+                penalty.scaled_add_to(&mut a_score, *lambda);
+            }
+            crate::linalg::log_abs_det_symmetric(&a_score)
+                .unwrap_or_else(|_| determinant(&system.a).map(|d| d.ln()).unwrap_or(0.0))
+        }
+    };
     let tr_a = system.tr_a;
     let n_minus_tra = (n as f64) - tr_a;
     let y_for_ls = y_original.unwrap_or(y);
@@ -2519,52 +2555,30 @@ pub fn reml_hessian_mgcv_exact_ift(
         }
     }
 
-    // Optional Tk·KK' Hessian contribution. The analytical gradient at line
-    // ~2127 adds `tk_kkt[k] = Σᵢ a1·η₁[:,k]·sign(w)·lev_uw` to ∂log|H|/∂ρ_k,
-    // so for self-consistency the Hessian needs ∂tk_kkt[k]/∂ρ_j / 2 on every
-    // (k,j) entry. The exact analytical form requires second-order IFT
-    // quantities (a2, b2, ∂lev_uw/∂ρ) which are not yet ported. We instead
-    // central-FD differentiate `tk_kkt` itself.
-    //
-    // Gated behind MGCV_TK_HESS_FD until parity confirms it is safe to
-    // default-on. Same family gating as the gradient term (tk_kkt is zero for
-    // other families with MGCV_TK_GRAD unset, so the FD contribution is also
-    // zero by construction).
-    let tk_hess_fd = std::env::var("MGCV_TK_HESS_FD").is_ok();
-    let tk_hess_analytical = std::env::var("MGCV_TK_HESS_ANALYTICAL").is_ok();
-    let tk_hess_any = tk_hess_fd || tk_hess_analytical;
-    let tk_hess_active = tk_hess_any
-        && (matches!(
-            family,
-            crate::pirls::Family::InverseGaussian
-                | crate::pirls::Family::Binomial
-                | crate::pirls::Family::QuasiBinomial
-        ) || std::env::var("MGCV_TK_GRAD").is_ok());
+    // Tk·KK' Hessian contribution — mgcv det2 W-dependent pieces (gdi.c
+    // P1+P2+P4+P5, lines 919-932), divided by 2 to match the score's
+    // `+0.5·log|H|` factor. Gated on the SAME condition as the gradient's
+    // tk_kkt piece (~ line 2157): default-on for InvGauss / Binomial /
+    // QuasiBinomial, opt-in for other families via `MGCV_TK_GRAD=1`. The
+    // gradient and Hessian must be on together or Newton direction is
+    // inconsistent with the score gradient.
+    let tk_hess_active = matches!(
+        family,
+        crate::pirls::Family::InverseGaussian
+            | crate::pirls::Family::Binomial
+            | crate::pirls::Family::QuasiBinomial
+    ) || std::env::var("MGCV_TK_GRAD").is_ok();
     if tk_hess_active {
-        // Analytical wins when both flags are set — it's the precise one.
-        let tk_contrib = if tk_hess_analytical {
-            tk_kkt_hessian_analytical(
-                y,
-                x,
-                w,
-                lambdas,
-                penalties_blocks,
-                cached_xtwx,
-                family,
-                y_original,
-            )?
-        } else {
-            tk_kkt_hessian_fd(
-                y,
-                x,
-                w,
-                lambdas,
-                penalties_blocks,
-                cached_xtwx,
-                family,
-                y_original,
-            )?
-        };
+        let tk_contrib = tk_kkt_hessian_analytical(
+            y,
+            x,
+            w,
+            lambdas,
+            penalties_blocks,
+            cached_xtwx,
+            family,
+            y_original,
+        )?;
         for k in 0..m {
             for j in 0..m {
                 hess[[k, j]] += tk_contrib[[k, j]] / 2.0;
@@ -2581,7 +2595,8 @@ pub fn reml_hessian_mgcv_exact_ift(
 ///   `tk_kkt[k] = Σᵢ a1[i] · η₁[i,k] · sign(w[i]) · lev_uw[i]`
 /// matching the inline computation in `reml_gradient_mgcv_exact_ift_inner`.
 /// This is the missing piece of mgcv's `∂log|H|/∂ρ_k` (gdi.c:857) used by
-/// `tk_kkt_hessian_fd` to FD-differentiate ∂tk_kkt/∂ρ_j.
+/// `tk_kkt_hessian_fd` to FD-differentiate ∂tk_kkt/∂ρ_j (legacy diagnostic;
+/// production dispatch now uses `tk_kkt_hessian_analytical`).
 #[cfg(feature = "blas")]
 fn compute_tk_kkt_vec(
     y: &Array1<f64>,
@@ -2720,38 +2735,48 @@ pub fn tk_kkt_hessian_fd(
     Ok(out)
 }
 
-/// Analytical Tk·KK' Hessian contribution — port of mgcv `get_ddetXWXpS`
-/// (gdi.c:817-948) — specifically the
-///   `det2[k,j] = Σᵢ Tkm[i,k,j]·diagKKt[i] − tr(KtTK[k]·KtTK[j])`
-/// piece (lines 919-923). Avoids the FD truncation error of
-/// `tk_kkt_hessian_fd` by computing the second-order IFT quantities
-/// (a2, b2 = ∂²β/∂ρ_k∂ρ_j, eta2) directly.
+/// Analytical Tk·KK' Hessian contribution — full mgcv `get_ddetXWXpS`
+/// port (gdi.c:817-948). Computes the four W-dependent pieces of
+/// `det2[k,j]` that depend on the per-observation weights:
 ///
-/// Returns an m×m matrix where entry `[k,j] = ∂tk_kkt[k]/∂ρ_j` (in
-/// expectation — actually `Hess_tk[k,j]`). The caller adds
-/// `Hess_tk[k,j] / 2` to the Hessian to match the gradient's `tk_kkt[k]/2`
-/// factor.
+///   `H[k,j] = Σᵢ Tkm[i,k,j]·sign(w_i)·lev_uw[i]   (P1, gdi.c:919-920)`
+///             ` − tr(C_k·C_j)                     (P2, gdi.c:922-923)`
+///             ` − λ_j·tr(C_k·S_j·A⁻¹)             (P4, gdi.c:928-929)`
+///             ` − λ_k·tr(C_j·S_k·A⁻¹)             (P5, gdi.c:931-932)`
+///
+/// where `C_k = B_k·A⁻¹` and `B_k = Xᵀ·diag(Tk[:,k])·X`. The penalty-only
+/// pieces P3 (δ_kj·λ_k·tr(A⁻¹·S_k), gdi.c:925-926) and P6 (−λ_k·λ_j·
+/// tr(A⁻¹·S_k·A⁻¹·S_j), gdi.c:934-936) are assembled separately by the
+/// caller (`reml_hessian_mgcv_exact_ift`).
+///
+/// The result is symmetric in (k,j) (P1, P2 by construction; P4+P5
+/// together) — matching mgcv's `det2[mk] = det2[km]` enforcement at
+/// gdi.c:938.
+///
+/// The caller adds `H[k,j] / 2` to the REML Hessian to match the score's
+/// `+ 0.5·log|H|` factor.
 ///
 /// Math (with reference to gdi.c lines):
 ///
-/// 1. `a1` (gdi.c:2532 Fisher, 2553 Newton) and `a2` (2537 Fisher, 2555
-///    Newton) per-observation weight derivatives `dw/dη`, `d²w/dη²`.
+/// 1. `a1 = dw/dη` (gdi.c:2532 Fisher, 2553 Newton) and `a2 = d²w/dη²`
+///    (2537 Fisher, 2555 Newton). Both are IFT-correct: a2 carries the
+///    `a1²/w` chunk from differentiating w along the IFT chain.
 /// 2. `b1[:,k] = -λ_k·A⁻¹·S_k·β` (gdi.c:1338, ift1) and
 ///    `b2[:,(k,j)] = A⁻¹·(Xᵀ(-a1·η₁_k·η₁_j) − λ_k·S_k·b1[:,j]
 ///                       − λ_j·S_j·b1[:,k])  + δ_kj·b1[:,k]`
-///    (gdi.c:1343-1356, ift1 second-derivative loop).
+///    (gdi.c:1343-1356, ift1 second-derivative loop, with the
+///    Xᵀ(-a1·η₁·η₁) W-piece that captures the implicit dependence of W
+///    on λ).
 /// 3. `η₁[:,k] = X·b1[:,k]`, `η₂[:,k,j] = X·b2[:,(k,j)]`.
-/// 4. `Tk[i,k] = a1[i]·η₁[i,k]`, gdi.c:2212 (with the `1/|w|·dw/dρ` re-
-///    normalisation: when `w_i > 0`, that is just `a1[i]·η₁[i,k]`).
-/// 5. `Tkm[i,k,j] = a2[i]·η₁[i,k]·η₁[i,j] + a1[i]·η₂[i,k,j]`,
-///    gdi.c:2184-2202 (with the same `1/|w|` normalisation).
-/// 6. Final per (k,j):
-///        `H[k,j] = Σᵢ Tkm[i,k,j]·sign(w_i)·lev_uw[i]
-///                  −  tr(C_k·C_j)`,
-///    with `lev_uw[i] = (X·A⁻¹·Xᵀ)[i,i] = diagKKt[i]`,
-///    `C_k = B_k·A⁻¹`, `B_k = Xᵀ·diag(Tk[:,k])·X`.
-///    The trace identity `tr(KtTK[k]·KtTK[j]) = tr(B_k·A⁻¹·B_j·A⁻¹)` lets us
-///    bypass forming `K` explicitly.
+/// 4. `Tk[i,k] = a1[i]·η₁[i,k]/|w_i|`, gdi.c:2212.
+/// 5. `Tkm[i,k,j] = (a2[i]·η₁[i,k]·η₁[i,j] + a1[i]·η₂[i,k,j])/|w_i|`,
+///    gdi.c:2184-2202.
+///
+/// Trace identities used to avoid forming K explicitly:
+///   `tr(KtTK[k]·KtTK[j])     = tr(B_k·A⁻¹·B_j·A⁻¹)`
+///   `tr(KtTK[k]·PtSP[j])     = tr(B_k·A⁻¹·S_j·A⁻¹) = tr(C_k·S_j·A⁻¹)`
+///   `Σᵢ Tkm[i,k,j]·diagKKt[i] = Σᵢ Tkm[i,k,j]·sign(w_i)·lev_uw[i]`
+/// with `lev_uw[i] = (X·A⁻¹·Xᵀ)[i,i]`.
 #[cfg(feature = "blas")]
 pub fn tk_kkt_hessian_analytical(
     y: &Array1<f64>,
@@ -2766,14 +2791,6 @@ pub fn tk_kkt_hessian_analytical(
     let n = y.len();
     let m = lambdas.len();
     let p = x.ncols();
-
-    // When `MGCV_TK_HESS_FULL=1` the helper switches from FD-equivalent
-    // (matches `tk_kkt_hessian_fd` to machine precision) to the full
-    // mgcv `det2` formula with all three W-co-variation pieces enabled.
-    // The FD-equivalent default is the safer A/B-baseline; the full path
-    // is what mgcv's gdi.c actually computes for `det2[k,j]` from `Tk` and
-    // `Tkm`.
-    let full_w_chain = std::env::var("MGCV_TK_HESS_FULL").is_ok();
 
     // --- A = X'WX + Σλ_jS_j, β = A⁻¹ X'Wy, A⁻¹ ---
     let xtwx_owned;
@@ -2839,26 +2856,12 @@ pub fn tk_kkt_hessian_analytical(
             if use_fisher {
                 // a1 = -w·(V1 + 2g2)/g1   (gdi.c:2532)
                 a1[i] = -w[i] * (v1n + 2.0 * g2n) / g1;
-                // mgcv's full a2 (gdi.c:2537) is
+                // mgcv's full Fisher a2 (gdi.c:2537):
                 //   a2 = a1·(a1/w − g2/g1) − w·(V2−V1²+2g3−2g2²)/g1²
                 //      = a1²/w − a1·g2/g1 − w·(...)/g1²
-                // and is derived under the IFT assumption that w co-varies
-                // with η (so `∂a1/∂η` picks up an `a1²/w` chunk from
-                // differentiating w through itself).
-                //
-                // We drive the analytical Tk·KK' Hessian from
-                // `compute_tk_kkt_vec`, where w is held FIXED across λ
-                // perturbations. The FD-target a2 therefore drops the
-                // `a1²/w` chunk:
-                //   a2_eff = -a1·g2/g1 − w·(V2−V1²+2g3−2g2²)/g1²
-                // This is what `tk_kkt_hessian_fd` would converge to under
-                // h → 0. Matches FD to machine precision on the Gamma+log
-                // 2-smooth fixture (see test_tk_kkt_hessian_analytical.rs).
-                a2[i] = -a1[i] * (g2n / g1)
+                a2[i] = a1[i] * a1[i] / w[i]
+                    - a1[i] * (g2n / g1)
                     - w[i] * (v2n - v1n * v1n + 2.0 * g3n - 2.0 * g2n * g2n) / (g1 * g1);
-                if full_w_chain {
-                    a2[i] += a1[i] * a1[i] / w[i];
-                }
             } else {
                 // Full Newton (gdi.c:2543-2556).
                 let y_for_resid = y_original.unwrap_or(y);
@@ -2873,20 +2876,16 @@ pub fn tk_kkt_hessian_analytical(
                 let alpha1 = (-(v1n + g2n) + c_resid * xx) / alpha;
                 let alpha2 = (-2.0 * xx + c_resid * xx2) / alpha;
                 a1[i] = w[i] * (alpha1 - v1n - 2.0 * g2n) / g1;
-                // mgcv's full Newton a2 (gdi.c:2555-2556) is
+                // mgcv's full Newton a2 (gdi.c:2555-2556):
                 //   a2 = a1·(a1/w − g2/g1)
                 //        − w·(α1² − α2 + V2 − V1²+2g3−2g2²)/g1²
                 //      = a1²/w − a1·g2/g1 − w·(...)/g1²
-                // The `a1²/w` chunk comes from differentiating w along the
-                // IFT path. `compute_tk_kkt_vec` holds w fixed → drop it.
-                a2[i] = -a1[i] * (g2n / g1)
+                a2[i] = a1[i] * a1[i] / w[i]
+                    - a1[i] * (g2n / g1)
                     - w[i]
                         * (alpha1 * alpha1 - alpha2 + v2n - v1n * v1n
                             + 2.0 * g3n - 2.0 * g2n * g2n)
                         / (g1 * g1);
-                if full_w_chain {
-                    a2[i] += a1[i] * a1[i] / w[i];
-                }
             }
         }
     }
@@ -2907,21 +2906,10 @@ pub fn tk_kkt_hessian_analytical(
     // b2_cols stores p-vectors; eta2_cols stores n-vectors X·b2.
     let mut b2_cols: Vec<Array1<f64>> = Vec::with_capacity(n_pairs);
     let mut eta2_cols: Vec<Array1<f64>> = Vec::with_capacity(n_pairs);
-    // Pre-build penalty·b1 products: λ_k · S_k · b1[:,j] is needed for many
-    // pairs; cache λ_k · S_k · b1[:,j] for all (k, j).
-    // To keep memory bounded we recompute on the fly.
-    // FD-style b2: when `compute_tk_kkt_vec` perturbs λ, the weight matrix
-    // W (passed as `w`) is held FIXED — only A's penalty piece varies, so
-    //   ∂A/∂ρ_j = λ_j · S_j     (no W contribution).
-    // We therefore DROP the X'(-a1·η1·η1) W-piece from b2 (gdi.c:1347-1348)
-    // so that the analytical helper differentiates the SAME function as the
-    // FD path. The full mgcv ift1 b2 carries this piece because IRLS weights
-    // co-evolve with λ during a re-fit — that's the IFT-truth, not what
-    // `compute_tk_kkt_vec` sees.
-    let include_w_piece_in_b2 = full_w_chain;
     for k in 0..m {
         for j in k..m {
-            // rhs = − λ_k · S_k · b1[:,j] − λ_j · S_j · b1[:,k]   (+ FD-only)
+            // rhs = Xᵀ(-a1·η1_k·η1_j) − λ_k · S_k · b1[:,j] − λ_j · S_j · b1[:,k]
+            //   (mgcv ift1 second-derivative loop, gdi.c:1343-1356)
             let b1_j = b1.column(j).to_owned();
             let b1_k = b1.column(k).to_owned();
             let sk_b1j = penalties_blocks[k].dot_vec(&b1_j);
@@ -2930,9 +2918,9 @@ pub fn tk_kkt_hessian_analytical(
             for r in 0..p {
                 rhs[r] = -(lambdas[k] * sk_b1j[r] + lambdas[j] * sj_b1k[r]);
             }
-            // Full-IFT W-piece (mgcv ift1:1347-1348): Xᵀ(-a1·η1_k·η1_j).
-            // Disabled to match `compute_tk_kkt_vec` (W held fixed).
-            if include_w_piece_in_b2 {
+            // Full-IFT W-piece (gdi.c:1347-1348): Xᵀ(-a1·η1_k·η1_j).
+            // Captures the implicit dependence of W on λ via η.
+            {
                 let mut v = Array1::<f64>::zeros(n);
                 for i in 0..n {
                     v[i] = -a1[i] * eta1[[i, k]] * eta1[[i, j]];
@@ -2992,22 +2980,19 @@ pub fn tk_kkt_hessian_analytical(
     }
 
     // --- Final assembly ---
-    // The (k, j) entry computes ∂tk_kkt[k]/∂ρ_j to match `tk_kkt_hessian_fd`.
-    // This includes the lev_uw variation (term 2 + part of term 4 of
-    // gdi.c:919-932) but is generally **asymmetric** in (k, j) because the
-    // penalty piece carries λ_j and S_j, not λ_k S_k. The caller's
-    // assembly already includes the linear-W det2 in `det2_kj`; here we
-    // only add the W-dependent variation tied to a1, a2.
-    // Term 2 (`-tr(C_k C_j)`) comes from the W-piece of ∂A/∂ρ_j inside
-    // ∂lev_uw/∂ρ_j. As with the b2 W-piece above, this is absent when w is
-    // held fixed across λ perturbations (the FD definition).
-    let include_w_piece_in_lev_uw_deriv = full_w_chain;
+    // The (k, j) entry computes the W-dependent pieces of mgcv's det2[k,j]
+    // (gdi.c:919-932): P1 (Tkm·diagKKt), P2 (-tr(C_k·C_j)), P4
+    // (-λ_j·tr(C_k·S_j·A⁻¹)), and P5 (-λ_k·tr(C_j·S_k·A⁻¹)). The penalty-
+    // only pieces P3 (δ_kj·λ_k·tr(A⁻¹·S_k)) and P6 (-λ_k·λ_j·
+    // tr(A⁻¹·S_k·A⁻¹·S_j)) are assembled by the caller. P4 + P5 together
+    // are symmetric in (k,j), matching mgcv's det2[mk] = det2[km] at
+    // gdi.c:938.
     let mut hess_tk = Array2::<f64>::zeros((m, m));
     for k in 0..m {
         for j in 0..m {
-            // Term 2: -tr(C_k · C_j)
+            // P2: -tr(C_k · C_j)   (gdi.c:922-923)
             let mut trace_piece = 0.0;
-            if include_w_piece_in_lev_uw_deriv {
+            {
                 let c_k = &c_per_k[k];
                 let c_j = &c_per_k[j];
                 for pp in 0..p {
@@ -3016,7 +3001,7 @@ pub fn tk_kkt_hessian_analytical(
                     }
                 }
             }
-            // Term 4 (asymmetric): -λ_j · tr(C_k · S_j · A⁻¹)
+            // P4: -λ_j · tr(C_k · S_j · A⁻¹)   (gdi.c:928-929)
             let mut term4 = 0.0;
             {
                 let c_k = &c_per_k[k];
@@ -3028,8 +3013,21 @@ pub fn tk_kkt_hessian_analytical(
                 }
                 term4 *= lambdas[j];
             }
-            // Term 1: Σᵢ Tkm[i,k,j] · sign(w_i) · lev_uw[i]
-            // pair_idx requires k ≤ j; the b2 is symmetric in (k,j) so use
+            // P5: -λ_k · tr(C_j · S_k · A⁻¹)   (gdi.c:931-932). Symmetric
+            // counterpart of P4; together they make hess_tk[k,j] symmetric.
+            let mut term5 = 0.0;
+            {
+                let c_j = &c_per_k[j];
+                let sa_k = &s_ainv_per_j[k];
+                for pp in 0..p {
+                    for qq in 0..p {
+                        term5 -= c_j[[pp, qq]] * sa_k[[qq, pp]];
+                    }
+                }
+                term5 *= lambdas[k];
+            }
+            // P1: Σᵢ Tkm[i,k,j] · sign(w_i) · lev_uw[i]   (gdi.c:919-920)
+            // pair_idx requires k ≤ j; b2 is symmetric in (k,j) so use
             // sorted indices.
             let (lo, hi) = if k <= j { (k, j) } else { (j, k) };
             let eta2_kj = &eta2_cols[pair_idx(lo, hi)];
@@ -3039,7 +3037,7 @@ pub fn tk_kkt_hessian_analytical(
                     + a1[i] * eta2_kj[i];
                 tkm_piece += tkm_ikj * w[i].signum() * lev_uw[i];
             }
-            hess_tk[[k, j]] = trace_piece + term4 + tkm_piece;
+            hess_tk[[k, j]] = trace_piece + term4 + term5 + tkm_piece;
         }
     }
     Ok(hess_tk)

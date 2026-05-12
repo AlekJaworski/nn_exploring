@@ -1394,6 +1394,26 @@ impl SmoothingParameter {
                 );
             }
 
+            // Env-gated outer-Newton trace (MGCV_RUST_TRACE_OUTER=1):
+            // emits a single-line greppable record at the START of each iter
+            // capturing (iter, log_sp, sp, REML, grad_inf, gradient).
+            // The step / halvings / accepted bits are printed later in this
+            // iter, after the line search has run. Used by diagnostic scripts
+            // such as scripts/python/diagnostics/invgauss_n800_trajectory_diff.py.
+            let trace_outer = std::env::var("MGCV_RUST_TRACE_OUTER").is_ok();
+            if trace_outer {
+                let log_sp_dbg: Vec<f64> = log_lambda.clone();
+                eprintln!(
+                    "[OUTER iter={}] log_sp={:?} sp={:?} REML={:.10} grad_inf={:.6e} grad={:?}",
+                    iter + 1,
+                    log_sp_dbg,
+                    lambdas,
+                    current_reml,
+                    grad_norm_linf,
+                    gradient.as_slice().unwrap_or(&[])
+                );
+            }
+
             // Converged if EITHER:
             // 1. Gradient L-infinity norm is small (gradient convergence)
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
@@ -1611,33 +1631,25 @@ impl SmoothingParameter {
             // Near convergence (small gradient), Newton step is likely good - use fewer halvings
             // Far from convergence, may need more exploration
             let stalled_score = iter >= 3 && reml_change < 1.0e-4;
-            // Workaround patch: with MGCV_TK_GRAD/InvGauss/Binomial families
-            // the analytical Tk·KK' gradient term is included but the Hessian
-            // historically did NOT include ∂Tk/∂ρ_j, so the Newton direction
-            // became inconsistent with the gradient near saturation. This
-            // patch capped the line search to 1 halving in the stalled-score
-            // branch to short-circuit the inconsistent-direction line search.
-            //
-            // The new `MGCV_TK_HESS_FD=1` Hessian augmentation makes the
-            // Newton direction consistent with the gradient. When that flag
-            // is set, relax the stalled-score cap so the optimizer can do a
-            // proper line search. `MGCV_STALLED_MAX_HALF` overrides the cap
-            // explicitly for experimentation (any non-empty value parses as a
-            // u32 with fallback 1 on parse error).
+            // Stalled-score line-search cap. Historically capped to 1 because
+            // the Tk·KK' gradient term was included for InvGauss/Binomial/
+            // QuasiBinomial families but the matching Hessian piece was not,
+            // leaving the Newton direction inconsistent with the gradient. Now
+            // that `tk_kkt_hessian_analytical` is default-on under the same
+            // family gate (reml.rs:~2570), Newton direction is consistent, so
+            // the cap relaxes to the standard near-convergence budget whenever
+            // tk_kkt is in play. `MGCV_STALLED_MAX_HALF` is an explicit
+            // override for experimentation.
+            let tk_kkt_active = matches!(
+                self.family,
+                crate::pirls::Family::InverseGaussian
+                    | crate::pirls::Family::Binomial
+                    | crate::pirls::Family::QuasiBinomial
+            ) || std::env::var("MGCV_TK_GRAD").is_ok();
             let stalled_cap = std::env::var("MGCV_STALLED_MAX_HALF")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or_else(|| {
-                    if std::env::var("MGCV_TK_HESS_FD").is_ok() {
-                        // With consistent Hessian, give the line search the
-                        // standard near-convergence budget. The stalled-score
-                        // exit at the bottom of the loop still triggers if
-                        // none of these steps improves the score.
-                        10
-                    } else {
-                        1
-                    }
-                });
+                .unwrap_or(if tk_kkt_active { 10 } else { 1 });
             let max_half = if stalled_score {
                 stalled_cap
             } else if grad_norm_linf < 0.1 {
@@ -1667,6 +1679,21 @@ impl SmoothingParameter {
                 );
             }
 
+            // Outer-Newton trace: record the Newton-direction step for this
+            // iter BEFORE line search picks a scale, so we can see what
+            // direction the optimizer wanted to take.
+            if trace_outer {
+                eprintln!(
+                    "[OUTER iter={}]   dir={:?} step_norm={:.6} grad_dot_step={:.6e} max_half={}",
+                    iter + 1,
+                    step.as_slice().unwrap_or(&[]),
+                    step_size_clamped,
+                    grad_dot_step,
+                    max_half
+                );
+            }
+
+            let mut halvings_attempted: usize = 0;
             let t_linesearch = Instant::now();
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
@@ -1714,6 +1741,7 @@ impl SmoothingParameter {
                         Some(&xtwx_local),
                     )
                 };
+                halvings_attempted = half;
                 match trial_eval {
                     Ok(new_reml) => {
                         // OPTIMIZATION: Armijo condition for early stopping
@@ -1723,6 +1751,18 @@ impl SmoothingParameter {
                         let armijo_threshold =
                             current_reml + armijo_c1 * step_scale * grad_dot_step;
                         let satisfies_armijo = new_reml <= armijo_threshold;
+
+                        if trace_outer {
+                            eprintln!(
+                                "[OUTER iter={}]     trial half={} scale={:.6e} REML={:.10} dREML={:.6e} armijo={}",
+                                iter + 1,
+                                half,
+                                step_scale,
+                                new_reml,
+                                new_reml - current_reml,
+                                satisfies_armijo
+                            );
+                        }
 
                         if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
                             eprintln!(
@@ -1756,6 +1796,14 @@ impl SmoothingParameter {
                     }
                     Err(_) => {
                         // Numerical issue - try smaller step
+                        if trace_outer {
+                            eprintln!(
+                                "[OUTER iter={}]     trial half={} scale={:.6e} REML=ERR",
+                                iter + 1,
+                                half,
+                                step_scale
+                            );
+                        }
                         if std::env::var("MGCV_PROFILE").is_ok() && half < 3 {
                             eprintln!("[PROFILE]     half={}: ERROR (numerical issue)", half);
                         }
@@ -1764,6 +1812,29 @@ impl SmoothingParameter {
                 }
             }
             let linesearch_time = t_linesearch.elapsed().as_micros();
+
+            // Outer-Newton trace: summary of the line search outcome for this iter.
+            // halvings = trials beyond the full step (Armijo / improvement loop).
+            if trace_outer {
+                let accepted = best_step_scale > 1e-6;
+                let reason = if !accepted {
+                    "no_improving_step"
+                } else if (best_step_scale - 1.0).abs() < 1e-12 {
+                    "full_newton"
+                } else {
+                    "halved"
+                };
+                eprintln!(
+                    "[OUTER iter={}]   linesearch_done step_size={:.6e} best_scale={:.6e} halvings={} best_REML={:.10} accepted={} reason={}",
+                    iter + 1,
+                    step_size_clamped * best_step_scale,
+                    best_step_scale,
+                    halvings_attempted,
+                    best_reml,
+                    accepted,
+                    reason
+                );
+            }
 
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!(

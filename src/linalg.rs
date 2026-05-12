@@ -119,6 +119,38 @@ fn solve_gaussian(mut a: Array2<f64>, mut b: Array1<f64>) -> Result<Array1<f64>>
 
 /// Compute matrix determinant
 /// Uses BLAS/LAPACK for large matrices (n >= 1000), LU decomposition for small matrices
+/// log|det(A)| for a symmetric matrix A, allowing indefinite spectra.
+///
+/// Uses symmetric eigendecomposition and returns `Σ log|λ_i|`, dropping
+/// eigenvalues below `max|λ| · 1e-14` as numerical zero. Required for mgcv
+/// parity in non-canonical-link GLMs (e.g. InvGauss + log): Newton weights
+/// `w = wf · α` can be negative, making `H = X'WX + S` indefinite. mgcv
+/// returns this exact quantity in `oo$rank.tol` (gdi.c:2841) via its
+/// pivoted-QR `neg_w` handling.
+#[cfg(feature = "blas")]
+pub fn log_abs_det_symmetric(a: &Array2<f64>) -> Result<f64> {
+    use ndarray_linalg::{Eigh, UPLO};
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square".to_string(),
+        ));
+    }
+    let (eigvals, _) = a
+        .eigh(UPLO::Upper)
+        .map_err(|_| GAMError::SingularMatrix)?;
+    let max_abs = eigvals.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+    let zero_thresh = max_abs * 1e-14;
+    let mut log_abs_det = 0.0;
+    for &lam in eigvals.iter() {
+        let a = lam.abs();
+        if a > zero_thresh {
+            log_abs_det += a.ln();
+        }
+    }
+    Ok(log_abs_det)
+}
+
 pub fn determinant(a: &Array2<f64>) -> Result<f64> {
     #[cfg(feature = "blas")]
     {
