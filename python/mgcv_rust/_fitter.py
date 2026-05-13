@@ -540,85 +540,135 @@ class Gam:
         if self._native is None:
             raise RuntimeError("Model has not been fitted yet — call .fit() first.")
 
+    def _active_feature_names(self) -> list[str]:
+        """Subset-aware list of feature names. Preserves the model's
+        predictor order; returns the full list when no subset mask is set."""
+        names = list(self._effective_predictors or [])
+        mask = getattr(self, "_subset_mask", None)
+        if mask is None:
+            return names
+        return [n for n in names if n in mask]
+
+    def _intercept_active(self) -> bool:
+        """Whether the intercept column is active under the current subset
+        mask (always True for a non-subset view)."""
+        mask = getattr(self, "_subset_mask", None)
+        return mask is None or "__constant__" in mask
+
+    def _active_coef_indices(self) -> np.ndarray:
+        """Indices into the full coef vector that survive the subset mask:
+        [0] if intercept is active, then the [first..last] block for each
+        active smooth, in the model's predictor order."""
+        self._require_fitted()
+        indices: list[int] = []
+        if self._intercept_active():
+            indices.append(0)
+        active = set(self._active_feature_names())
+        term_indices_raw = self._native.get_term_indices()  # type: ignore[union-attr]
+        for user_name, (_native_name, first, last) in zip(
+            self._effective_predictors or [], term_indices_raw
+        ):
+            if user_name in active:
+                indices.extend(range(first, last + 1))
+        return np.asarray(indices, dtype=int)
+
     @property
     def coef_(self) -> np.ndarray:
-        """Fitted β coefficients (intercept first, then per-smooth blocks)."""
+        """Fitted β coefficients. On a subset view (``gam[name]``), filtered
+        to: intercept (if selected) followed by the per-smooth coef blocks
+        for the selected features, in the model's predictor order."""
         self._require_fitted()
-        return np.asarray(self._native.get_coefficients(), dtype=float)  # type: ignore[union-attr]
+        full = np.asarray(self._native.get_coefficients(), dtype=float)  # type: ignore[union-attr]
+        if getattr(self, "_subset_mask", None) is None:
+            return full
+        return full[self._active_coef_indices()]
 
     @property
     def lambda_(self) -> np.ndarray:
-        """Smoothing parameters λ, one per smooth term, in predictor order."""
+        """Smoothing parameters λ, one per **active** smooth term, in
+        ``feature_names_in_`` order."""
         self._require_fitted()
-        return np.asarray(self._native.get_all_lambdas(), dtype=float)  # type: ignore[union-attr]
+        full = np.asarray(self._native.get_all_lambdas(), dtype=float)  # type: ignore[union-attr]
+        if getattr(self, "_subset_mask", None) is None:
+            return full
+        all_names = list(self._effective_predictors or [])
+        active = set(self._active_feature_names())
+        return np.asarray(
+            [full[i] for i, n in enumerate(all_names) if n in active],
+            dtype=float,
+        )
 
     @property
     def vcov_(self) -> np.ndarray:
-        """Posterior covariance matrix of β̂, shape `(p, p)`."""
+        """Posterior covariance matrix of β̂. On a subset view, the
+        corresponding (rows × cols) sub-matrix matching ``coef_``."""
         self._require_fitted()
-        return np.asarray(self._native.get_vcov(), dtype=float)  # type: ignore[union-attr]
+        full = np.asarray(self._native.get_vcov(), dtype=float)  # type: ignore[union-attr]
+        if getattr(self, "_subset_mask", None) is None:
+            return full
+        idx = self._active_coef_indices()
+        return full[np.ix_(idx, idx)]
 
     @property
     def intercept_(self) -> float:
         """Intercept on the **link** scale (sklearn norm). Equals
-        `coef_[0]`. For identity link this is `mean(y_train)` directly;
-        for non-identity links, `inv_link(intercept_)` recovers the
-        response-scale mean."""
-        return float(self.coef_[0])
+        ``coef_[0]`` on the full model. On a subset view that doesn't
+        include ``Gam.INTERCEPT``, returns 0.0 (the intercept does not
+        contribute to that view's predictions)."""
+        self._require_fitted()
+        if not self._intercept_active():
+            return 0.0
+        return float(np.asarray(self._native.get_coefficients(), dtype=float)[0])  # type: ignore[union-attr]
 
     @property
     def intercept_response_(self) -> float:
         """Intercept mapped to the **response** scale via inverse link.
-        Equals `mean(y_train)` for any family/link combination at the
-        converged β."""
+        Equals ``mean(y_train)`` on the full fitted model. On subset views
+        without the intercept, equals ``inv_link(0)``."""
         return float(self._inv_link(self.intercept_))
 
     @property
     def feature_names_in_(self) -> np.ndarray:
-        """Names of the features seen at fit time, in the column order
-        the model was fit on. sklearn norm."""
+        """Names of the features active in this (sub-)model, in the
+        model's predictor order. sklearn norm."""
         self._require_fitted()
-        return np.asarray(self._effective_predictors or [], dtype=object)
+        return np.asarray(self._active_feature_names(), dtype=object)
 
     @property
     def n_features_in_(self) -> int:
-        """Number of features seen at fit time. sklearn norm."""
+        """Number of features active in this (sub-)model. sklearn norm."""
         self._require_fitted()
-        return len(self._effective_predictors or [])
+        return len(self._active_feature_names())
 
     @property
     def k_(self) -> np.ndarray:
         """Per-feature basis dimension k (after auto-capping at
-        `n_unique − 1`), in `feature_names_in_` order."""
+        ``n_unique − 1``), in ``feature_names_in_`` order."""
         self._require_fitted()
         return np.asarray(
-            [self._term_k.get(name, 0) for name in (self._effective_predictors or [])],
+            [self._term_k.get(name, 0) for name in self._active_feature_names()],
             dtype=int,
         )
 
     @property
     def bs_(self) -> np.ndarray:
-        """Per-feature basis type (`'cr'`, `'tp'`, `'re'`, …), in
-        `feature_names_in_` order. Returns the global default for
-        features not overridden in `predictor_basis_map`."""
+        """Per-feature basis type (``'cr'``, ``'tp'``, ``'re'``, …), in
+        ``feature_names_in_`` order. Returns the global default for
+        features not overridden in ``predictor_basis_map``."""
         self._require_fitted()
         return np.asarray(
-            [
-                self.predictor_basis_map.get(name, "cr")
-                for name in (self._effective_predictors or [])
-            ],
+            [self.predictor_basis_map.get(name, "cr") for name in self._active_feature_names()],
             dtype=object,
         )
 
     @property
     def edf_(self) -> np.ndarray:
         """Per-feature effective degrees of freedom, in
-        `feature_names_in_` order. Sums (plus the intercept's 1 dof) to
-        the total model EDF."""
+        ``feature_names_in_`` order."""
         self._require_fitted()
         edf_map = dict(self._native.get_edf_per_smooth())  # type: ignore[union-attr]
         return np.asarray(
-            [float(edf_map.get(name, float("nan"))) for name in (self._effective_predictors or [])],
+            [float(edf_map.get(name, float("nan"))) for name in self._active_feature_names()],
             dtype=float,
         )
 
