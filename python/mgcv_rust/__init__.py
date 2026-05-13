@@ -2,24 +2,27 @@
 
 The package exposes two layers:
 
-1. **Low-level Rust core** (`mgcv_rust.GAM`): direct Python bindings to the
+1. **High-level ergonomics wrapper** (`mgcv_rust.Gam`): the user-facing class.
+   Pandas/Polars DataFrame inputs, named predictors, per-term k mapping,
+   family/link selection, posterior sampling, confidence intervals,
+   marginal predictions (subset views via ``gam[name]``), serialization.
+   See `_fitter.py`.
+
+   ``GAMFitter`` is a deprecated alias of ``Gam`` (same constructor, same
+   methods) and emits :class:`DeprecationWarning` on instantiation. It will
+   be removed in a future release; migrate to :class:`Gam`.
+
+2. **Low-level Rust core** (`mgcv_rust.GAM`): direct Python bindings to the
    Rust GAM solver. Numerics-focused, byte-for-byte mgcv parity on Gaussian
-   cases. See [[mgcv_rust - Parity Tests]].
+   cases. Drop to this only when you need direct control over the fit. See
+   `[[mgcv_rust - Parity Tests]]`.
 
-2. **High-level ergonomics wrapper** (`mgcv_rust.GAMFitter`): drop-in
-   replacement for the rpy2-based `r_fitting.GamFitter` used in the
-   neighbourhoods repo. Pandas/Polars DataFrame inputs, named predictors,
-   per-term k mapping, family/link selection, posterior sampling,
-   confidence intervals, marginal predictions, serialization. See
-   `_fitter.py`.
-
-For most users, prefer `GAMFitter`. Drop to the lower-level `GAM` only when
-you need direct control over the fit.
+For most users, prefer :class:`Gam`.
 """
 
 from .mgcv_rust import *  # compiled Rust extension — exposes GAM and helpers
 from .mgcv_rust import GAM as _NativeGAM
-from ._fitter import GAMFitter
+from ._fitter import Gam, GAMFitter
 from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, QuantileLSSFit
 
 # Keep the native GAM accessible as `GAM` so existing scripts that import
@@ -27,7 +30,7 @@ from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, Quan
 GAM = _NativeGAM
 
 __all__ = [
-    "GAM", "GAMFitter",
+    "Gam", "GAMFitter", "GAM",
     "tune_quantile_sigma", "fit_quantile",
     "fit_quantile_lss", "QuantileLSSFit",
 ]

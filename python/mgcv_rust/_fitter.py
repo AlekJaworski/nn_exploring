@@ -1,9 +1,11 @@
-"""GAMFitter — ergonomics layer over the Rust `GAM` core.
+"""`Gam` — ergonomics layer over the Rust core.
 
-Designed as a drop-in replacement for `r_fitting.GamFitter` in the
-neighbourhoods repo: same constructor signature, same `fit(X, y)` /
-`predict(X)` / `predict_ci` / `get_posterior_samples` / `serialize`
-methods, plus pandas / polars / numpy input handling.
+User-facing class: :class:`Gam`. Was historically named ``GAMFitter`` to be a
+drop-in for ``r_fitting.GamFitter`` in the neighbourhoods repo; ``GAMFitter``
+is now a deprecated alias that forwards to :class:`Gam`. Same constructor
+signature, same ``fit(X, y)`` / ``predict(X)`` / ``predict_ci`` /
+``get_posterior_samples`` / ``serialize`` methods, plus pandas / polars /
+numpy input handling.
 
 Status legend in this file:
 - ✅  fully implemented and tested.
@@ -120,12 +122,16 @@ def _to_1d_numpy(y: Any) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------- #
-# GAMFitter — the user-facing class                                      #
+# Gam — the user-facing class                                            #
 # ---------------------------------------------------------------------- #
 
 
-class GAMFitter:
+class Gam:
     """Ergonomic GAM wrapper. Drop-in for `r_fitting.GamFitter`.
+
+    Was historically named ``GAMFitter``; the old name is preserved as a
+    deprecated alias (see :class:`GAMFitter` at the bottom of this module).
+    New code should use :class:`Gam`.
 
     Parameters mirror the neighbourhoods `GamFitter`. Unsupported
     parameters are accepted but ignored with a clear note in the
@@ -233,7 +239,7 @@ class GAMFitter:
 
     # -------------------------- Fit / Predict ------------------------- #
 
-    def fit(self, X: ArrayLike, y: Any) -> "GAMFitter":
+    def fit(self, X: ArrayLike, y: Any) -> "Gam":
         """Fit the GAM. Mirrors `r_fitting.GamFitter.fit`.
 
         Accepts numpy / pandas / polars inputs. If a DataFrame is given,
@@ -711,7 +717,7 @@ class GAMFitter:
             "pc_map": dict(self.pc_map),
         }
 
-    def __getitem__(self, predictors: Union[str, Iterable[str]]) -> "GAMFitter":
+    def __getitem__(self, predictors: Union[str, Iterable[str]]) -> "Gam":
         """Return a subset view for marginal predictions.
 
         ``gam[["x0", "x2"]].predict(X)`` returns predictions using only
@@ -725,7 +731,7 @@ class GAMFitter:
                 fitted model, or be ``"__constant__"``.
 
         Returns:
-            A shallow copy of this :class:`GAMFitter` with ``_subset_mask``
+            A shallow copy of this :class:`Gam` with ``_subset_mask``
             set.  The underlying Rust model is shared; only prediction
             behaviour changes.
 
@@ -750,3 +756,36 @@ class GAMFitter:
         view = copy.copy(self)
         view._subset_mask = set(requested)
         return view
+
+
+# ---------------------------------------------------------------------- #
+# Discoverable sentinel for the intercept column in __getitem__          #
+# ---------------------------------------------------------------------- #
+# Lives on `Gam` so users write `gam[Gam.INTERCEPT]` instead of the magic
+# string `"__constant__"`. The value is unchanged for back-compat — code
+# that already passes `"__constant__"` keeps working.
+Gam.INTERCEPT = "__constant__"  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------- #
+# Deprecated alias                                                       #
+# ---------------------------------------------------------------------- #
+
+
+class GAMFitter(Gam):
+    """Deprecated alias for :class:`Gam`. Will be removed in a future release.
+
+    Emits :class:`DeprecationWarning` on instantiation. Use :class:`Gam`
+    instead — same constructor, same methods.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        import warnings
+
+        warnings.warn(
+            "GAMFitter is deprecated; use mgcv_rust.Gam instead. "
+            "GAMFitter will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
