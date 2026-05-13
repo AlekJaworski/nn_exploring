@@ -1477,17 +1477,24 @@ impl SmoothingParameter {
             // 1. Gradient L-infinity norm is small (gradient convergence)
             // 2. REML value change is tiny (value convergence for asymptotic cases like λ→∞)
             //
-            // Audit 2026-05-04 (Phase E1 N-3 diagnostic): tested AND with
-            // both our tols (grad 1e-6, score 1e-7) and mgcv's tols
-            // (gam.fit3.r:1652-1653: grad 5e-6, score 1e-6). Both AND
-            // variants broke `1d_gaussian_low_signal_n1000_k10_cr` and
-            // `4d_binomial_logit_n2000_k8_cr` (oscillation in flat regions)
-            // and did NOT fix N-3 — the Newton trajectory genuinely lands
-            // at a different stationary point than mgcv's joint-(ρ, log φ)
-            // outer Newton, regardless of convergence criterion. Keeping OR.
+            // mgcv's gam.fit3.r:1644-1645 (with conv.tol=1e-7 default):
+            //   |grad|_∞ < 5·score_scale·conv.tol = score_scale·5e-7
+            //   |ΔREML|  < score_scale·conv.tol   = score_scale·1e-7
+            //   AND after iter>2
+            //
+            // Rust historically used `score_scale·1e-7` for grad_tol — i.e.
+            // 5× *tighter* than mgcv. Loosening grad_tol to match mgcv's 5e-7
+            // shaves the long tail of nearly-converged Newton iters on
+            // Binomial_n5000 (was 14 iters, plan note: each of iters 10-14
+            // shrinks |grad| by ~3× past mgcv's stopping threshold).
+            //
+            // Keep score-change tol at relative 1e-7 (well-tested by 0.10).
+            // The mgcv form `score_scale·conv.tol` is absolute, but Rust's
+            // `reml_change` is already a relative quantity (Δ/|REML|), so
+            // the equivalent threshold is just `conv.tol`.
             let grad_tol = if self.mgcv_exact_score {
                 let score_scale = current_reml.abs() + 1.0;
-                score_scale * 1.0e-7
+                score_scale * 5.0e-7
             } else {
                 0.05
             };
@@ -1500,9 +1507,8 @@ impl SmoothingParameter {
             }
 
             // REML change convergence: stop if making negligible progress.
-            // mgcv's documented outer-iteration default is `conv.tol = 1e-7`
-            // (gam.control). The score-change test (gam.fit3.r:1645) uses
-            // 1e-7 as the absolute floor. Keeping 1e-7 here (Perf-1).
+            // Relative 1e-7 corresponds to mgcv's `score_scale·conv.tol` with
+            // conv.tol=1e-7 (since `reml_change` is already relative).
             let reml_change_tol = if self.mgcv_exact_score {
                 1.0e-7
             } else {
