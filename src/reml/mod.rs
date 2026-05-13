@@ -286,6 +286,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     lambdas: &[f64],
     penalties_blocks: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     mp: usize,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
@@ -340,7 +341,17 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     };
     // A = X'WX + ΣλS — NO ridge in score terms. The shared assembly keeps
     // the tiny solve-only ridge out of determinants/traces.
-    let system = assemble_reml_system(y, x_use, w, xtwx, lambdas, pens_use)?;
+    // cached_xtwy is only valid in the un-rotated basis; skip in the rotated path.
+    let xtwy_for_assemble = if reparam_active { None } else { cached_xtwy };
+    let system = assemble_reml_system(
+        y,
+        x_use,
+        w,
+        xtwx,
+        lambdas,
+        pens_use,
+        xtwy_for_assemble,
+    )?;
 
     // Deviance numerator, β'(ΣλS)β, Dp and σ² from the shared score-parts
     // helper. Two deviance paths (item 1 of #47):
@@ -359,6 +370,8 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         &system,
         y,
         w,
+        x_use,
+        xtwx,
         lambdas,
         pens_use,
         family,
@@ -390,7 +403,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         let y_for_newton = y_original.unwrap_or(y);
         let w_score = crate::pirls::compute_newton_score_weights(
             y_for_newton,
-            &system.fitted,
+            system.fitted(x_use),
             family,
         );
         // Guard against extreme α blow-up at intermediate λ during Newton
@@ -536,7 +549,8 @@ impl<'a> TweedieThetaCache<'a> {
         mp: usize,
         y_for_ls: &'a Array1<f64>,
     ) -> Result<Self> {
-        let system = assemble_reml_system(y_local, x, w_local, xtwx_local, lambdas, penalties)?;
+        let system =
+            assemble_reml_system(y_local, x, w_local, xtwx_local, lambdas, penalties, None)?;
         let mut bsb = 0.0;
         for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
             bsb += lambda * penalty.quadratic_form(&system.beta);
@@ -556,7 +570,7 @@ impl<'a> TweedieThetaCache<'a> {
         let log_det_s = log_lambda_sum + log_pseudo_det_sum;
         Ok(TweedieThetaCache {
             y_for_ls,
-            fitted: system.fitted,
+            fitted: system.fitted(x).clone(),
             bsb,
             log_det_h,
             log_det_s,
@@ -651,6 +665,7 @@ pub fn reml_gradient_mgcv_exact_closed_form(
     lambdas: &[f64],
     penalties_blocks: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     family: crate::pirls::Family,
 ) -> Result<Array1<f64>> {
     reml_gradient_mgcv_exact_closed_form_inner(
@@ -660,6 +675,7 @@ pub fn reml_gradient_mgcv_exact_closed_form(
         lambdas,
         penalties_blocks,
         cached_xtwx,
+        cached_xtwy,
         family,
         None,
     )
@@ -676,6 +692,7 @@ pub fn reml_gradient_mgcv_exact_closed_form_fixed_sigma2(
     lambdas: &[f64],
     penalties_blocks: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     family: crate::pirls::Family,
     fixed_sigma2: f64,
 ) -> Result<Array1<f64>> {
@@ -686,6 +703,7 @@ pub fn reml_gradient_mgcv_exact_closed_form_fixed_sigma2(
         lambdas,
         penalties_blocks,
         cached_xtwx,
+        cached_xtwy,
         family,
         Some(fixed_sigma2),
     )
@@ -699,6 +717,7 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
     lambdas: &[f64],
     penalties_blocks: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     family: crate::pirls::Family,
     fixed_scale: Option<f64>,
 ) -> Result<Array1<f64>> {
@@ -712,13 +731,13 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
         &xtwx_owned
     };
 
-    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks, cached_xtwy)?;
 
     // RSS / σ² — same working-RSS approximation as the score function
     // for non-Gaussian (see comment there). Family is plumbed through
     // for future use but not branched on yet.
     let _ = family;
-    let parts = RemlScoreParts::gaussian_only(&system, y, w, n, fixed_scale);
+    let parts = RemlScoreParts::gaussian_only(&system, y, w, x, xtwx, n, fixed_scale);
     let a_inv = &system.a_inv;
     let scale_est = parts.sigma2;
 
@@ -776,6 +795,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     lambdas: &[f64],
     penalties_blocks: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     family: crate::pirls::Family,
 ) -> Result<Array2<f64>> {
     let n = y.len();
@@ -789,9 +809,9 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     };
 
     // A = X'WX + ΣλS, β = A^-1 X'Wy, σ² = RSS/(n-trA), A^-1
-    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks, cached_xtwy)?;
     let _ = family;
-    let parts = RemlScoreParts::gaussian_only(&system, y, w, n, None);
+    let parts = RemlScoreParts::gaussian_only(&system, y, w, x, xtwx, n, None);
     let a_inv = &system.a_inv;
     let scale_est = parts.sigma2;
 
@@ -5931,6 +5951,7 @@ mod tests {
             &lambdas,
             &penalties,
             Some(&xtwx),
+            None,
             mp,
             family,
             Some(&y_orig),
@@ -5985,6 +6006,7 @@ mod tests {
                     &lambdas,
                     &penalties,
                     Some(&xtwx),
+                    None,
                     mp,
                     fam_p,
                     Some(&y_orig),
@@ -6087,6 +6109,7 @@ mod tests {
                 &lambdas,
                 &penalties,
                 Some(&xtwx),
+                None,
                 mp,
                 fam,
                 Some(&y_orig),

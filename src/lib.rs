@@ -1021,6 +1021,7 @@ impl PyGAM {
             &lambdas,
             &penalties,
             None,
+            None,
             self.inner.family,
         )
         .map_err(|e| PyValueError::new_err(format!("hessian failed: {}", e)))?;
@@ -1071,6 +1072,7 @@ impl PyGAM {
             &lambdas,
             &penalties,
             None,
+            None,
             self.inner.family,
         )
         .map_err(|e| PyValueError::new_err(format!("gradient failed: {}", e)))?;
@@ -1120,6 +1122,7 @@ impl PyGAM {
             weights,
             &lambdas,
             &penalties,
+            None,
             None,
             self.inner.family,
             fixed_sigma2,
@@ -1350,6 +1353,7 @@ impl PyGAM {
             &lambdas,
             &penalties,
             None,
+            None,
             mp,
             self.inner.family,
             Some(&y_raw),
@@ -1534,6 +1538,7 @@ impl PyGAM {
             weights,
             &lambdas,
             &penalties,
+            None,
             None,
             mp,
             self.inner.family,

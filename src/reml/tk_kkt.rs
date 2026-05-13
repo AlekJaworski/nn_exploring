@@ -42,7 +42,7 @@ fn compute_tk_kkt_vec(
         &xtwx_owned
     };
 
-    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks)?;
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks, None)?;
     let p = system.a.nrows();
 
     let b1 = compute_b1_ift(&system.a_inv, &system.beta, lambdas, penalties_blocks);
@@ -63,8 +63,9 @@ fn compute_tk_kkt_vec(
     let mut a1 = Array1::<f64>::zeros(n);
     if !matches!(family, crate::pirls::Family::Gaussian) {
         let use_fisher = family.is_canonical_link();
+        let system_fitted = system.fitted(x);
         for i in 0..n {
-            let eta_i = system.fitted[i];
+            let eta_i = system_fitted[i];
             let mu_i = family.inverse_link(eta_i);
             let dmu_deta = family.d_inverse_link(eta_i);
             if dmu_deta.abs() < 1e-12 {

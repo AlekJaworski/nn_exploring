@@ -69,6 +69,7 @@ fn dispatch_reml_score(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<f64> {
     if sp.mgcv_exact_score {
         reml_criterion_multi_cached_mgcv_exact(
@@ -78,6 +79,7 @@ fn dispatch_reml_score(
             lambdas,
             penalties,
             cached_xtwx,
+            cached_xtwy,
             sp.mp,
             sp.family,
             sp.y_original.as_ref(),
@@ -99,6 +101,7 @@ fn dispatch_reml_score_with_family(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     family: crate::pirls::Family,
 ) -> Result<f64> {
     if sp.mgcv_exact_score {
@@ -109,6 +112,7 @@ fn dispatch_reml_score_with_family(
             lambdas,
             penalties,
             cached_xtwx,
+            cached_xtwy,
             sp.mp,
             family,
             sp.y_original.as_ref(),
@@ -133,6 +137,7 @@ fn reml_gradient_finite_diff(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     pirls_callback: &mut Option<PirlsCallback<'_>>,
 ) -> Result<Array1<f64>> {
     let m = lambdas.len();
@@ -154,6 +159,7 @@ fn reml_gradient_finite_diff(
             &lam_plus,
             penalties,
             cached_xtwx,
+            cached_xtwy,
             pirls_callback,
         )?;
         let r_minus = dispatch_reml_score_fd(
@@ -164,6 +170,7 @@ fn reml_gradient_finite_diff(
             &lam_minus,
             penalties,
             cached_xtwx,
+            cached_xtwy,
             pirls_callback,
         )?;
         grad[i] = (r_plus - r_minus) / (2.0 * h);
@@ -180,6 +187,7 @@ fn dispatch_reml_score_fd(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     pirls_callback: &mut Option<PirlsCallback<'_>>,
 ) -> Result<f64> {
     if let Some(cb) = pirls_callback.as_mut() {
@@ -192,9 +200,10 @@ fn dispatch_reml_score_fd(
             lambdas,
             penalties,
             Some(&refresh.xtwx),
+            None,
         )
     } else {
-        dispatch_reml_score(sp, y, x, w, lambdas, penalties, cached_xtwx)
+        dispatch_reml_score(sp, y, x, w, lambdas, penalties, cached_xtwx, cached_xtwy)
     }
 }
 
@@ -211,12 +220,23 @@ fn reml_hessian_finite_diff(
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
     pirls_callback: &mut Option<PirlsCallback<'_>>,
 ) -> Result<Array2<f64>> {
     let m = lambdas.len();
     let h: f64 = 1.0e-3;
     let log_lambdas: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
-    let r0 = dispatch_reml_score_fd(sp, y, x, w, lambdas, penalties, cached_xtwx, pirls_callback)?;
+    let r0 = dispatch_reml_score_fd(
+        sp,
+        y,
+        x,
+        w,
+        lambdas,
+        penalties,
+        cached_xtwx,
+        cached_xtwy,
+        pirls_callback,
+    )?;
 
     // Cache REML at log_λ ± h·e_i for i = 0..m
     let mut r_plus = vec![0.0f64; m];
@@ -228,10 +248,28 @@ fn reml_hessian_finite_diff(
         lm[i] -= h;
         let lam_p: Vec<f64> = lp.iter().map(|l| l.exp()).collect();
         let lam_m: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
-        r_plus[i] =
-            dispatch_reml_score_fd(sp, y, x, w, &lam_p, penalties, cached_xtwx, pirls_callback)?;
-        r_minus[i] =
-            dispatch_reml_score_fd(sp, y, x, w, &lam_m, penalties, cached_xtwx, pirls_callback)?;
+        r_plus[i] = dispatch_reml_score_fd(
+            sp,
+            y,
+            x,
+            w,
+            &lam_p,
+            penalties,
+            cached_xtwx,
+            cached_xtwy,
+            pirls_callback,
+        )?;
+        r_minus[i] = dispatch_reml_score_fd(
+            sp,
+            y,
+            x,
+            w,
+            &lam_m,
+            penalties,
+            cached_xtwx,
+            cached_xtwy,
+            pirls_callback,
+        )?;
     }
 
     let mut hess = Array2::<f64>::zeros((m, m));
@@ -267,6 +305,7 @@ fn reml_hessian_finite_diff(
                 &lam_pp,
                 penalties,
                 cached_xtwx,
+                cached_xtwy,
                 pirls_callback,
             )?;
             let rpm = dispatch_reml_score_fd(
@@ -277,6 +316,7 @@ fn reml_hessian_finite_diff(
                 &lam_pm,
                 penalties,
                 cached_xtwx,
+                cached_xtwy,
                 pirls_callback,
             )?;
             let rmp = dispatch_reml_score_fd(
@@ -287,6 +327,7 @@ fn reml_hessian_finite_diff(
                 &lam_mp,
                 penalties,
                 cached_xtwx,
+                cached_xtwy,
                 pirls_callback,
             )?;
             let rmm = dispatch_reml_score_fd(
@@ -297,6 +338,7 @@ fn reml_hessian_finite_diff(
                 &lam_mm,
                 penalties,
                 cached_xtwx,
+                cached_xtwy,
                 pirls_callback,
             )?;
             let off = (rpp - rpm - rmp + rmm) / (4.0 * h2);
@@ -1147,6 +1189,7 @@ impl SmoothingParameter {
                 &lambdas,
                 penalties,
                 Some(&xtwx_local),
+                Some(&xtwy_local),
             )?;
 
             // Compute gradient and Hessian.
@@ -1193,6 +1236,7 @@ impl SmoothingParameter {
                         &lambdas,
                         penalties,
                         Some(&xtwx_local),
+                        Some(&xtwy_local),
                         &mut pirls_callback,
                     )?
                 } else if use_ift {
@@ -1246,6 +1290,7 @@ impl SmoothingParameter {
                         &lambdas,
                         penalties,
                         Some(&xtwx_local),
+                        Some(&xtwy_local),
                         self.family,
                     )?
                 }
@@ -1287,6 +1332,7 @@ impl SmoothingParameter {
                         &lambdas,
                         penalties,
                         Some(&xtwx_local),
+                        Some(&xtwy_local),
                         &mut pirls_callback,
                     )?
                 } else if use_ift {
@@ -1308,6 +1354,7 @@ impl SmoothingParameter {
                         &lambdas,
                         penalties,
                         Some(&xtwx_local),
+                        Some(&xtwy_local),
                         self.family,
                     )?
                 }
@@ -1710,19 +1757,16 @@ impl SmoothingParameter {
                 // gam.fit3.r:1444, 1500-1504, 1571-1576.
                 let trial_eval = if let Some(cb) = pirls_callback.as_mut() {
                     match cb(&new_lambdas) {
-                        Ok(refresh) => {
-                            let trial_xtwy_unused = (); // placeholder, gradient not needed in line search
-                            let _ = trial_xtwy_unused;
-                            dispatch_reml_score(
-                                self,
-                                &refresh.working_response,
-                                x,
-                                &refresh.weights,
-                                &new_lambdas,
-                                penalties,
-                                Some(&refresh.xtwx),
-                            )
-                        }
+                        Ok(refresh) => dispatch_reml_score(
+                            self,
+                            &refresh.working_response,
+                            x,
+                            &refresh.weights,
+                            &new_lambdas,
+                            penalties,
+                            Some(&refresh.xtwx),
+                            None,
+                        ),
                         Err(e) => Err(e),
                     }
                 } else {
@@ -1734,6 +1778,7 @@ impl SmoothingParameter {
                         &new_lambdas,
                         penalties,
                         Some(&xtwx_local),
+                        Some(&xtwy_local),
                     )
                 };
                 halvings_attempted = half;
@@ -1920,6 +1965,7 @@ impl SmoothingParameter {
                                 &new_lambdas_sd,
                                 penalties,
                                 Some(&refresh.xtwx),
+                                None,
                             ),
                             Err(e) => Err(e),
                         }
@@ -1932,6 +1978,7 @@ impl SmoothingParameter {
                             &new_lambdas_sd,
                             penalties,
                             Some(&xtwx_local),
+                            Some(&xtwy_local),
                         )
                     };
                     if let Ok(new_reml_sd) = sd_eval {
@@ -2049,6 +2096,7 @@ impl SmoothingParameter {
                             &current_lambdas,
                             penalties,
                             Some(&xtwx_local),
+                            Some(&xtwy_local),
                             trial_fam,
                         )
                     }};
@@ -2180,6 +2228,7 @@ impl SmoothingParameter {
                             &current_lambdas,
                             penalties,
                             Some(&xtwx_local),
+                            Some(&xtwy_local),
                             trial_fam,
                         )
                     }};
@@ -2281,6 +2330,7 @@ impl SmoothingParameter {
                                     &current_lambdas,
                                     penalties,
                                     Some(&refresh.xtwx),
+                                    None,
                                     self.mp,
                                     trial_fam,
                                     self.y_original.as_ref(),
@@ -2296,6 +2346,7 @@ impl SmoothingParameter {
                                 &current_lambdas,
                                 penalties,
                                 Some(&xtwx_local),
+                                Some(&xtwy_local),
                                 trial_fam,
                             )
                         }

@@ -239,22 +239,59 @@ pub fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1
 pub(crate) struct RemlSystem {
     pub(crate) a: Array2<f64>,
     pub(crate) beta: Array1<f64>,
-    pub(crate) fitted: Array1<f64>,
     pub(crate) a_inv: Array2<f64>,
     pub(crate) tr_a: f64,
+    /// X'Wy used to solve A·β = X'Wy. Cached so working_rss can use the
+    /// p²-form (Gaussian) and `from_system` non-Gaussian path can avoid
+    /// re-materialising fitted = X·β when caller already supplied xtwy.
+    pub(crate) xtwy: Array1<f64>,
+    /// Lazily computed `X·β`. Initialised on first call to `fitted(x)`.
+    /// Stays uninitialised for the Gaussian working_rss p²-form path
+    /// (the O(n·p) `X·β` is replaced by `y'Wy - 2β'X'Wy + β'X'WXβ`).
+    fitted_cache: std::cell::OnceCell<Array1<f64>>,
 }
 
 impl RemlSystem {
+    /// Lazily compute and cache `X·β`. For Gaussian + working_rss p²-form
+    /// this is never called; non-Gaussian deviance paths trigger it once.
+    pub(crate) fn fitted(&self, x: &Array2<f64>) -> &Array1<f64> {
+        self.fitted_cache.get_or_init(|| x.dot(&self.beta))
+    }
+
     /// Working-RSS deviance numerator: Σ w_i (y_i - x_iβ)². For Gaussian
     /// + canonical link this is the true deviance; for non-Gaussian families
     /// this is the IRLS working-response approximation used by the closed-form
     /// gradient/Hessian and as the Gaussian/None branch of the score function.
-    fn working_rss(&self, y: &Array1<f64>, w: &Array1<f64>) -> f64 {
-        y.iter()
-            .zip(self.fitted.iter())
-            .zip(w.iter())
-            .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
-            .sum()
+    ///
+    /// Gaussian fast path: uses the p²-form `y'Wy - 2β'X'Wy + β'X'WXβ`,
+    /// avoiding the O(n·p) `X·β` materialisation. Identity-preserving (algebraic
+    /// expansion of the O(n) form).
+    fn working_rss(
+        &self,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        x: &Array2<f64>,
+        xtwx: &Array2<f64>,
+        family: crate::pirls::Family,
+    ) -> f64 {
+        if matches!(family, crate::pirls::Family::Gaussian) {
+            let ywy: f64 = y
+                .iter()
+                .zip(w.iter())
+                .map(|(yi, wi)| yi * yi * wi)
+                .sum();
+            let beta_xtwy = self.beta.dot(&self.xtwy);
+            let xtwx_beta = xtwx.dot(&self.beta);
+            let beta_xtwx_beta = self.beta.dot(&xtwx_beta);
+            ywy - 2.0 * beta_xtwy + beta_xtwx_beta
+        } else {
+            let fitted = self.fitted(x);
+            y.iter()
+                .zip(fitted.iter())
+                .zip(w.iter())
+                .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
+                .sum()
+        }
     }
 
     /// β'(ΣλS)β = Σ λ_j β'S_jβ — the penalty quadratic form, used in
@@ -276,13 +313,17 @@ pub(crate) fn assemble_reml_system(
     xtwx: &Array2<f64>,
     lambdas: &[f64],
     penalties_blocks: &[BlockPenalty],
+    cached_xtwy: Option<&Array1<f64>>,
 ) -> Result<RemlSystem> {
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
         penalty.scaled_add_to(&mut a, *lambda);
     }
 
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwy: Array1<f64> = match cached_xtwy {
+        Some(c) => c.clone(),
+        None => compute_xtwy(x, w, y),
+    };
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;
@@ -290,17 +331,17 @@ pub(crate) fn assemble_reml_system(
         .diag_mut()
         .iter_mut()
         .for_each(|d| *d += solve_ridge);
-    let beta = solve(a_solve, xtwy)?;
-    let fitted = x.dot(&beta);
+    let beta = solve(a_solve, xtwy.clone())?;
     let a_inv = inverse(&a)?;
     let tr_a = (xtwx.dot(&a_inv)).diag().sum();
 
     Ok(RemlSystem {
         a,
         beta,
-        fitted,
         a_inv,
         tr_a,
+        xtwy,
+        fitted_cache: std::cell::OnceCell::new(),
     })
 }
 
@@ -334,6 +375,8 @@ impl RemlScoreParts {
         system: &RemlSystem,
         y: &Array1<f64>,
         w: &Array1<f64>,
+        x: &Array2<f64>,
+        xtwx: &Array2<f64>,
         lambdas: &[f64],
         penalties_blocks: &[BlockPenalty],
         family: crate::pirls::Family,
@@ -342,10 +385,12 @@ impl RemlScoreParts {
         n: usize,
     ) -> Self {
         let dev_num: f64 = match (family, y_original) {
-            (crate::pirls::Family::Gaussian, _) | (_, None) => system.working_rss(y, w),
+            (crate::pirls::Family::Gaussian, _) | (_, None) => {
+                system.working_rss(y, w, x, xtwx, family)
+            }
             (fam, Some(y_orig)) => {
                 let mu: Array1<f64> = system
-                    .fitted
+                    .fitted(x)
                     .iter()
                     .map(|&eta| fam.inverse_link(eta))
                     .collect();
@@ -381,10 +426,12 @@ impl RemlScoreParts {
         system: &RemlSystem,
         y: &Array1<f64>,
         w: &Array1<f64>,
+        x: &Array2<f64>,
+        xtwx: &Array2<f64>,
         n: usize,
         fixed_sigma2: Option<f64>,
     ) -> Self {
-        let dev_num = system.working_rss(y, w);
+        let dev_num = system.working_rss(y, w, x, xtwx, crate::pirls::Family::Gaussian);
         let sigma2 = fixed_sigma2
             .unwrap_or_else(|| dev_num / ((n as f64) - system.tr_a).max(1e-10));
         Self {

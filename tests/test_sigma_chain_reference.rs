@@ -136,11 +136,11 @@ fn fd_profile_reml_gradient(
         let lam_minus: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
 
         let f_plus = reml_criterion_multi_cached_mgcv_exact(
-            y, x, w, &lam_plus, penalties, None, mp, family, y_original,
+            y, x, w, &lam_plus, penalties, None, None, mp, family, y_original,
         )
         .unwrap();
         let f_minus = reml_criterion_multi_cached_mgcv_exact(
-            y, x, w, &lam_minus, penalties, None, mp, family, y_original,
+            y, x, w, &lam_minus, penalties, None, None, mp, family, y_original,
         )
         .unwrap();
         // Convert from dREML/dlog(λ) via chain rule: we compare against the
