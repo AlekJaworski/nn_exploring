@@ -503,7 +503,7 @@ class Gam:
             ks = [current_k[name] for name in predictors]
             self._single_fit(X_arr, y_arr, ks)
 
-            edf_map = dict(self._native.get_edf_per_smooth())
+            edf_map = self._edf_by_user_name()
 
             grew = False
             all_capped = True
@@ -839,14 +839,31 @@ class Gam:
             dtype=object,
         )
 
+    def _edf_by_user_name(self) -> dict[str, float]:
+        """Return EDF keyed by **user** predictor name.
+
+        The Rust core stores smooths under internal ``x0``, ``x1``, ...
+        names and returns ``get_edf_per_smooth()`` in that order. The
+        Python wrapper carries user-supplied predictor names (e.g.
+        ``"age"``, ``"score"``) in :attr:`_effective_predictors`, in the
+        same order. We pair them by **position** rather than by name so
+        DataFrame inputs with arbitrary column names get correct EDFs.
+        """
+        self._require_fitted()
+        raw = self._native.get_edf_per_smooth()  # type: ignore[union-attr]
+        all_names = list(self._effective_predictors or [])
+        return {
+            user_name: float(edf)
+            for user_name, (_native_name, edf) in zip(all_names, raw, strict=False)
+        }
+
     @property
     def edf_(self) -> np.ndarray:
         """Per-feature effective degrees of freedom, in
         ``feature_names_in_`` order."""
-        self._require_fitted()
-        edf_map = dict(self._native.get_edf_per_smooth())  # type: ignore[union-attr]
+        edf_map = self._edf_by_user_name()
         return np.asarray(
-            [float(edf_map.get(name, float("nan"))) for name in self._active_feature_names()],
+            [edf_map.get(name, float("nan")) for name in self._active_feature_names()],
             dtype=float,
         )
 
@@ -1397,7 +1414,7 @@ class Gam:
             raise ImportError(
                 "get_edf_df() requires pandas. Install it with: pip install pandas"
             ) from exc
-        edf = dict(self._native.get_edf_per_smooth())
+        edf = self._edf_by_user_name()
         rows = []
         for name, k in self._term_k.items():
             e = edf.get(name, float("nan"))

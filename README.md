@@ -1,291 +1,269 @@
-# mgcv_rust: Generalized Additive Models in Rust
+# mgcv_rust
 
-A Rust implementation of Generalized Additive Models (GAMs) with automatic smoothing parameter selection using REML (Restricted Maximum Likelihood) and the PiRLS (Penalized Iteratively Reweighted Least Squares) algorithm, inspired by R's `mgcv` package.
+A Rust port of R's [`mgcv`](https://cran.r-project.org/web/packages/mgcv/) package — Generalized Additive Models with automatic smoothing-parameter selection (REML / LAML) and PIRLS fitting — with first-class Python bindings.
 
-## Features
+The numerical core targets **byte-for-byte parity with `mgcv`** on common families, and the Python API is designed to feel like `sklearn`: a single `Gam` class, named-predictor `DataFrame` inputs, `fit()` / `predict()` / `score()`, posterior CI, and subset views for marginal analysis.
 
-- **Multiple Distribution Families**: Gaussian, Binomial, Poisson, and Gamma
-- **Flexible Basis Functions**:
-  - Cubic B-splines with natural boundary conditions
-  - Thin plate splines for smooth multivariate regression
-- **Automatic Smoothing**:
-  - REML (Restricted Maximum Likelihood) criterion
-  - GCV (Generalized Cross-Validation) criterion
-- **PiRLS Algorithm**: Efficient fitting via Penalized Iteratively Reweighted Least Squares
-- **Pure Rust**: No external BLAS/LAPACK dependencies
-- **Test-Driven Development**: Comprehensive test suite with 20+ passing tests
+| | |
+|---|---|
+| **Latest release** | `0.11.0` |
+| **Parity** | 554 / 0 / 0 on the mgcv comparison battery |
+| **Python tests** | 211 passed, 1 xfailed |
+| **Headline perf** | `2d_gaussian_additive_n50000_k15_cr` — 394 ms → 97 ms (4.05× vs. mgcv) |
+| **Python wrapper** | `mgcv_rust.Gam` (canonical), `GAMFitter` deprecated alias |
+
+## Why another GAM library?
+
+- **R-equivalent answers, Python ergonomics.** If you have R / `mgcv` users producing models and Python services consuming them, this gives both sides the same numbers from the same fit. The `serialize()` method produces a portable artefact for deployment.
+- **Fast.** Aggregate time across 80 parity fixtures: 2.0 s. On the largest Gaussian fixture (`n=50,000`, `k=15`), `mgcv_rust` is ~4× faster than R's `mgcv`.
+- **Real CIs, paired diffs.** `predict_ci(X)` returns `(mean, lo, hi)` so you never have to "+= intercept" by hand. `predict_diff(from_X, to_X, level=...)` gives a paired-posterior CI for the difference between two predictions — strictly tighter than the naive `predict_ci` difference.
+- **Frozen serving view.** `GamPredictor(gam)` is an `__slots__`-locked, inference-only wrapper with strict input validation (`feature_names_in_` enforcement) and a `check_against(gam, X_sample)` round-trip assertion for deployment safety.
 
 ## Installation
 
-Add to your `Cargo.toml`:
+The Python package is built from this repo via [maturin](https://www.maturin.rs/):
+
+```bash
+# Clone, then in a venv:
+pip install maturin
+maturin develop --features python,blas,blas-system --release
+```
+
+After that, `import mgcv_rust` works.
+
+For a Rust-only consumer, add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mgcv_rust = { path = "." }
-ndarray = "0.16"
+mgcv_rust = { git = "https://github.com/AlekJaworski/nn_exploring" }
 ```
 
-## Quick Start
-
-### Python — high-level wrapper (recommended)
-
-`GAMFitter` is a drop-in replacement for `mgcv::gam` / rpy2-based
-fitters. Accepts numpy / pandas / polars inputs, named predictors,
-per-term `k` overrides, posterior sampling, confidence intervals,
-and a `serialize()` method matching the schema consumed by
-downstream `GamPredictor`-style code.
-
-```python
-import numpy as np, pandas as pd
-from mgcv_rust import GAMFitter
-
-df = pd.DataFrame({"days_ago": ..., "quality": ...})
-y  = ...
-
-gam = GAMFitter(
-    predictors=("days_ago", "quality"),
-    k_default=6,
-    term_k_mapping={"days_ago": 25, "quality": 12},
-    family="gaussian", link="identity",
-)
-gam.fit(df, y)
-preds = gam.predict(df)
-lo, hi = gam.predict_ci(df, alpha=0.05, n_samples=1000)
-serialized = gam.serialize()
-```
-
-### Python — low-level Rust core
+## Quick start
 
 ```python
 import numpy as np
-from mgcv_rust import GAM
+import pandas as pd
+from mgcv_rust import Gam
 
-# Generate data: y = sin(2πx) + noise
-X = np.random.uniform(0, 1, (500, 2))
-y = np.sin(2 * np.pi * X[:, 0]) + 0.5 * (X[:, 1] - 0.5)**2
+rng = np.random.default_rng(0)
+n = 500
+X = pd.DataFrame({
+    "x0": rng.uniform(-2, 2, n),
+    "x1": rng.uniform(0, 5, n),
+})
+y = np.sin(X["x0"]) + 0.3 * (X["x1"] - 2.5)**2 + rng.normal(0, 0.1, n)
 
-# Fit GAM with automatic smooth setup
-gam = GAM()
-result = gam.fit(X, y, k=[10, 15])  # That's it!
+gam = Gam(family="gaussian").fit(X, y)
 
-print(f"Lambda values: {result['lambda']}")
-print(f"Deviance: {result['deviance']}")
-
-# Make predictions
-X_test = np.random.uniform(0, 1, (100, 2))
-predictions = gam.predict(X_test)
+gam.predict(X[:5])                  # response-scale predictions
+mean, lo, hi = gam.predict_ci(X[:5])  # 95% CI, response scale
+gam.score(X, y)                     # adjusted R²
+print(gam.summary())                # mgcv-style block
 ```
 
-**Performance**: 1.5x - 65x faster than R's mgcv (problem-dependent)
+That's it for the simple case. Read on for the curated tour, or jump
+to [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) for a
+step-by-step tutorial with worked examples.
 
-See `API_SIMPLIFICATION.md` for more details on the simplified Python API.
+---
 
-### Rust
+## Tour
 
-```rust
-use mgcv_rust::{GAM, Family, SmoothTerm, OptimizationMethod};
-use ndarray::{Array1, Array2};
+### 1. Build the model
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate data: y = sin(2πx) + noise
-    let n = 100;
-    let x_data: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
-    let y_data: Vec<f64> = x_data
-        .iter()
-        .map(|&xi| (2.0 * std::f64::consts::PI * xi).sin() + noise())
-        .collect();
+`Gam()` accepts pandas / polars / numpy. If you pass a `DataFrame`, the column names become the predictor names; otherwise you can pass them explicitly.
 
-    let x = Array1::from_vec(x_data);
-    let y = Array1::from_vec(y_data);
-    let x_matrix = x.into_shape((n, 1))?;
-
-    // Create GAM with cubic spline smooth
-    let mut gam = GAM::new(Family::Gaussian);
-    let smooth = SmoothTerm::cubic_spline("x".to_string(), 20, 0.0, 1.0)?;
-    gam.add_smooth(smooth);
-
-    // Fit with REML smoothing parameter selection
-    gam.fit(
-        &x_matrix,
-        &y,
-        OptimizationMethod::REML,
-        5,    // max outer iterations
-        50,   // max inner iterations (PiRLS)
-        1e-4  // convergence tolerance
-    )?;
-
-    // Make predictions
-    let predictions = gam.predict(&x_test)?;
-
-    Ok(())
-}
+```python
+gam = Gam(
+    family="gaussian",           # gaussian, binomial, poisson, gamma, tweedie, nb, t-dist, scat, ...
+    link=None,                   # None → canonical link for the family
+    k_default=10,                # default basis dimension per smooth (mgcv default)
+    term_k_mapping={"x0": 25},   # per-predictor overrides
+    method="REML",
+)
+gam.fit(X, y)
 ```
 
-## Architecture
+After `fit`, sklearn-style attributes are populated:
 
-### Core Components
-
-1. **`basis.rs`**: Basis function implementations
-   - `CubicSpline`: Cubic B-spline basis with configurable knots
-   - `ThinPlateSpline`: Radial basis functions for smooth regression
-
-2. **`penalty.rs`**: Penalty matrix construction
-   - Second derivative penalties for smoothness
-   - Supports multiple penalty types per basis
-
-3. **`pirls.rs`**: Penalized IRLS fitting algorithm
-   - Implements PiRLS for GLMs with penalties
-   - Supports all standard GLM families
-   - Automatic weight computation and convergence checking
-
-4. **`reml.rs`**: Smoothing parameter selection
-   - REML criterion for optimal smoothing
-   - GCV criterion as alternative
-   - Log-determinant computations
-
-5. **`smooth.rs`**: Smoothing parameter optimization
-   - Coordinate descent optimization
-   - Grid search for initialization
-   - Works in log-space for numerical stability
-
-6. **`gam.rs`**: Main GAM model interface
-   - Combines all components
-   - Handles multiple smooth terms
-   - Outer loop for lambda optimization
-
-7. **`linalg.rs`**: Linear algebra operations
-   - Gaussian elimination with partial pivoting
-   - Matrix inversion via Gauss-Jordan
-   - Determinant computation via LU decomposition
-
-## Mathematical Background
-
-### GAM Model
-
-```
-g(E[Y]) = β₀ + f₁(x₁) + f₂(x₂) + ... + fₚ(xₚ)
+```python
+gam.coef_              # full β vector (intercept first)
+gam.intercept_         # link-scale
+gam.intercept_response_ # response-scale (= mean(y) for identity link)
+gam.feature_names_in_  # predictor names, fitting order
+gam.n_features_in_
+gam.lambda_            # per-smooth smoothing parameter
+gam.edf_               # per-smooth effective degrees of freedom
+gam.k_, gam.bs_        # basis dimension / basis type per smooth
+gam.vcov_              # posterior covariance of β̂
 ```
 
-Where:
-- `g()` is the link function
-- `fᵢ()` are smooth functions represented by basis expansions
-- Each smooth is penalized by `λᵢ ∫ (f''ᵢ(x))² dx`
+### 2. Predict on different scales
 
-### PiRLS Algorithm
+```python
+gam.predict(X)                       # response (default — same as mgcv predict(type="response"))
+gam.predict(X, scale="link")         # linear predictor, no inverse link (mgcv type="link")
 
-1. Initialize: η = g(y)
-2. Until convergence:
-   - Compute μ = g⁻¹(η)
-   - Compute weights: w = (g'(μ))² / V(μ)
-   - Compute working response: z = η + (y - μ) / g'(μ)
-   - Solve: β = (X'WX + λS)⁻¹ X'Wz
-   - Update: η = Xβ
-
-### REML Criterion
-
-```
-REML(λ) = n·log(RSS) + log|X'WX + λS| - log|S|
+result = gam.predict(X, type="terms")  # decomposition
+result.intercept                       # scalar, link scale
+result.contributions                   # DataFrame (n × m_smooths), link-scale, centered on training
+result.total                           # response-scale ≡ gam.predict(X)
 ```
 
-Minimized with respect to λ to select optimal smoothing parameters.
+Invariant: `gam.predict(X) == inv_link(intercept + result.contributions.sum(axis=1))`.
 
-## Examples
+### 3. Confidence intervals
 
-See `examples/simple_gam.rs` for a complete working example:
+```python
+mean, lo, hi = gam.predict_ci(X, level=0.95)       # response, 95% CI
+mean, lo, hi = gam.predict_ci(X, scale="link")     # link-scale CI
+mean, lo, hi = gam.predict_ci(X, level=0.5)        # 50% CI (narrower)
+```
+
+`mean` matches `gam.predict(X, scale=scale)` exactly. The CI is built from `n_samples` (default 1000) draws of `β ~ N(β̂, vcov)`.
+
+The legacy `predict_ci(X, alpha=0.05) → (lo, hi)` form still works (emits a `DeprecationWarning`) so existing callers don't break.
+
+### 4. Differences between predictions, with paired CI
+
+```python
+# Per-row diff: to[i] - from[i]
+diff = gam.predict_diff(from_X, to_X)
+
+# With paired posterior CI — much narrower than predict_ci differences
+diff, lo, hi = gam.predict_diff(from_X, to_X, level=0.95)
+
+# One row broadcast against many
+diff = gam.predict_diff(baseline_row, candidates, broadcast="from")
+diff = gam.predict_diff(candidates, target_row, broadcast="to")
+```
+
+Identity-link only — for non-identity links the response-scale difference isn't linear in β, so the closed-form CI argument doesn't transfer.
+
+### 5. Subset / marginal views
+
+`gam[name]` returns a view that includes only the listed smooths (and optionally the intercept). All predict methods inherit it.
+
+```python
+gam[["x0"]].predict(X)                              # marginal effect of x0, response scale
+gam[["x0"]].predict(X, scale="deviation")           # link-scale, intercept zeroed (sum-to-zero on train)
+gam[["x0", Gam.INTERCEPT]].predict(X)               # marginal effect + intercept
+gam[["x0"]].partial_effect("x0").plot()             # what the smooth looks like
+```
+
+All sklearn attributes filter to the active features:
+
+```python
+gam[["x0"]].coef_            # just the x0 block (+ intercept if active)
+gam[["x0"]].feature_names_in_  # ["x0"]
+```
+
+### 6. Plotting, summary, score
+
+```python
+gam.plot()                  # figure with one subplot per smooth (CI bands shaded)
+gam.plot("x0")              # single-smooth axes
+df = gam.partial_effect("x0", level=0.95)  # underlying data: columns x0, effect, lo, hi
+
+print(gam.summary())
+# Gam summary  family=gaussian  link=identity  n_obs=500
+#   intercept (link)     = -0.0123
+#   intercept (response) = -0.0123
+#   scale (σ²)           = 0.0101
+#   deviance             = 4.8732
+#   R² (adj)             = 0.9612
+#   smooths:
+#     s(          x0)  k= 10  edf=  6.13  λ=2.345e-02
+#     s(          x1)  k= 10  edf=  3.07  λ=4.890e-01
+
+gam.score(X, y)              # adjusted R² for regression; accuracy@0.5 for binomial
+gam.predict_proba(X)         # binomial only: (n, 2) [[P(0), P(1)]]
+```
+
+### 7. Serving with `GamPredictor`
+
+For deployment paths, wrap the fitted `Gam` in a `GamPredictor`. Same API surface, plus strict column validation and a round-trip assertion.
+
+```python
+from mgcv_rust import GamPredictor
+
+predictor = GamPredictor(gam)
+predictor.check_against(gam, X[:50])   # raises if predictions diverge
+predictor.predict(X_serve)             # ValueError if any expected column is missing
+predictor[["x0"]].predict(X_serve)     # subset view returns another GamPredictor
+
+# `__slots__` blocks attribute leaks — once built, the bound Gam's
+# coef/vcov/schema are the contract.
+```
+
+This structurally closes two production bug classes:
+
+- **Column index drift** when the serving DataFrame's columns differ from training: `feature_names_in_` is enforced on every `predict` call (re-ordered → realigned; missing → `ValueError`).
+- **x-grid clamping** in interpolation-based predictors: `GamPredictor` recomputes the basis at the requested X via `evaluate_lpmatrix`, so there's no pre-computed grid to clamp against.
+
+## Families and links
+
+| Family | Default link | Other links | Notes |
+|---|---|---|---|
+| `gaussian` | identity | — | bs-spline / cubic-regression / random-effects bases supported |
+| `binomial` | logit | — | `predict_proba()` available |
+| `poisson` | log | — | |
+| `gamma` | inverse | `log` | log-link via `link="log"` |
+| `tweedie` | log | — | `tweedie_p=` (default 1.5); fixed-p |
+| `nb` / `negbin` | log | — | `nb` profiles θ; `negbin` is fixed-θ |
+| `t-dist` / `scat` | identity | — | df profiled if not given (`df ∈ [2, 100]`) |
+| `quasipoisson`, `quasibinomial` | log / logit | — | dispersion-aware |
+| `quantile` | identity | — | see `mgcv_rust.fit_quantile` / `fit_quantile_lss` |
+
+## Architecture (Rust side)
+
+| File | Responsibility |
+|---|---|
+| `src/gam.rs` | `GAM` struct + `fit` / `predict` entry points |
+| `src/pirls.rs` | Penalized IRLS inner loop |
+| `src/reml/` | Outer-loop REML / LAML optimization |
+| `src/smooth.rs` | Basis functions (cubic-regression, B-spline, random effects, tensor products) |
+| `src/penalty.rs` | Penalty-matrix construction |
+| `src/lib.rs` | PyO3 bindings — `PyGAM`, `compute_penalty_matrix`, `newton_pirls_py` |
+
+Build features:
+- `python` — enable PyO3 bindings.
+- `blas` / `blas-system` — link against system BLAS for matmul-heavy paths.
+
+## Parity and performance
+
+Run the parity battery against R/`mgcv`:
 
 ```bash
-cargo run --example simple_gam --release
+pytest tests/parity/ -q
+# 554 passed, 0 failed, 0 xfailed, 0 skipped
 ```
 
-## Project Structure
-
-```
-├── src/                    # Core Rust library code
-├── examples/               # Rust usage examples
-├── benches/               # Rust benchmarks
-├── tests/                 # Rust tests
-├── scripts/               # Testing and benchmarking scripts
-│   ├── python/            # Python scripts
-│   │   ├── tests/         # Python test scripts
-│   │   └── benchmarks/    # Python benchmark scripts
-│   └── r/                 # R scripts
-│       ├── tests/         # R test scripts
-│       └── benchmarks/    # R benchmark scripts
-├── docs/                  # Documentation and analysis
-└── test_data/            # Test data and results
-```
-
-## Testing
-
-Run the Rust test suite:
+Microbench:
 
 ```bash
-cargo test
+python3 scripts/python/bench_step_blend.py 5
 ```
 
-All 20 tests should pass, covering:
-- Basis function evaluation
-- Penalty matrix construction
-- Linear algebra operations
-- REML/GCV criteria
-- PiRLS convergence
-- Full GAM fitting pipeline
+Headline (`2d_gaussian_additive_n50000_k15_cr`, identity link):
 
-Additional tests and benchmarks are available in the `scripts/` directory.
+| | Time |
+|---|---|
+| R `mgcv` | ~394 ms |
+| `mgcv_rust` 0.11.0 | **97 ms** |
 
-## Implementation Notes
+## Status and limitations
 
-- **TDD Approach**: Every feature was implemented with tests first
-- **No External Dependencies**: Custom linear algebra to avoid BLAS/LAPACK issues
-- **Numerical Stability**: Operations performed in log-space where appropriate
-- **Extensible Design**: Easy to add new basis types, families, or criteria
-
-## Limitations & Future Work
-
-- Smoothing parameter optimization could be improved with better algorithms (e.g., Newton-Raphson)
-- Eigendecomposition for handling penalty null spaces more rigorously
-- Confidence intervals and standard errors
-- Model diagnostics and residual analysis
-- Tensor product smooths for multivariate terms
-- Parallel processing for large datasets
+- Joint `(ρ, log φ)` outer Newton not yet implemented — the binding constraint for closing the remaining performance gap on dispersion-bearing GLMs. Tracked in `mgcv_rust - Backlog - Next Numerical Steps` (Obsidian).
+- `predict_diff` is identity-link only; non-identity raises with a workaround pointing at `get_posterior_samples`.
+- Auto-`k` tuning is wired up but most users should set `term_k_mapping` explicitly.
+- sklearn `BaseEstimator` mixin (for `Pipeline` / `GridSearchCV`) is not yet wrapped — soft-dep, deferred.
 
 ## References
 
-- Wood, S.N. (2017). Generalized Additive Models: An Introduction with R (2nd ed.). Chapman and Hall/CRC.
-- Wood, S.N. (2011). Fast stable restricted maximum likelihood and marginal likelihood estimation of semiparametric generalized linear models. JRSS-B, 73(1), 3-36.
+- Wood, S.N. (2017). *Generalized Additive Models: An Introduction with R* (2nd ed.). Chapman and Hall/CRC.
+- Wood, S.N. (2011). Fast stable restricted maximum likelihood and marginal likelihood estimation of semiparametric generalized linear models. *J. R. Stat. Soc. B*, 73(1), 3–36.
 
 ## License
 
-MIT License - see LICENSE file for details
-
-## Author
-
-Implemented as a Rust port of R's mgcv package core functionality.
-
-## Update: REML Implementation Fixed! ✅
-
-**You were absolutely right** - the REML implementation had bugs that caused it to always select λ ≈ 0.
-
-### What Was Wrong
-
-1. **Singular Penalty Handling**: REML was incorrectly handling rank-deficient penalty matrices, setting `log|S| = 0` which broke the criterion
-2. **Lambda Passing**: Optimization was passing `λ = 1.0` with pre-multiplied penalties, confusing the `rank(S)*log(λ)` term
-3. **Insufficient Data**: Examples used n=30 with p=15 (ratio 2:1), which is too small for REML/GCV
-
-### What Was Fixed
-
-1. **REML Criterion**: Now correctly uses `log|λS| = rank(S)*log(λ) + constant`
-2. **Optimization**: Passes actual λ values to criterion functions
-3. **Data Size**: Increased to n=300 for proper n/p ratio (20:1)
-4. **REML Search**: Uses fine grid search (gradient descent had issues)
-
-### Current Performance (n=300)
-
-```
-GCV:  λ = 0.067, Test RMSE = 0.480  ✅
-REML: λ = 0.058, Test RMSE = 0.480  ✅
-```
-
-Both methods now select nearly optimal smoothing parameters!
-
-See `IMPLEMENTATION_SUMMARY.md` for complete details.
+MIT — see `LICENSE`.
