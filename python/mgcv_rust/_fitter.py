@@ -1014,6 +1014,122 @@ class Gam:
         mean = self.predict(X_arr, scale=scale)
         return mean, lo, hi
 
+    def predict_diff(
+        self,
+        from_X: ArrayLike,
+        to_X: ArrayLike,
+        level: Optional[float] = None,
+        broadcast: str = "none",
+        n_samples: int = 1000,
+        seed: int = 42,
+    ) -> Union[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Difference of predictions ``to.predict - from.predict``.
+
+        For identity-link models, this is the closed-form
+        ``(lp_to - lp_from) @ β̂``. The same paired posterior draw is used
+        for the optional confidence interval, which makes the CI strictly
+        narrower than the naive difference of two independent
+        ``predict_ci`` calls because the (correlated) coefficient
+        uncertainty cancels.
+
+        Args:
+            from_X: baseline features.
+            to_X: target features.
+            level: if ``None`` (default) return the diff alone as a 1-D
+                ndarray. If a float in ``(0, 1)``, also compute the
+                two-sided ``(diff, lo, hi)`` interval at that level via
+                paired posterior sampling.
+            broadcast: how to align ``from_X`` and ``to_X`` —
+                ``"none"`` (default): both must have the same number of
+                  rows; the diff is paired row-wise.
+                ``"from"``: ``from_X`` is a single-row baseline broadcast
+                  against ``to_X``'s rows. Use this for "what's the
+                  effect of changing each row to the same baseline."
+                ``"to"``: mirror of ``"from"``.
+            n_samples: posterior draws when ``level`` is given.
+            seed: RNG seed for posterior draws.
+
+        Returns:
+            - ``ndarray`` of shape ``(n_diff,)`` if ``level is None``.
+            - ``(diff, lo, hi)`` of three ``(n_diff,)`` ndarrays otherwise.
+
+        Raises:
+            NotImplementedError: if the model's link is not identity.
+                The difference of predictions on the response scale is
+                not linear in β for non-identity links, so the
+                closed-form posterior argument doesn't hold. As a
+                workaround, sample ``coef`` posterior via
+                :meth:`get_posterior_samples` at ``to_X`` and ``from_X``
+                separately and compute the response-scale difference per
+                draw.
+            ValueError: if ``broadcast`` is not one of the listed values,
+                or the row counts don't match the broadcast contract.
+        """
+        self._require_fitted()
+        if (self.link or "identity").lower() not in ("identity", ""):
+            raise NotImplementedError(
+                f"predict_diff is only implemented for identity-link models "
+                f"(this model uses link={self.link!r}). For non-identity "
+                "links, sample posteriors at to_X and from_X via "
+                "get_posterior_samples() and take the response-scale "
+                "difference per draw."
+            )
+        if broadcast not in ("none", "from", "to"):
+            raise ValueError(
+                f"broadcast must be 'none', 'from', or 'to', got {broadcast!r}"
+            )
+
+        from_arr, _ = _to_numpy_with_columns(from_X, self._effective_predictors)
+        to_arr, _ = _to_numpy_with_columns(to_X, self._effective_predictors)
+
+        if broadcast == "none":
+            if from_arr.shape[0] != to_arr.shape[0]:
+                raise ValueError(
+                    f"broadcast='none' requires equal row counts, got "
+                    f"from_X={from_arr.shape[0]} rows and to_X={to_arr.shape[0]} rows"
+                )
+        elif broadcast == "from":
+            if from_arr.shape[0] != 1:
+                raise ValueError(
+                    f"broadcast='from' requires from_X to have exactly 1 row, "
+                    f"got {from_arr.shape[0]}"
+                )
+        else:  # "to"
+            if to_arr.shape[0] != 1:
+                raise ValueError(
+                    f"broadcast='to' requires to_X to have exactly 1 row, "
+                    f"got {to_arr.shape[0]}"
+                )
+
+        lp_from = np.asarray(self._native.evaluate_lpmatrix(from_arr), dtype=float)
+        lp_to = np.asarray(self._native.evaluate_lpmatrix(to_arr), dtype=float)
+
+        if getattr(self, "_subset_mask", None) is not None:
+            lp_from = self._apply_subset_mask(lp_from)
+            lp_to = self._apply_subset_mask(lp_to)
+
+        # Difference design matrix — numpy broadcasts (1, p) against (n, p)
+        # so the same code handles all three broadcast modes.
+        delta = lp_to - lp_from  # (n_diff, p_total)
+
+        coef = np.asarray(self._native.get_coefficients(), dtype=float)
+        diff = delta @ coef  # (n_diff,)
+
+        if level is None:
+            return diff
+
+        if not 0.0 < level < 1.0:
+            raise ValueError(f"level must be in (0, 1), got {level}")
+        alpha = 1.0 - float(level)
+        vcov = np.asarray(self._native.get_vcov(), dtype=float)
+        rng = np.random.default_rng(seed)
+        coef_samples = rng.multivariate_normal(coef, vcov, n_samples)
+        diff_samples = delta @ coef_samples.T  # (n_diff, n_samples)
+        lo, hi = np.quantile(
+            diff_samples, [alpha / 2.0, 1.0 - alpha / 2.0], axis=1
+        )
+        return diff, lo, hi
+
     def get_edf_df(self) -> Any:
         """Per-smooth EDF table. Returns a pandas DataFrame with columns
         [predictor, k, edf, ratio] where ratio = edf / (k - 1).
