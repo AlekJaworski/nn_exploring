@@ -884,44 +884,135 @@ class Gam:
         # lp: (n_x, p), coef_samples: (n_samples, p) — return (n_x, n_samples)
         return lp @ coef_samples.T
 
+    def _posterior_eta_samples(
+        self,
+        X_arr: np.ndarray,
+        n_samples: int,
+        seed: int,
+        deviation: bool = False,
+    ) -> np.ndarray:
+        """Posterior samples of the **link-scale** linear predictor at X.
+
+        Returns an ``(n_x, n_samples)`` ndarray. Honours the subset mask
+        (if any) and, when ``deviation=True``, additionally zeroes the
+        intercept column so the resulting samples are centered around 0.
+
+        Sampling is from a multivariate normal ``β ~ N(β̂, vcov)`` — the
+        Bayesian posterior under the REML/Laplace approximation (Wood 2011).
+        Coefficients and ``vcov`` are taken **unfiltered** from the native
+        fit; subset/deviation filtering is applied to the design columns
+        so the resulting linear-predictor samples respect the mask.
+        """
+        coef = np.asarray(self._native.get_coefficients(), dtype=float)
+        vcov = np.asarray(self._native.get_vcov(), dtype=float)
+        lp = np.asarray(self._native.evaluate_lpmatrix(X_arr), dtype=float)
+
+        if getattr(self, "_subset_mask", None) is not None:
+            lp = self._apply_subset_mask(lp)
+        if deviation:
+            lp = lp.copy()
+            lp[:, 0] = 0.0
+
+        rng = np.random.default_rng(seed)
+        coef_samples = rng.multivariate_normal(coef, vcov, n_samples)
+        return lp @ coef_samples.T
+
     def predict_ci(
         self,
         X: ArrayLike,
-        alpha: float = 0.05,
+        alpha: Optional[float] = None,
         n_samples: int = 1000,
         predictor: Optional[str] = None,
         seed: int = 42,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        *,
+        level: float = 0.95,
+        scale: str = "response",
+    ) -> tuple[np.ndarray, ...]:
         """Pointwise confidence interval for predictions at the given X.
 
-        Returns `(lower, upper)` as 1-D arrays. Computed via posterior
-        sampling (matches `r_fitting.GamFitter.predict_ci`): draws
-        `n_samples` β-vectors from the multivariate normal posterior,
-        evaluates the linear predictor at X, takes the alpha/2 and
-        1-alpha/2 quantiles, then applies the inverse link.
+        **New API (default)** — returns ``(mean, lo, hi)`` as three 1-D
+        arrays on the requested ``scale`` (default response):
 
-        For non-canonical / non-identity links, the returned interval is
-        on the response scale.
+            mean, lo, hi = gam.predict_ci(X)
+
+        - ``mean`` matches ``gam.predict(X, scale=scale)`` exactly, so
+          the caller never has to "fix the intercept" by hand.
+        - ``lo``/``hi`` are the symmetric two-sided interval at
+          ``level`` (default 0.95 → 2.5%/97.5% quantiles).
+
+        ``scale`` values:
+            - ``"response"`` (default): inv-linked, comparable to ``predict()``.
+            - ``"link"``: linear-predictor scale, no inverse link.
+            - ``"deviation"``: subset-views only — link scale with the
+              intercept also zeroed.
+
+        **Deprecated old API** — passing ``alpha=`` emits a
+        :class:`DeprecationWarning` and returns the legacy 2-tuple
+        ``(lo, hi)`` on the response scale, with no ``mean`` and no
+        intercept correction. Migrate to ``level=1-alpha`` and unpack
+        three values.
+
+        Computed via posterior sampling: draws ``n_samples`` β-vectors
+        from the multivariate normal posterior ``N(β̂, vcov)``, evaluates
+        the linear predictor at X, takes the symmetric quantiles, then
+        applies the inverse link (when ``scale="response"``).
         """
-        post = self.get_posterior_samples(
-            X, predictor=predictor, n_samples=n_samples, seed=seed
+        self._require_fitted()
+
+        if scale not in ("response", "link", "deviation"):
+            raise ValueError(
+                f"scale must be 'response', 'link', or 'deviation', got {scale!r}"
+            )
+        is_subset = getattr(self, "_subset_mask", None) is not None
+        if scale == "deviation" and not is_subset:
+            raise ValueError(
+                "scale='deviation' is only meaningful on subset views; "
+                "use scale='link' instead"
+            )
+
+        deprecated = alpha is not None
+        if deprecated:
+            import warnings
+
+            warnings.warn(
+                "predict_ci(alpha=...) is deprecated; use predict_ci(level=1-alpha) "
+                "and unpack the new (mean, lo, hi) return. The alpha= form will be "
+                "removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            effective_alpha = float(alpha)
+        else:
+            if not 0.0 < level < 1.0:
+                raise ValueError(f"level must be in (0, 1), got {level}")
+            effective_alpha = 1.0 - float(level)
+
+        X_arr, _ = _to_numpy_with_columns(X, self._effective_predictors)
+
+        eta_samples = self._posterior_eta_samples(
+            X_arr,
+            n_samples=n_samples,
+            seed=seed,
+            deviation=(scale == "deviation"),
         )
-        lo, hi = np.quantile(post, [alpha / 2, 1 - alpha / 2], axis=1)
-        # Apply inverse link on the response scale.
-        link = (self.link or "identity").lower()
-        if link in ("identity", ""):
+        lo_eta, hi_eta = np.quantile(
+            eta_samples,
+            [effective_alpha / 2.0, 1.0 - effective_alpha / 2.0],
+            axis=1,
+        )
+
+        if scale == "response":
+            lo = np.asarray(self._inv_link(lo_eta), dtype=float)
+            hi = np.asarray(self._inv_link(hi_eta), dtype=float)
+        else:
+            lo = lo_eta
+            hi = hi_eta
+
+        if deprecated:
             return lo, hi
-        if link == "log":
-            return np.exp(lo), np.exp(hi)
-        if link == "logit":
-            return 1.0 / (1.0 + np.exp(-lo)), 1.0 / (1.0 + np.exp(-hi))
-        if link == "inverse":
-            # Avoid division by zero — clamp to tiny epsilon (matches
-            # what the Rust inverse_link does for Gamma).
-            lo_safe = np.where(np.abs(lo) < 1e-10, np.sign(lo) * 1e-10 + 1e-15, lo)
-            hi_safe = np.where(np.abs(hi) < 1e-10, np.sign(hi) * 1e-10 + 1e-15, hi)
-            return 1.0 / lo_safe, 1.0 / hi_safe
-        raise NotImplementedError(f"predict_ci does not yet support link={link!r}")
+
+        mean = self.predict(X_arr, scale=scale)
+        return mean, lo, hi
 
     def get_edf_df(self) -> Any:
         """Per-smooth EDF table. Returns a pandas DataFrame with columns
