@@ -44,6 +44,29 @@ except ImportError:  # pragma: no cover - import-time
 ArrayLike = Union[np.ndarray, "pd.DataFrame", "pl.DataFrame"]
 
 
+# Canonical link per family — used to resolve `link=None` at construction
+# time. Matches mgcv's defaults (gam.fit3.r / glm-family defaults) and
+# the bench_step_blend.py table used in the parity battery.
+_CANONICAL_LINK: dict[str, str] = {
+    "gaussian": "identity",
+    "binomial": "logit",
+    "poisson": "log",
+    "gamma": "inverse",
+    "Gamma": "inverse",
+    "inverse.gaussian": "log",  # mgcv's invgauss-log parity path
+    "tweedie": "log",
+    "Tweedie": "log",
+    "tw": "log",
+    "negbin": "log",
+    "negative.binomial": "log",
+    "nb": "log",
+    "quasipoisson": "log",
+    "quasibinomial": "logit",
+    "t-dist": "identity",  # scat family
+    "scat": "identity",
+}
+
+
 # ---------------------------------------------------------------------- #
 # Helpers                                                                #
 # ---------------------------------------------------------------------- #
@@ -183,14 +206,14 @@ class Gam:
         predictors: Optional[Sequence[str]] = None,
         target: Optional[str] = None,
         min_k: int = 3,
-        k_default: int = 4,
+        k_default: int = 10,
         edf_cutoff: int = 2,
         knots_increase_ratio: float = 1.5,
         min_points_to_save: int = 100,
         max_points_to_save: int = 1000,
         method: str = "REML",
         family: str = "gaussian",
-        link: str = "identity",
+        link: Optional[str] = None,
         df: Optional[float] = None,
         tweedie_p: Optional[float] = None,
         negbin_theta: Optional[float] = None,
@@ -213,7 +236,9 @@ class Gam:
         self.negbin_theta = negbin_theta  # dispersion for NegBin family (None = profile via nb())
         self.method = method
         self.family = family
-        self.link = link
+        # link=None resolves to the canonical link per family at fit time.
+        # Existing callers passing link="identity" / "logit" / etc. keep working.
+        self.link = link if link is not None else _CANONICAL_LINK.get(family, "identity")
         # Validate df for t-dist family at construction time (not just at fit)
         if df is not None and family == "t-dist":
             if df < 2.0:
