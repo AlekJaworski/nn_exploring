@@ -1200,7 +1200,7 @@ pub fn fit_pirls(
     max_iter: usize,
     tolerance: f64,
 ) -> Result<PiRLSResult> {
-    fit_pirls_cached(y, x, lambda, penalties, family, max_iter, tolerance, None)
+    fit_pirls_cached(y, x, lambda, penalties, family, max_iter, tolerance, None, None)
 }
 
 /// Fit a GAM using PiRLS algorithm with optional cached X'X matrix
@@ -1219,6 +1219,7 @@ pub fn fit_pirls_cached(
     max_iter: usize,
     tolerance: f64,
     cached_xtx: Option<&Array2<f64>>,
+    prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
     let n = y.len();
     let p = x.ncols();
@@ -1237,10 +1238,20 @@ pub fn fit_pirls_cached(
         ));
     }
 
+    if let Some(pw) = prior_weights {
+        if pw.len() != n {
+            return Err(GAMError::DimensionMismatch(format!(
+                "prior_weights length ({}) must match y length ({})",
+                pw.len(),
+                n
+            )));
+        }
+    }
+
     // Fast path for Gaussian family: weights are constant (w=1), z=y on first iteration,
     // and PiRLS converges in exactly 1 step. Skip all the IRLS machinery.
     if matches!(family, Family::Gaussian) {
-        return fit_pirls_gaussian_fast(y, x, lambda, penalties, p, cached_xtx);
+        return fit_pirls_gaussian_fast(y, x, lambda, penalties, p, cached_xtx, prior_weights);
     }
 
     // General IRLS path for non-Gaussian families
@@ -1285,7 +1296,15 @@ pub fn fit_pirls_cached(
 
         let working = standard_glm_working_quantities(y, &eta, family, false);
         let z = working.z;
-        let w = working.w;
+        // Combine GLM IRLS working weights with prior weights (mgcv's
+        // `weights=` semantics: prior_w is an exposure / replication
+        // count multiplier on the log-likelihood, so it multiplies the
+        // working weight everywhere). For unweighted fits, prior_w is
+        // None and `w` stays unchanged.
+        let w: Array1<f64> = match prior_weights {
+            Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
+            None => working.w,
+        };
 
         // X'WX using BLAS (instead of manual triple-nested loop)
         let xtwx = compute_xtwx(x, &w);
@@ -1331,19 +1350,28 @@ pub fn fit_pirls_cached(
     // Compute final fitted values
     let fitted_values: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
 
-    // Compute deviance
-    let deviance = compute_deviance(y, &fitted_values, family);
+    // Compute deviance — weighted by prior_weights when supplied (mgcv
+    // convention: D_w = Σ w_i · d_i where d_i is the per-obs deviance).
+    let deviance = match prior_weights {
+        Some(pw) => compute_weighted_deviance(y, &fitted_values, family, pw),
+        None => compute_deviance(y, &fitted_values, family),
+    };
 
     // Preserve the historical final scoring contract: outer REML callbacks
     // consume Fisher working quantities at the converged η, even if the inner
-    // dense PIRLS iterations used Newton alpha correction.
+    // dense PIRLS iterations used Newton alpha correction. Multiply by prior
+    // weights so the outer REML score sees the right XᵀWX.
     let working = standard_glm_working_quantities(y, &eta, family, true);
+    let final_w: Array1<f64> = match prior_weights {
+        Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
+        None => working.w,
+    };
 
     Ok(PiRLSResult {
         coefficients: beta,
         fitted_values,
         linear_predictor: eta,
-        weights: working.w,
+        weights: final_w,
         working_response: working.z,
         deviance,
         iterations: iter,
@@ -1368,25 +1396,32 @@ fn fit_pirls_gaussian_fast(
     penalties: &[BlockPenalty],
     p: usize,
     cached_xtx: Option<&Array2<f64>>,
+    prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
     let n = y.len();
 
-    // X'X: use cached version or compute via BLAS
-    let xtx = if let Some(cached) = cached_xtx {
-        cached.clone()
-    } else {
-        // For Gaussian, w=1, so X'WX = X'X. Use BLAS: X' * X
-        x.t().dot(x)
+    // X'WX: with prior weights `w`, the weighted normal equations are
+    //   (XᵀWX + λS) β = XᵀWy ,    W = diag(w).
+    // Without prior weights, W = I and we can reuse the cached XᵀX.
+    let xtwx = match prior_weights {
+        None => {
+            if let Some(cached) = cached_xtx {
+                cached.clone()
+            } else {
+                x.t().dot(x)
+            }
+        }
+        Some(w) => compute_xtwx(x, w),
     };
 
     // Compute max diagonal for ridge scaling
     let mut max_diag: f64 = 1.0;
     for i in 0..p {
-        max_diag = max_diag.max(xtx[[i, i]].abs());
+        max_diag = max_diag.max(xtwx[[i, i]].abs());
     }
 
-    // Build (X'X + Σλ_jS_j + ridge*I)
-    let mut a = xtx;
+    // Build (X'WX + Σλ_jS_j + ridge*I)
+    let mut a = xtwx;
     for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
         // a += lambda_j * penalty_j (only touches k×k block)
         penalty_j.scaled_add_to(&mut a, *lambda_j);
@@ -1407,11 +1442,17 @@ fn fit_pirls_gaussian_fast(
         a[[i, i]] += ridge;
     }
 
-    // X'y using BLAS
-    let xty = x.t().dot(y);
+    // X'Wy using BLAS (or X'y when unweighted)
+    let xtwy = match prior_weights {
+        None => x.t().dot(y),
+        Some(w) => {
+            let wy: Array1<f64> = w.iter().zip(y.iter()).map(|(&wi, &yi)| wi * yi).collect();
+            x.t().dot(&wy)
+        }
+    };
 
-    // Solve for coefficients: β = A^{-1} X'y
-    let beta = solve(a, xty)?;
+    // Solve for coefficients: β = A^{-1} X'Wy
+    let beta = solve(a, xtwy)?;
 
     // eta = X*β
     let eta = x.dot(&beta);
@@ -1419,15 +1460,30 @@ fn fit_pirls_gaussian_fast(
     // For Gaussian, fitted_values = eta (identity link)
     let fitted_values = eta.clone();
 
-    // Deviance = Σ(y_i - μ_i)²
-    let deviance: f64 = y
-        .iter()
-        .zip(fitted_values.iter())
-        .map(|(yi, fi)| (yi - fi).powi(2))
-        .sum();
+    // Deviance = Σ w_i (y_i - μ_i)²  (unweighted ⇒ w_i = 1)
+    let deviance: f64 = match prior_weights {
+        None => y
+            .iter()
+            .zip(fitted_values.iter())
+            .map(|(yi, fi)| (yi - fi).powi(2))
+            .sum(),
+        Some(w) => y
+            .iter()
+            .zip(fitted_values.iter())
+            .zip(w.iter())
+            .map(|((yi, fi), wi)| wi * (yi - fi).powi(2))
+            .sum(),
+    };
 
-    // Weights are all 1.0 for Gaussian
-    let weights = Array1::ones(n);
+    // PIRLS weights output:
+    //   - unweighted: all 1.0 (Gaussian IRLS weight).
+    //   - weighted:   prior weights, which are also the W in the converged
+    //     XᵀWX. The outer REML / vcov consumers multiply this with X' to
+    //     form X'WX, which is exactly what we want for the weighted fit.
+    let weights = match prior_weights {
+        None => Array1::ones(n),
+        Some(w) => w.clone(),
+    };
 
     Ok(PiRLSResult {
         coefficients: beta,
@@ -1542,6 +1598,33 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
     }
 
     deviance
+}
+
+/// Prior-weighted deviance: `D_w = Σ w_i · d_i(y_i, μ_i)`.
+///
+/// Mgcv treats `weights=` as a per-row multiplier on the contribution
+/// to the log-likelihood (equivalently to the deviance). This helper
+/// is the per-row product of `prior_weights` and the per-family per-
+/// observation deviance computed via `compute_deviance`'s per-row body.
+/// `prior_weights.len()` MUST equal `y.len()`; caller is expected to
+/// validate.
+pub fn compute_weighted_deviance(
+    y: &Array1<f64>,
+    mu: &Array1<f64>,
+    family: Family,
+    prior_weights: &Array1<f64>,
+) -> f64 {
+    let mut dev = 0.0;
+    // We re-use compute_deviance's per-row math by calling it on
+    // 1-element slices via a temporary — clearer than duplicating the
+    // family switch. Hot enough to inline if it ever shows up in a
+    // profile.
+    for i in 0..y.len() {
+        let yi = Array1::from(vec![y[i]]);
+        let mi = Array1::from(vec![mu[i]]);
+        dev += prior_weights[i] * compute_deviance(&yi, &mi, family);
+    }
+    dev
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2839,6 +2922,7 @@ pub fn fit_pirls_discretized(
     tolerance: f64,
     disc: &DiscretizedDesign,
     cached_xtx: Option<&Array2<f64>>,
+    prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
     let n = y.len();
     let p = x.ncols();
@@ -2849,9 +2933,19 @@ pub fn fit_pirls_discretized(
         ));
     }
 
+    if let Some(pw) = prior_weights {
+        if pw.len() != n {
+            return Err(GAMError::DimensionMismatch(format!(
+                "prior_weights length ({}) must match y length ({})",
+                pw.len(),
+                n
+            )));
+        }
+    }
+
     // Fast path for Gaussian family
     if matches!(family, Family::Gaussian) {
-        return fit_pirls_gaussian_discretized(y, x, lambda, penalties, p, disc, cached_xtx);
+        return fit_pirls_gaussian_discretized(y, x, lambda, penalties, p, disc, cached_xtx, prior_weights);
     }
 
     // General IRLS path for non-Gaussian families with discretized X'WX
@@ -2895,7 +2989,13 @@ pub fn fit_pirls_discretized(
 
         let working = standard_glm_working_quantities(y, &eta, family, true);
         let z = working.z;
-        let w = working.w;
+        // Combine GLM IRLS working weights with prior weights (see same
+        // logic in `fit_pirls_cached`). For unweighted fits, this
+        // collapses to `working.w` unchanged.
+        let w: Array1<f64> = match prior_weights {
+            Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
+            None => working.w,
+        };
 
         // X'WX via scatter-gather: O(n*k + m*k^2) instead of O(n*k^2)
         let xtwx = disc.compute_xtwx(&w);
@@ -2934,15 +3034,22 @@ pub fn fit_pirls_discretized(
     }
 
     let fitted_values: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
-    let deviance = compute_deviance(y, &fitted_values, family);
+    let deviance = match prior_weights {
+        Some(pw) => compute_weighted_deviance(y, &fitted_values, family, pw),
+        None => compute_deviance(y, &fitted_values, family),
+    };
 
     let working = standard_glm_working_quantities(y, &eta, family, true);
+    let final_w: Array1<f64> = match prior_weights {
+        Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
+        None => working.w,
+    };
 
     Ok(PiRLSResult {
         coefficients: beta,
         fitted_values,
         linear_predictor: eta,
-        weights: working.w,
+        weights: final_w,
         working_response: working.z,
         deviance,
         iterations: iter,
@@ -2963,22 +3070,29 @@ fn fit_pirls_gaussian_discretized(
     p: usize,
     disc: &DiscretizedDesign,
     cached_xtx: Option<&Array2<f64>>,
+    prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
     let n = y.len();
 
-    // X'X: use cached version or compute via scatter-gather
-    let xtx = if let Some(cached) = cached_xtx {
-        cached.clone()
-    } else {
-        disc.compute_xtx()
+    // X'WX: with W = diag(w) when prior weights are supplied, the
+    // cached X'X (built with W=I) can't be reused.
+    let xtwx = match prior_weights {
+        None => {
+            if let Some(cached) = cached_xtx {
+                cached.clone()
+            } else {
+                disc.compute_xtx()
+            }
+        }
+        Some(w) => disc.compute_xtwx(w),
     };
 
     let mut max_diag: f64 = 1.0;
     for i in 0..p {
-        max_diag = max_diag.max(xtx[[i, i]].abs());
+        max_diag = max_diag.max(xtwx[[i, i]].abs());
     }
 
-    let mut a = xtx;
+    let mut a = xtwx;
     for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
         penalty_j.scaled_add_to(&mut a, *lambda_j);
     }
@@ -2994,23 +3108,39 @@ fn fit_pirls_gaussian_discretized(
         a[[i, i]] += ridge;
     }
 
-    // X'y via scatter-gather
-    let ones = Array1::ones(n);
-    let xty = disc.compute_xtwy(&ones, y);
+    // X'Wy via scatter-gather (W=I when unweighted).
+    let xtwy = match prior_weights {
+        None => {
+            let ones = Array1::ones(n);
+            disc.compute_xtwy(&ones, y)
+        }
+        Some(w) => disc.compute_xtwy(w, y),
+    };
 
-    let beta = solve(a, xty)?;
+    let beta = solve(a, xtwy)?;
 
     // eta via compressed gather
     let eta = disc.compute_eta(&beta);
     let fitted_values = eta.clone();
 
-    let deviance: f64 = y
-        .iter()
-        .zip(fitted_values.iter())
-        .map(|(yi, fi)| (yi - fi).powi(2))
-        .sum();
+    let deviance: f64 = match prior_weights {
+        None => y
+            .iter()
+            .zip(fitted_values.iter())
+            .map(|(yi, fi)| (yi - fi).powi(2))
+            .sum(),
+        Some(w) => y
+            .iter()
+            .zip(fitted_values.iter())
+            .zip(w.iter())
+            .map(|((yi, fi), wi)| wi * (yi - fi).powi(2))
+            .sum(),
+    };
 
-    let weights = Array1::ones(n);
+    let weights = match prior_weights {
+        None => Array1::ones(n),
+        Some(w) => w.clone(),
+    };
 
     Ok(PiRLSResult {
         coefficients: beta,

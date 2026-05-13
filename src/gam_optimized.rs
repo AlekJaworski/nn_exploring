@@ -267,8 +267,9 @@ impl FitCache {
         max_iter: usize,
         tolerance: f64,
         cached_xtx: Option<&Array2<f64>>,
+        prior_weights: Option<&Array1<f64>>,
     ) -> Result<crate::pirls::PiRLSResult> {
-        self.run_pirls_with_options(y, lambda, family, max_iter, tolerance, cached_xtx, false)
+        self.run_pirls_with_options(y, lambda, family, max_iter, tolerance, cached_xtx, false, prior_weights)
     }
 
     /// Variant that lets the caller signal "the outer Newton drives σ²" for
@@ -286,6 +287,7 @@ impl FitCache {
         tolerance: f64,
         cached_xtx: Option<&Array2<f64>>,
         tdist_outer_sigma2: bool,
+        prior_weights: Option<&Array1<f64>>,
     ) -> Result<crate::pirls::PiRLSResult> {
         // t-dist family needs a specialised fitter. df sentinel: 0.0 ⟹
         // PIRLS profiles df via internal 1D Brent (auto-mode, the default
@@ -294,6 +296,14 @@ impl FitCache {
         // When `tdist_outer_sigma2` is true, σ² is also treated as fixed
         // (driven by the outer log σ² Newton block).
         if let crate::pirls::Family::TDist { df, sigma2 } = family {
+            if prior_weights.is_some() {
+                return Err(GAMError::OptimizationFailed(
+                    "weights= not yet supported for family='t-dist'; \
+                     supported families are: gaussian, binomial, poisson, \
+                     gamma, quasibinomial, quasipoisson"
+                        .to_string(),
+                ));
+            }
             let fixed_df = if df > 0.0 { Some(df) } else { None };
             let fixed_sigma2 = if tdist_outer_sigma2 {
                 Some(sigma2)
@@ -314,6 +324,14 @@ impl FitCache {
 
         // Quantile (qgam-style) needs a specialised IRLS using ELF weights.
         if let crate::pirls::Family::Quantile { tau, sigma } = family {
+            if prior_weights.is_some() {
+                return Err(GAMError::OptimizationFailed(
+                    "weights= not yet supported for family='quantile'; \
+                     supported families are: gaussian, binomial, poisson, \
+                     gamma, quasibinomial, quasipoisson"
+                        .to_string(),
+                ));
+            }
             return crate::pirls::fit_pirls_quantile(
                 y,
                 &self.design_matrix,
@@ -337,6 +355,7 @@ impl FitCache {
                 tolerance,
                 disc,
                 cached_xtx,
+                prior_weights,
             )
         } else {
             fit_pirls_cached(
@@ -348,6 +367,7 @@ impl FitCache {
                 max_iter,
                 tolerance,
                 cached_xtx,
+                prior_weights,
             )
         }
     }
@@ -457,6 +477,23 @@ impl GAM {
                 self.smooth_terms.len()
             )));
         }
+
+        // Snapshot per-row prior weights for this fit (mgcv's `weights=`
+        // arg). Cloned out once so the (possibly None) reference can be
+        // re-passed into every PIRLS callsite below — including the
+        // closures that borrow `cache` mutably, where re-reading
+        // `self.prior_weights` would conflict.
+        let prior_weights_owned: Option<Array1<f64>> = self.prior_weights.clone();
+        if let Some(ref pw) = prior_weights_owned {
+            if pw.len() != y.len() {
+                return Err(GAMError::DimensionMismatch(format!(
+                    "prior weights length ({}) must match y length ({})",
+                    pw.len(),
+                    y.len()
+                )));
+            }
+        }
+        let prior_weights_ref: Option<&Array1<f64>> = prior_weights_owned.as_ref();
 
         // mgcv_exact mode: signal PiRLS to use a tiny ridge (1e-12)
         // instead of the default 1e-5 * (1+sqrt(m)) * max_diag, which
@@ -656,8 +693,10 @@ impl GAM {
 
         // For Gaussian family, pre-compute X'X once and reuse for all PiRLS calls.
         // Gaussian has constant weights (w=1), so X'WX = X'X never changes.
+        // With prior weights, X'WX ≠ X'X (W = diag(prior)), so the cache
+        // doesn't apply — PIRLS recomputes X'WX on the fly per fit.
         let is_gaussian = matches!(self.family, crate::pirls::Family::Gaussian);
-        let cached_xtx = if is_gaussian {
+        let cached_xtx = if is_gaussian && prior_weights_ref.is_none() {
             Some(cache.get_xtx().clone())
         } else {
             None
@@ -691,6 +730,7 @@ impl GAM {
                 tolerance,
                 xtx_ref,
                 self.tdist_profile,
+                prior_weights_ref,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
@@ -772,6 +812,7 @@ impl GAM {
                         tol,
                         xtx_ref,
                         outer_sigma2_profile,
+                        prior_weights_ref,
                     )?;
                     callback_pirls_iters += res.iterations;
                     let xtwx = if let Some(ref disc) = cache_ref.discretized {
@@ -839,6 +880,7 @@ impl GAM {
                 tolerance,
                 xtx_ref,
                 self.tdist_profile,
+                prior_weights_ref,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -921,6 +963,7 @@ impl GAM {
                     max_inner_iter,
                     tolerance,
                     xtx_ref,
+                    prior_weights_ref,
                 )?;
                 total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -973,6 +1016,7 @@ impl GAM {
                         max_inner_iter,
                         tolerance,
                         xtx_ref,
+                        prior_weights_ref,
                     )?;
                     total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1018,6 +1062,7 @@ impl GAM {
                 max_inner_iter,
                 tolerance,
                 xtx_ref,
+                prior_weights_ref,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 

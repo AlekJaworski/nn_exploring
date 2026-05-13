@@ -350,6 +350,11 @@ class Gam:
         self._native: Optional[_NativeGAM] = None
         self.X: Optional[np.ndarray] = None
         self.y: Optional[np.ndarray] = None
+        # Per-row prior weights (mgcv's `weights=`). None ⇒ unit weights
+        # and the Rust fast path. Set inside `fit(...)` when the user
+        # passes `sample_weight=...`; carried through to `_single_fit`
+        # and `_auto_fit_k`.
+        self.sample_weight: Optional[np.ndarray] = None
         self.pc_map: dict[str, float] = {}
         self.prediction_range: Optional[dict[str, dict[str, float]]] = None
         self._effective_predictors: Optional[list[str]] = None
@@ -364,12 +369,21 @@ class Gam:
 
     # -------------------------- Fit / Predict ------------------------- #
 
-    def fit(self, X: ArrayLike, y: Any) -> "Gam":
+    def fit(self, X: ArrayLike, y: Any, sample_weight: Any = None) -> "Gam":
         """Fit the GAM. Mirrors `r_fitting.GamFitter.fit`.
 
         Accepts numpy / pandas / polars inputs. If a DataFrame is given,
         column names are matched against `self.predictors` (if set)
         before the fit.
+
+        Args:
+            X: predictor matrix (DataFrame / 2-D array / 1-D array).
+            y: response vector.
+            sample_weight: optional per-row prior weights. Mirrors
+                sklearn's name and mgcv's ``weights=`` semantics — a
+                weight of 2 is equivalent to having observed that row
+                twice. Must be strictly positive. ``None`` ⇒ unit
+                weights (back-compat with existing call sites).
 
         By default this is always a **single fit**: each predictor uses
         ``term_k_mapping[name]`` if present, else ``self.k_default``
@@ -387,6 +401,20 @@ class Gam:
                 f"X has {X_arr.shape[0]} rows but y has {y_arr.shape[0]} elements"
             )
 
+        # Coerce sample_weight via the existing 1-D helper, then stash
+        # on self so `_single_fit` / `_auto_fit_k` can forward it to the
+        # native binding. None stays None (unweighted fast path).
+        if sample_weight is not None:
+            w_arr = _to_1d_numpy(sample_weight)
+            if w_arr.shape[0] != X_arr.shape[0]:
+                raise ValueError(
+                    f"sample_weight has {w_arr.shape[0]} elements but X has "
+                    f"{X_arr.shape[0]} rows"
+                )
+            self.sample_weight = w_arr
+        else:
+            self.sample_weight = None
+
         if self.predictors is None:
             self.predictors = cols
         self._effective_predictors = list(cols)
@@ -403,12 +431,13 @@ class Gam:
 
         # Random-effect terms don't need k tuning (k = #levels, set by Rust).
         # Treat them as "covered" so we skip the auto-k loop for them.
-        re_terms = {
+        # Parametric terms also have no k to grow, so they're "covered" too.
+        no_k_terms = {
             name for name in (self._effective_predictors or [])
-            if self.predictor_basis_map.get(name) == "re"
+            if self.predictor_basis_map.get(name) in ("re", "parametric")
         }
         all_covered = all(
-            name in self.term_k_mapping or name in re_terms
+            name in self.term_k_mapping or name in no_k_terms
             for name in self._effective_predictors
         )
 
@@ -492,8 +521,15 @@ class Gam:
         """
         ks: list[int] = []
         for name in predictors:
-            if self.predictor_basis_map.get(name) == "re":
+            bs = self.predictor_basis_map.get(name)
+            if bs == "re":
                 # k is ignored for random effects; pass placeholder 1.
+                ks.append(1)
+                continue
+            if bs == "parametric":
+                # Parametric (linear, unsmoothed) term: single raw column,
+                # k is irrelevant. Pass placeholder 1; the Rust side ignores
+                # it. See docs/PARAMETRIC_TERMS_DESIGN.md.
                 ks.append(1)
                 continue
             requested = k_mapping.get(name, self.k_default)
@@ -553,7 +589,9 @@ class Gam:
         pc_values = self._build_pc_values(self._effective_predictors or [])
         bs_list = self._build_bs_list(self._effective_predictors or [])
         self._native.fit(
-            X_arr, y_arr, k=ks, method="REML", bs="cr", pc_values=pc_values, bs_list=bs_list
+            X_arr, y_arr, k=ks, method="REML", bs="cr",
+            pc_values=pc_values, bs_list=bs_list,
+            weights=self.sample_weight,
         )
 
     @staticmethod
@@ -653,6 +691,13 @@ class Gam:
             grew = False
             all_capped = True
             for j, name in enumerate(predictors):
+                # Parametric / random-effect terms have no `k` to grow — they
+                # have a fixed design (one column for parametric, n_levels for
+                # re). Treat them as already "capped" and skip the k-index
+                # computation (the residual structure along a binary or
+                # categorical axis isn't meaningful for these bases).
+                if self.predictor_basis_map.get(name) in ("re", "parametric"):
+                    continue
                 k_idx = self._k_index(X_arr[:, j], resid)
                 k_before = current_k[name]
                 term_grew = False

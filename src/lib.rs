@@ -329,7 +329,7 @@ impl PyGAM {
     ///     gam = GAM()
     ///     result = gam.fit(X, y, k=[10, 15, 20])
     ///     result = gam.fit(X, y, k=[10, 15, 20], use_edf=True)  # For extreme cases
-    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None, bs_list=None))]
+    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None, bs_list=None, weights=None))]
     fn fit<'py>(
         &mut self,
         py: Python<'py>,
@@ -342,9 +342,10 @@ impl PyGAM {
         use_edf: Option<bool>,
         pc_values: Option<Vec<Option<f64>>>,
         bs_list: Option<Vec<Option<String>>>,
+        weights: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Py<PyAny>> {
         // Route to the optimized implementation
-        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list)
+        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list, weights)
     }
 
     /// Low-level fit method for users who manually configure smooths
@@ -476,7 +477,7 @@ impl PyGAM {
     /// Args:
     ///     algorithm: "newton" (default) or "fellner-schall" (faster, matches bam)
     #[cfg(feature = "blas")]
-    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None, bs_list=None))]
+    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None, bs_list=None, weights=None))]
     fn fit_auto_optimized<'py>(
         &mut self,
         py: Python<'py>,
@@ -490,6 +491,7 @@ impl PyGAM {
         algorithm: Option<&str>,
         pc_values: Option<Vec<Option<f64>>>,
         bs_list: Option<Vec<Option<String>>>,
+        weights: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Py<PyAny>> {
         use crate::gam_optimized::*;
 
@@ -529,6 +531,13 @@ impl PyGAM {
                     SmoothTerm::random_effect(format!("x{}", i), &col_owned)
                         .map_err(|e| PyValueError::new_err(format!("{}", e)))?
                 }
+                "parametric" => {
+                    // Parametric (linear, unsmoothed) term: one raw column, zero
+                    // penalty. The basis ignores k (always 1 column). See
+                    // docs/PARAMETRIC_TERMS_DESIGN.md.
+                    SmoothTerm::parametric(format!("x{}", i), &col_owned)
+                        .map_err(|e| PyValueError::new_err(format!("{}", e)))?
+                }
                 "cr" => {
                     // mgcv's cr places knots at quantiles of the
                     // covariate by default — match that, not evenly
@@ -541,7 +550,7 @@ impl PyGAM {
                     .map_err(|e| PyValueError::new_err(format!("{}", e)))?,
                 _ => {
                     return Err(PyValueError::new_err(format!(
-                        "Unknown basis type '{}'. Use 'bs', 'cr', or 're'.",
+                        "Unknown basis type '{}'. Use 'bs', 'cr', 're', or 'parametric'.",
                         term_bs
                     )));
                 }
@@ -570,6 +579,34 @@ impl PyGAM {
         };
 
         let max_outer = max_iter.unwrap_or(10);
+
+        // Plumb optional per-row prior weights through to the core via
+        // `self.inner.prior_weights`. The fit path reads it as a constant
+        // factor that multiplies the IRLS working weights every PIRLS
+        // step (see gam_optimized::fit_optimized_full and
+        // pirls::fit_pirls_cached). Setting to `None` here also clears
+        // any leftover weights from a previous fit on the same instance.
+        if let Some(w) = weights.as_ref() {
+            let w_array = w.as_array().to_owned();
+            let n_rows = x_array.nrows();
+            if w_array.len() != n_rows {
+                return Err(PyValueError::new_err(format!(
+                    "weights length ({}) must match number of rows ({})",
+                    w_array.len(),
+                    n_rows
+                )));
+            }
+            // Reject non-positive prior weights — they would zero out
+            // (or negate) observations in a way mgcv would refuse too.
+            if w_array.iter().any(|&v| !(v > 0.0) || !v.is_finite()) {
+                return Err(PyValueError::new_err(
+                    "weights must be strictly positive and finite",
+                ));
+            }
+            self.inner.prior_weights = Some(w_array);
+        } else {
+            self.inner.prior_weights = None;
+        }
 
         // Choose scale method based on use_edf parameter
         let scale_method = if use_edf.unwrap_or(false) {

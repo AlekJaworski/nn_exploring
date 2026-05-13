@@ -1002,6 +1002,65 @@ impl BasisFunction for RandomEffectBasis {
     }
 }
 
+/// Parametric (linear, unsmoothed) term — `bs="parametric"` in our API.
+///
+/// Represents a single covariate that enters the linear predictor as a raw
+/// column with no spline expansion and no smoothing penalty. The "basis" is
+/// the trivial single-column identity: `design[i, 0] = x[i]`. The companion
+/// penalty (built in `SmoothTerm::parametric`) is a 1×1 zero matrix — the
+/// coefficient retains its full degree of freedom.
+///
+/// Why a basis at all? The Rust core's `SmoothTerm` requires a
+/// `Box<dyn BasisFunction>` for the design and a penalty matrix; bundling
+/// the parametric column as a trivial basis lets it ride through the
+/// existing `FitCache::new` / `build_lpmatrix` / `add_smooth` pipelines
+/// uniformly, with `is_random_effect = true` to skip sum-to-zero centering
+/// (parametric terms are never centred — that's the whole point).
+///
+/// In mgcv, parametric terms are formally a separate "pterms" block that
+/// short-circuits the `smooth.construct` path. We get the same observable
+/// behaviour (one unpenalised column per parametric term) via a uniform
+/// `SmoothTerm` representation; see `docs/PARAMETRIC_TERMS_DESIGN.md` for
+/// the math and the parity protocol.
+pub struct ParametricBasis;
+
+impl ParametricBasis {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ParametricBasis {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BasisFunction for ParametricBasis {
+    fn evaluate(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        // Single-column design: just the raw covariate as one column.
+        let n = x.len();
+        let mut out = Array2::<f64>::zeros((n, 1));
+        for (i, &xi) in x.iter().enumerate() {
+            out[[i, 0]] = xi;
+        }
+        Ok(out)
+    }
+
+    fn evaluate_for_predict(&self, x: &Array1<f64>) -> Result<Array2<f64>> {
+        // No knots / no extrapolation rules — predict and fit are identical.
+        self.evaluate(x)
+    }
+
+    fn num_basis(&self) -> usize {
+        1
+    }
+
+    fn knots(&self) -> Option<&Array1<f64>> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

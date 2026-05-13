@@ -111,14 +111,23 @@ class GAM:
         use_edf: Optional[bool] = None,
         pc_values: Any = None,
         bs_list: Any = None,
+        weights: Any = None,
     ) -> Any:
         x_arr = _ensure_2d_float64(x)
         y_arr = _ensure_1d_float64(y)
         ks = _ensure_k_list(k, x_arr.shape[1])
+        # Per-row prior weights (mgcv's `weights=`). Coerce to a
+        # contiguous float64 1-D array so the Rust binding sees the
+        # exact layout it expects. None ⇒ unweighted fit.
+        w_arr = (
+            np.ascontiguousarray(np.asarray(weights, dtype=np.float64))
+            if weights is not None
+            else None
+        )
         return self._native.fit(
             x_arr, y_arr, ks, method,
             bs=bs, max_iter=max_iter, use_edf=use_edf,
-            pc_values=pc_values, bs_list=bs_list,
+            pc_values=pc_values, bs_list=bs_list, weights=w_arr,
         )
 
     def fit_auto(

@@ -1,7 +1,10 @@
 //! Main GAM model structure and fitting
 
 use crate::{
-    basis::{BasisFunction, BoundaryCondition, CubicRegressionSpline, CubicSpline, RandomEffectBasis},
+    basis::{
+        BasisFunction, BoundaryCondition, CubicRegressionSpline, CubicSpline, ParametricBasis,
+        RandomEffectBasis,
+    },
     block_penalty::BlockPenalty,
     penalty::compute_penalty,
     pirls::{fit_pirls, Family},
@@ -121,6 +124,47 @@ impl SmoothTerm {
             constraint_matrix: None, // No pre-transformation (mgcv handles constraints during solving)
             pc_value: None,
             is_random_effect: false,
+        })
+    }
+
+    /// Create a parametric (linear, unsmoothed) term (`bs="parametric"`).
+    ///
+    /// Wraps a single raw covariate column as a `SmoothTerm` whose:
+    ///   * **basis** is `ParametricBasis` (one column = the raw covariate)
+    ///   * **penalty** is a 1×1 zero matrix — the coefficient retains its
+    ///     full degree of freedom; the optimiser's λ for this slot is a
+    ///     formal placeholder (the score doesn't depend on it).
+    ///   * **`is_random_effect`** is `true` so `FitCache::new` skips
+    ///     sum-to-zero centering. Parametric columns must NOT be centred
+    ///     — otherwise a constant binary indicator would absorb into the
+    ///     intercept and lose its interpretation.
+    ///
+    /// `x_data` is currently unused at construction time (the basis is
+    /// stateless) but accepted to keep the constructor signature uniform
+    /// with the other `SmoothTerm::*` builders, in case we later need to
+    /// stash centre / scale stats for prediction-time normalisation.
+    ///
+    /// See `docs/PARAMETRIC_TERMS_DESIGN.md` for the math and the parity
+    /// protocol against mgcv.
+    pub fn parametric(name: String, _x_data: &Array1<f64>) -> Result<Self> {
+        let basis = ParametricBasis::new();
+        // 1×1 zero penalty — the BlockPenalty machinery already short-circuits
+        // zero-norm blocks (`reparam.rs:476`), so this term contributes nothing
+        // to either the penalty score or its gradient.
+        let penalty = Array2::<f64>::zeros((1, 1));
+        Ok(Self {
+            name,
+            basis: Box::new(basis),
+            penalty,
+            lambda: 1.0,
+            constraint_matrix: None,
+            pc_value: None,
+            // Reuse the random-effect "skip centering" branch in
+            // FitCache::new. Semantically this isn't a random effect, but
+            // the *behaviour* (no centring, no pc-anchoring) is the same.
+            // If this flag ever grows responsibilities beyond "skip
+            // centering", split into `is_parametric` cleanly.
+            is_random_effect: true,
         })
     }
 
@@ -492,6 +536,14 @@ pub struct GAM {
     pub smoothing_params: Option<SmoothingParameter>,
     /// IRLS weights
     pub weights: Option<Array1<f64>>,
+    /// Per-row prior weights supplied by the user (mgcv's `weights=`).
+    /// Constant across the fit. Multiplied into the IRLS working
+    /// weights inside PIRLS:
+    ///   • Gaussian fast path solves `(X'WX + λS)β = X'Wy` with `W = diag(w_prior)`.
+    ///   • General PIRLS loop uses `w_total = w_prior * w_irls` in every
+    ///     `compute_xtwx(x, w_total)` and `X'(w_total z)` step.
+    /// `None` means unit weights (back-compat with all existing fits).
+    pub prior_weights: Option<Array1<f64>>,
     /// Deviance
     pub deviance: Option<f64>,
     /// Design matrix (predictor matrix)
@@ -532,6 +584,7 @@ impl GAM {
             linear_predictor: None,
             smoothing_params: None,
             weights: None,
+            prior_weights: None,
             deviance: None,
             design_matrix: None,
             fitted: false,
