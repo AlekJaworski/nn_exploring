@@ -22,7 +22,7 @@ For most users, prefer :class:`Gam`.
 
 from .mgcv_rust import *  # compiled Rust extension — exposes GAM and helpers
 from .mgcv_rust import GAM as _NativeGAM
-from ._fitter import Gam, GAMFitter, TermContributions
+from ._fitter import Gam, GAMFitter, TermContributions, GamSummary
 from ._predictor import GamPredictor
 from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, QuantileLSSFit
 
@@ -31,7 +31,7 @@ from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, Quan
 GAM = _NativeGAM
 
 __all__ = [
-    "Gam", "GAMFitter", "GAM", "TermContributions", "GamPredictor",
+    "Gam", "GAMFitter", "GAM", "TermContributions", "GamSummary", "GamPredictor",
     "tune_quantile_sigma", "fit_quantile",
     "fit_quantile_lss", "QuantileLSSFit",
 ]

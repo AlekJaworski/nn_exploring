@@ -23,7 +23,7 @@ from typing import Any, Iterable, Optional, Sequence, Union
 
 import numpy as np
 
-__all__ = ["Gam", "GAMFitter", "TermContributions"]
+__all__ = ["Gam", "GAMFitter", "TermContributions", "GamSummary"]
 
 # Import the compiled Rust core. We import it directly (not as
 # `mgcv_rust.mgcv_rust`) so this file works whether the package is
@@ -95,6 +95,48 @@ class TermContributions:
     intercept: float
     contributions: Any  # pd.DataFrame; lazy-imported, typed as Any to keep pandas optional
     total: np.ndarray
+
+
+@dataclass(frozen=True)
+class GamSummary:
+    """Compact summary of a fitted :class:`Gam`.
+
+    Returned by :meth:`Gam.summary`. Includes the per-smooth table
+    (``smooths``) and the top-level fit metadata. Pretty-prints in a
+    mgcv-style block when ``repr()`` is called.
+    """
+    family: str
+    link: str
+    n_obs: int
+    intercept: float
+    intercept_response: float
+    smooths: Any  # pd.DataFrame, columns: predictor, k, edf, lambda
+    scale: float           # σ² for Gaussian; 1 for binomial/poisson; NaN if unknown
+    deviance: float        # residual sum of squares for Gaussian; NaN if unknown
+    r_squared: float       # adjusted R² for Gaussian; NaN otherwise
+
+    def __repr__(self) -> str:  # pragma: no cover - exercised by tests indirectly
+        lines = [
+            f"Gam summary  family={self.family}  link={self.link}  n_obs={self.n_obs}",
+            f"  intercept (link)     = {self.intercept:.6g}",
+            f"  intercept (response) = {self.intercept_response:.6g}",
+        ]
+        if not np.isnan(self.scale):
+            lines.append(f"  scale (σ²)           = {self.scale:.6g}")
+        if not np.isnan(self.deviance):
+            lines.append(f"  deviance             = {self.deviance:.6g}")
+        if not np.isnan(self.r_squared):
+            lines.append(f"  R² (adj)             = {self.r_squared:.4f}")
+        lines.append("  smooths:")
+        try:
+            for _, row in self.smooths.iterrows():
+                lines.append(
+                    f"    s({row['predictor']:>12s})  k={int(row['k']):>3d}  "
+                    f"edf={row['edf']:>6.2f}  λ={row['lambda']:.3e}"
+                )
+        except Exception:  # pragma: no cover
+            lines.append(f"    {self.smooths!r}")
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------- #
@@ -1129,6 +1171,216 @@ class Gam:
             diff_samples, [alpha / 2.0, 1.0 - alpha / 2.0], axis=1
         )
         return diff, lo, hi
+
+    # ----------------------- partial effects + plot ----------------------- #
+
+    def partial_effect(
+        self,
+        predictor: str,
+        grid_n: int = 100,
+        level: Optional[float] = 0.95,
+        n_samples: int = 1000,
+        seed: int = 42,
+    ) -> Any:
+        """Partial-effect curve of one smooth.
+
+        Builds a grid spanning the training range of ``predictor``,
+        fixes the other predictors at their training means (they don't
+        actually contribute on the link scale since the subset masks
+        them out, but the X still has to be a valid full-shape input),
+        and evaluates the smooth's link-scale, sum-to-zero contribution.
+
+        Args:
+            predictor: name of the smooth.
+            grid_n: number of grid points spanning the training range.
+            level: if not ``None``, also include ``lo`` / ``hi`` columns
+                via paired posterior sampling at the given two-sided
+                level. Pass ``None`` to skip CI computation.
+            n_samples / seed: posterior draws for CI.
+
+        Returns:
+            ``pd.DataFrame`` with columns ``[<predictor>, effect]`` and,
+            when ``level`` is given, also ``lo`` / ``hi``. ``effect`` is
+            link-scale (mgcv's "centered smooth").
+        """
+        self._require_fitted()
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "partial_effect() requires pandas. pip install pandas"
+            ) from exc
+
+        predictors = self._effective_predictors or []
+        if predictor not in predictors:
+            raise KeyError(predictor)
+
+        col_idx = predictors.index(predictor)
+        x_train = self.X[:, col_idx]
+        x_grid = np.linspace(float(x_train.min()), float(x_train.max()), int(grid_n))
+
+        # Other columns at training mean — the masked predict_ci ignores
+        # them on the link scale, but the lpmatrix builder still needs a
+        # full-shape X to evaluate.
+        X_eval = np.tile(self.X.mean(axis=0), (grid_n, 1))
+        X_eval[:, col_idx] = x_grid
+
+        sub = self[[predictor]]
+        if level is None:
+            effect = sub.predict(X_eval, scale="deviation")
+            return pd.DataFrame({predictor: x_grid, "effect": effect})
+
+        mean, lo, hi = sub.predict_ci(
+            X_eval,
+            level=level,
+            scale="deviation",
+            n_samples=n_samples,
+            seed=seed,
+        )
+        return pd.DataFrame(
+            {predictor: x_grid, "effect": mean, "lo": lo, "hi": hi}
+        )
+
+    def plot(
+        self,
+        predictor: Optional[str] = None,
+        grid_n: int = 100,
+        level: Optional[float] = 0.95,
+        ax: Any = None,
+    ) -> Any:
+        """Plot the partial-effect curve for one or all smooths.
+
+        Single-predictor (``predictor=...``): draws a line of the
+        centered smooth + a shaded posterior CI on the supplied or a
+        new matplotlib axes. Returns the axes.
+
+        All smooths (``predictor=None``): creates a figure with one
+        subplot per active smooth and returns the figure.
+        """
+        self._require_fitted()
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError(
+                "plot() requires matplotlib. pip install matplotlib"
+            ) from exc
+
+        if predictor is None:
+            names = self._active_feature_names()
+            if not names:
+                raise ValueError("No active smooths to plot.")
+            fig, axes = plt.subplots(
+                1, len(names), figsize=(4 * len(names), 3), squeeze=False
+            )
+            for ax_i, name in zip(axes[0], names):
+                self.plot(predictor=name, grid_n=grid_n, level=level, ax=ax_i)
+            fig.tight_layout()
+            return fig
+
+        if predictor not in self._active_feature_names():
+            raise KeyError(predictor)
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        df = self.partial_effect(predictor, grid_n=grid_n, level=level)
+        ax.plot(df[predictor], df["effect"], color="C0", lw=1.5)
+        if "lo" in df.columns:
+            ax.fill_between(
+                df[predictor], df["lo"], df["hi"], color="C0", alpha=0.2
+            )
+        ax.axhline(0.0, color="gray", lw=0.5)
+        ax.set_xlabel(predictor)
+        ax.set_ylabel(f"s({predictor})")
+        return ax
+
+    # ------------------------------ Summary ------------------------------- #
+
+    def summary(self) -> GamSummary:
+        """Compact fit summary. Returns a :class:`GamSummary` with the
+        per-smooth table and top-level fit metadata. ``repr()`` formats
+        it in a mgcv-style block."""
+        self._require_fitted()
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "summary() requires pandas. pip install pandas"
+            ) from exc
+
+        smooths_df = pd.DataFrame(
+            {
+                "predictor": list(self.feature_names_in_),
+                "k": list(self.k_),
+                "edf": list(self.edf_),
+                "lambda": list(self.lambda_),
+            }
+        )
+
+        # Gaussian-only fit metrics (computed in Python from fitted_values).
+        scale = float("nan")
+        deviance = float("nan")
+        r_sq = float("nan")
+        if self.family == "gaussian" and self.y is not None:
+            fitted = np.asarray(self._native.get_fitted_values(), dtype=float)
+            resid = self.y - fitted
+            deviance = float(np.sum(resid ** 2))
+            total_edf = float(self.edf_.sum()) + 1.0  # +1 for intercept
+            dof = max(len(self.y) - total_edf, 1.0)
+            scale = deviance / dof
+            ss_tot = float(np.sum((self.y - self.y.mean()) ** 2))
+            if ss_tot > 0:
+                r_sq = 1.0 - (deviance / ss_tot) * (
+                    (len(self.y) - 1.0) / dof
+                )  # adjusted
+
+        return GamSummary(
+            family=self.family,
+            link=self.link,
+            n_obs=int(0 if self.y is None else len(self.y)),
+            intercept=float(self.intercept_),
+            intercept_response=float(self.intercept_response_),
+            smooths=smooths_df,
+            scale=scale,
+            deviance=deviance,
+            r_squared=r_sq,
+        )
+
+    # -------------------- sklearn-classifier shortcuts -------------------- #
+
+    def predict_proba(self, X: ArrayLike) -> np.ndarray:
+        """Class probabilities ``[[P(y=0), P(y=1)], ...]``. Binomial only.
+
+        sklearn-classifier convention. Raises for non-binomial families
+        — for those, :meth:`predict` is the right call.
+        """
+        if self.family not in ("binomial", "quasibinomial"):
+            raise NotImplementedError(
+                f"predict_proba is only defined for binomial families, "
+                f"got family={self.family!r}; use predict() instead"
+            )
+        p = np.asarray(self.predict(X), dtype=float).reshape(-1)
+        return np.column_stack([1.0 - p, p])
+
+    def score(self, X: ArrayLike, y: Any) -> float:
+        """Goodness-of-fit. Higher is better (sklearn convention).
+
+        - Regression families (Gaussian, gamma, etc.): coefficient of
+          determination R² of ``predict(X)`` against ``y``.
+        - Binomial / quasibinomial: classification accuracy at the
+          0.5 threshold.
+        """
+        self._require_fitted()
+        y_arr = _to_1d_numpy(y)
+        preds = np.asarray(self.predict(X), dtype=float).reshape(-1)
+        if self.family in ("binomial", "quasibinomial"):
+            labels = (preds > 0.5).astype(float)
+            return float(np.mean(labels == y_arr))
+        ss_res = float(np.sum((y_arr - preds) ** 2))
+        ss_tot = float(np.sum((y_arr - y_arr.mean()) ** 2))
+        if ss_tot == 0.0:
+            return 0.0
+        return 1.0 - ss_res / ss_tot
 
     def get_edf_df(self) -> Any:
         """Per-smooth EDF table. Returns a pandas DataFrame with columns
