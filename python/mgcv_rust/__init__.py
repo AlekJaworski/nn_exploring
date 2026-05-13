@@ -20,15 +20,12 @@ The package exposes two layers:
 For most users, prefer :class:`Gam`.
 """
 
-from .mgcv_rust import *  # compiled Rust extension — exposes GAM and helpers
+from .mgcv_rust import *  # compiled Rust extension — exposes helpers
 from .mgcv_rust import GAM as _NativeGAM
+from ._low_level import GAM  # noqa: F401 — re-export the coercing facade
 from ._fitter import Gam, GAMFitter, TermContributions, GamSummary
 from ._predictor import GamPredictor
 from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, QuantileLSSFit
-
-# Keep the native GAM accessible as `GAM` so existing scripts that import
-# `mgcv_rust.GAM` continue to work unchanged.
-GAM = _NativeGAM
 
 __all__ = [
     "Gam", "GAMFitter", "GAM", "TermContributions", "GamSummary", "GamPredictor",
