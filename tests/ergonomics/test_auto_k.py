@@ -59,12 +59,14 @@ def test_fixed_k_passthrough():
 
 
 def test_auto_k_convergence():
-    """Auto-k grows k until EDF saturation is resolved (ratio < edf_cutoff headroom).
+    """Auto-k grows k until the per-smooth k-index says no residual
+    structure remains along x_j.
 
     Uses n=500, y = sin(2πx) + ε. Checks:
-    - Final k is in [4, 20].
-    - get_edf_df() ratio < 0.95 (i.e. not saturated after convergence).
+    - Final k is in [4, 30].
     - Iteration count <= 10.
+    - At the last iteration, k_index ≥ 1 − k_index_margin (the stopping
+      criterion — residuals look like white noise along x).
     """
     rng = np.random.default_rng(42)
     n = 500
@@ -72,7 +74,6 @@ def test_auto_k_convergence():
     y = np.sin(2 * np.pi * x) + rng.normal(0, 0.1, n)
     X = x.reshape(-1, 1)
 
-    # auto_k=True opts into the iterative growth loop.
     gam = GAMFitter(predictors=("x0",), auto_k=True)
     gam.fit(X, y)
 
@@ -80,20 +81,55 @@ def test_auto_k_convergence():
     iters = gam._auto_k_iterations
 
     assert 4 <= final_k <= 30, f"Final k={final_k} out of expected range [4, 30]"
-    assert iters <= 10, f"Auto-k used {iters} iterations (max 10)"
+    assert iters <= gam.auto_k_max_iter, (
+        f"Auto-k used {iters} iterations (cap {gam.auto_k_max_iter})"
+    )
 
-    df = gam.get_edf_df()
-    ratio = float(df.loc[df["predictor"] == "x0", "ratio"].iloc[0])
-    # After convergence the term should not be saturated (ratio well below 1).
-    assert ratio < 0.95, f"EDF ratio {ratio:.3f} still saturated after auto-k"
+    trace = gam.auto_k_trace_
+    last_k_index = float(
+        trace.loc[trace["iteration"] == iters - 1, "k_index"].iloc[0]
+    )
+    threshold = 1.0 - gam.k_index_margin
+    assert last_k_index >= threshold, (
+        f"k_index={last_k_index:.3f} below stopping threshold {threshold:.3f} "
+        f"— auto-k stopped early (would have grown if not for cap / max_iter)"
+    )
 
-    # Expose useful diagnostics when running with -v.
-    print(f"\n  auto-k: final_k={final_k}, iters={iters}, ratio={ratio:.3f}")
+    print(f"\n  auto-k: final_k={final_k}, iters={iters}, k_index={last_k_index:.3f}")
 
 
 # ---------------------------------------------------------------------- #
 # Test 3: cap at n_unique - 1                                            #
 # ---------------------------------------------------------------------- #
+
+
+def test_auto_k_does_not_blow_up_on_clean_sine():
+    """Regression: under the old (k-1)-edf < cutoff rule, high-SNR data
+    drove λ→0, edf tracked k−1 indefinitely, and auto-k grew k up to
+    n_unique−1 (~270 on n=500 even for a single sine). The k-index rule
+    detects "no structure left in residuals" instead and must stop at a
+    reasonable k for clean signal.
+    """
+    rng = np.random.default_rng(0)
+    n = 500
+    x = np.linspace(0, 2 * np.pi, n)
+    for noise in [0.01, 0.05, 0.1]:
+        y = np.sin(x) + noise * rng.standard_normal(n)
+        gam = GAMFitter(predictors=("x0",), auto_k=True)
+        gam.fit(x.reshape(-1, 1), y)
+        final_k = gam._term_k["x0"]
+        assert final_k <= 30, (
+            f"auto-k blew up at noise={noise}: final_k={final_k}"
+        )
+
+    # And the absolute ceiling holds even on pathological zero-noise data
+    # where residuals are numerical zero.
+    y = np.sin(x)
+    gam = GAMFitter(predictors=("x0",), auto_k=True, max_k_auto=40)
+    gam.fit(x.reshape(-1, 1), y)
+    assert gam._term_k["x0"] <= 40, (
+        f"max_k_auto cap not honoured: got k={gam._term_k['x0']}"
+    )
 
 
 def test_auto_k_cap_at_n_unique():

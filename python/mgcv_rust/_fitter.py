@@ -268,12 +268,22 @@ class Gam:
             yet implemented; pass-through for API compatibility.
         auto_k: if True, iteratively refit growing ``k`` for any
             predictor not covered by ``term_k_mapping`` until the
-            saturation check ``(k-1) - edf >= edf_cutoff`` passes.
-            Default ``False`` — closer to mgcv's convention where
-            ``k`` is a user knob and ``k.check`` is a diagnostic, and
-            avoids hidden multi-fit costs in production code.
-        min_k / edf_cutoff / knots_increase_ratio: auto-k tuning knobs,
-            ignored unless ``auto_k=True``.
+            per-smooth k-index (mgcv's ``k.check`` statistic) indicates
+            no residual structure remains along each predictor's axis.
+            See :meth:`_auto_fit_k` for the full rule. Default ``False``
+            — closer to mgcv's convention where ``k`` is a user knob
+            and ``k.check`` is a diagnostic, and avoids hidden
+            multi-fit costs in production code.
+        min_k / max_k_auto / k_index_margin / knots_increase_ratio /
+        auto_k_max_iter: auto-k tuning knobs, ignored unless
+            ``auto_k=True``. ``max_k_auto`` is a hard upper bound on
+            grown ``k`` (in addition to the always-on ``n_unique - 1``
+            cap) so the loop can't blow up on pathological high-SNR
+            data. ``k_index_margin`` is the slack on the k-index = 1
+            "no structure" target; growth fires when
+            ``k_index < 1 - k_index_margin``. ``auto_k_max_iter``
+            (default 5) caps total refits — typical data converges in
+            1 fit; the cap is for pathological data.
         min_points_to_save / max_points_to_save: pass-through ignored
             knobs kept for back-compat with the neighbourhoods
             constructor signature.
@@ -287,7 +297,9 @@ class Gam:
         target: Optional[str] = None,
         min_k: int = 3,
         k_default: int = 10,
-        edf_cutoff: int = 2,
+        k_index_margin: float = 0.05,
+        max_k_auto: int = 50,
+        auto_k_max_iter: int = 5,
         knots_increase_ratio: float = 1.5,
         min_points_to_save: int = 100,
         max_points_to_save: int = 1000,
@@ -308,7 +320,9 @@ class Gam:
         self.target: str = target or "y"
         self.min_k = min_k
         self.k_default = k_default
-        self.edf_cutoff = edf_cutoff
+        self.k_index_margin = float(k_index_margin)
+        self.max_k_auto = int(max_k_auto)
+        self.auto_k_max_iter = int(auto_k_max_iter)
         self.knots_increase_ratio = knots_increase_ratio
         self.min_points_to_save = min_points_to_save
         self.max_points_to_save = max_points_to_save
@@ -343,6 +357,10 @@ class Gam:
         self._term_k: dict[str, int] = {}
         # Stores iteration count when auto-k loop ran:
         self._auto_k_iterations: int = 0
+        # Per-(iteration, predictor) record of (k, edf, k_index, grew) so
+        # users can inspect why auto-k stopped where it did. Empty unless
+        # auto_k=True. See :attr:`auto_k_trace_` for the pandas view.
+        self._auto_k_trace: list[dict[str, Any]] = []
 
     # -------------------------- Fit / Predict ------------------------- #
 
@@ -394,17 +412,68 @@ class Gam:
             for name in self._effective_predictors
         )
 
+        initial_ks = self._resolve_ks(
+            X_arr, self._effective_predictors, self.term_k_mapping
+        )
+        self._warn_if_rare_events_binomial(y_arr, initial_ks)
+
         if self.auto_k and not all_covered:
             # Auto-k path: iteratively refit growing k for uncovered terms.
             self._auto_fit_k(X_arr, y_arr)
         else:
             # Default single-fit path: k_default (or term_k_mapping) for each.
-            ks = self._resolve_ks(X_arr, self._effective_predictors, self.term_k_mapping)
-            self._term_k = dict(zip(self._effective_predictors, ks))
+            self._term_k = dict(zip(self._effective_predictors, initial_ks))
             self._auto_k_iterations = 0
-            self._single_fit(X_arr, y_arr, ks)
+            self._single_fit(X_arr, y_arr, initial_ks)
 
         return self
+
+    def _warn_if_rare_events_binomial(
+        self, y_arr: np.ndarray, ks: list[int]
+    ) -> None:
+        """Warn when binomial data is too rare-events for the requested
+        smooth complexity.
+
+        For a binomial GAM the limiting sample size is
+        ``n_events = min(Σy, n − Σy)`` — the count of the minority class.
+        Each smooth contributes roughly ``k − 1`` effective parameters
+        after the sum-to-zero identifiability constraint, so the
+        events-per-parameter ratio is::
+
+            epp = n_events / Σ(k_j − 1)
+
+        The textbook rule of thumb is ``epp ≥ 5``; below that REML's
+        penalty selection becomes unreliable (λ can collapse to 0, the
+        smooth saturates near the few events, and predictions spike
+        locally — verified empirically at ``n_events = 1, k = 10``).
+
+        We warn but never refuse to fit; users in exploratory contexts
+        may want to see the misbehaviour, and only the caller knows
+        whether the data is salvageable.
+        """
+        if self.family not in ("binomial", "quasibinomial"):
+            return
+        n = int(y_arr.size)
+        n_pos = int(y_arr.sum())
+        n_events = min(n_pos, n - n_pos)
+        budget = sum(max(k - 1, 1) for k in ks)
+        if budget == 0:
+            return
+        epp = n_events / budget
+        if epp >= 5.0:
+            return
+        import warnings
+
+        warnings.warn(
+            f"binomial fit has only {n_events} minority-class events for "
+            f"{budget} smooth parameters ({epp:.2f} events per parameter; "
+            f"rule of thumb ≥ 5). REML penalty selection may be unreliable "
+            f"— the smooth can saturate and predictions can spike locally. "
+            f"Consider lowering k_default, switching to an intercept-only "
+            f"model, or collecting more events.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def _resolve_ks(
         self,
@@ -487,55 +556,123 @@ class Gam:
             X_arr, y_arr, k=ks, method="REML", bs="cr", pc_values=pc_values, bs_list=bs_list
         )
 
+    @staticmethod
+    def _k_index(x_col: np.ndarray, resid: np.ndarray) -> float:
+        """mgcv's ``k.check`` k-index statistic for residuals along ``x_col``.
+
+        Sort the residuals by their predictor value and form
+
+            k_index = sum_i (r_{(i+1)} - r_{(i)})^2 / (2 * Var(r) * (n - 1))
+
+        Under the null (residuals i.i.d. given the smooth), ``E[diff^2] =
+        2 Var(r)``, so the statistic converges to 1. Values below 1 mean
+        consecutive residuals (after sorting by x) are more similar than
+        chance — i.e. there is leftover structure along that predictor's
+        axis, so the basis is too small. See Wood (2017) §5.9.
+
+        Returns ``1.0`` when residual variance is effectively zero — a
+        perfect fit can't be improved by adding basis functions.
+        """
+        n = int(resid.size)
+        if n < 2:
+            return 1.0
+        var_r = float(np.var(resid))
+        if var_r < 1e-12:
+            return 1.0
+        order = np.argsort(x_col, kind="stable")
+        diffs = np.diff(resid[order])
+        return float(np.sum(diffs ** 2) / (2.0 * var_r * (n - 1)))
+
     def _auto_fit_k(self, X_arr: np.ndarray, y_arr: np.ndarray) -> None:
-        """Iteratively refit, growing k for terms whose EDF is near saturation.
+        """Iteratively refit, growing ``k`` for any smooth whose residuals
+        still show structure along its predictor's axis.
 
-        Fixed-k terms (those in term_k_mapping) are frozen. Uncovered terms
-        start at k_default=4 and grow by ceil(k * knots_increase_ratio) each
-        iteration where (k - 1) - edf < edf_cutoff.
+        **Per non-frozen predictor j, each iteration:**
 
-        Stop when: no term grew, every term hit its cap, or 10 iterations.
+        1. Sort the response residuals ``r = y - fitted`` by ``x_j``.
+        2. Compute the k-index (see :meth:`_k_index`):
+
+               k_index_j = Σ (r_(i+1) - r_(i))² / (2 · Var(r) · (n − 1))
+
+           ``k_index ≈ 1``  ⇒ residuals look like white noise along
+                              ``x_j`` ⇒ ``k`` is fine.
+           ``k_index <  1`` ⇒ neighbouring residuals are more similar
+                              than chance ⇒ unmodelled structure ⇒
+                              ``k`` is too small.
+
+        3. If ``k_index_j < 1 − k_index_margin`` (default margin 0.05),
+           grow ``k_j ← ceil(k_j · knots_increase_ratio)``, capped at
+           ``min(n_unique(x_j) − 1, max_k_auto)``.
+
+        **Frozen terms** (those in ``term_k_mapping``) are never grown.
+        Their k-index is still recorded in the trace for diagnostics.
+
+        **Stop** when no term grew, every term hit its cap, or
+        ``auto_k_max_iter`` iterations have run (default 5; tunable).
+
+        **Why this rule** — the old rule (``(k−1) − edf < edf_cutoff``)
+        kept firing on clean high-SNR data because REML drove λ→0 and
+        ``edf`` tracked ``k − 1`` indefinitely, leading to runaway
+        growth on simple sine curves. The k-index instead asks the
+        right question — *is there structure left to model?* — and
+        saturates at 1 once the smooth has captured the signal,
+        regardless of SNR.
+
+        **Diagnostics** are stored on the fitted Gam:
+
+        - ``_auto_k_iterations`` — number of refits performed
+        - ``_auto_k_trace``       — one record per ``(iteration,
+          predictor)`` with ``k``, ``edf``, ``k_index``, ``grew``.
+          Exposed as a pandas DataFrame via :attr:`auto_k_trace_`.
         """
         predictors = self._effective_predictors
 
-        # Pre-compute per-term caps from unique-value counts.
+        # Per-term caps: tighter of (n_unique − 1) and the absolute
+        # auto-grow ceiling. The min_k floor still wins on tiny data.
         caps: dict[str, int] = {}
         for i, name in enumerate(predictors):
             n_unique = int(np.unique(X_arr[:, i]).size)
-            caps[name] = max(n_unique - 1, self.min_k)
+            caps[name] = min(max(n_unique - 1, self.min_k), self.max_k_auto)
 
         # Initial k for each term.
         current_k: dict[str, int] = {}
         for name in predictors:
-            if name in self.term_k_mapping:
-                requested = self.term_k_mapping[name]
-                current_k[name] = max(self.min_k, min(requested, caps[name]))
-            else:
-                current_k[name] = max(self.min_k, min(self.k_default, caps[name]))
+            requested = self.term_k_mapping.get(name, self.k_default)
+            current_k[name] = max(self.min_k, min(requested, caps[name]))
 
-        for iteration in range(10):
+        threshold = 1.0 - self.k_index_margin
+        self._auto_k_trace = []
+        for iteration in range(self.auto_k_max_iter):
             ks = [current_k[name] for name in predictors]
             self._single_fit(X_arr, y_arr, ks)
 
+            fitted = np.asarray(self._native.get_fitted_values(), dtype=float)
+            resid = y_arr - fitted
             edf_map = self._edf_by_user_name()
 
             grew = False
             all_capped = True
-            for name in predictors:
-                if name in self.term_k_mapping:
-                    # Fixed: never grow.
-                    continue
-                k_j = current_k[name]
-                edf_j = edf_map.get(name, 0.0)
-                # Grow when headroom (k-1) - edf < edf_cutoff (mirrors mgcv k.check).
-                if (k_j - 1) - edf_j < self.edf_cutoff:
-                    new_k = math.ceil(k_j * self.knots_increase_ratio)
+            for j, name in enumerate(predictors):
+                k_idx = self._k_index(X_arr[:, j], resid)
+                k_before = current_k[name]
+                term_grew = False
+                if name not in self.term_k_mapping and k_idx < threshold:
+                    new_k = math.ceil(k_before * self.knots_increase_ratio)
                     capped_k = min(new_k, caps[name])
-                    if capped_k > k_j:
+                    if capped_k > k_before:
                         current_k[name] = capped_k
+                        term_grew = True
                         grew = True
-                if current_k[name] < caps[name]:
+                if current_k[name] < caps[name] and name not in self.term_k_mapping:
                     all_capped = False
+                self._auto_k_trace.append({
+                    "iteration": iteration,
+                    "predictor": name,
+                    "k": k_before,
+                    "edf": edf_map.get(name, float("nan")),
+                    "k_index": k_idx,
+                    "grew": term_grew,
+                })
 
             self._auto_k_iterations = iteration + 1
             if not grew or all_capped:
@@ -1412,6 +1549,40 @@ class Gam:
         if ss_tot == 0.0:
             return 0.0
         return 1.0 - ss_res / ss_tot
+
+    @property
+    def auto_k_trace_(self) -> Any:
+        """Per-iteration auto-k diagnostics. Empty unless ``auto_k=True``.
+
+        Returns a pandas DataFrame with one row per ``(iteration,
+        predictor)`` and columns:
+
+        ===========  =====================================================
+        iteration    0-based refit index
+        predictor    user-facing predictor name
+        k            basis dim used **for this iteration's fit**
+        edf          effective degrees of freedom from that fit
+        k_index      mgcv k.check statistic on residuals sorted by x_j
+        grew         whether the loop grew this term's ``k`` afterwards
+        ===========  =====================================================
+
+        Read the last iteration's rows for a "why did auto-k stop here"
+        snapshot. ``k_index`` close to 1 means the residuals look like
+        white noise along that predictor's axis (k is fine);
+        substantially less than 1 means there's leftover structure
+        (would grow if not frozen / capped).
+        """
+        self._require_fitted()
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "auto_k_trace_ requires pandas. pip install pandas"
+            ) from exc
+        return pd.DataFrame(
+            self._auto_k_trace,
+            columns=["iteration", "predictor", "k", "edf", "k_index", "grew"],
+        )
 
     def get_edf_df(self) -> Any:
         """Per-smooth EDF table. Returns a pandas DataFrame with columns
