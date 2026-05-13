@@ -84,8 +84,9 @@ def test_subset_edf_user_names(model_with_user_names):
 
 
 def test_auto_k_grows_for_user_named_dataframe():
-    """Without the fix, the auto-k loop pulled edf=0 from the lookup
-    miss and never grew k. Verify it actually grows here."""
+    """Without the edf-name fix, the opt-in auto-k loop pulled edf=0
+    from the lookup miss and never grew k. Verify it actually grows
+    here when explicitly enabled."""
     rng = np.random.default_rng(202)
     n = 800
     X = pd.DataFrame(
@@ -96,6 +97,6 @@ def test_auto_k_grows_for_user_named_dataframe():
     )
     # Highly wiggly truth in `age` so the smooth needs many basis funcs.
     y = np.sin(20 * X["age"]) + 0.1 * X["wiggle"] + rng.normal(0, 0.1, n)
-    gam = Gam(family="gaussian").fit(X, y)  # no term_k_mapping → auto-k path
+    gam = Gam(family="gaussian", auto_k=True).fit(X, y)
     # At least one predictor must have grown beyond the default of 10.
     assert gam.k_.max() > 10, f"auto-k never grew, got k_={gam.k_}"

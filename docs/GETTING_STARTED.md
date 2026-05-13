@@ -289,6 +289,14 @@ gam = Gam(
 
 The library caps each smooth's `k` at `n_unique(x_j) - 1` automatically.
 
+For predictors not in `term_k_mapping`, the default is a single fit at
+`k_default=10` (mgcv's default). If you want the wrapper to iteratively
+grow `k` until each smooth's EDF passes the `(k-1) - edf >= 2`
+saturation check, opt in with `Gam(auto_k=True)`. This is off by
+default because (a) it hides multi-fit cost behind one method call,
+and (b) it diverges from mgcv's convention where `k` is a user knob
+and `k.check` is a *diagnostic*, not an automatic refit.
+
 ### Random effects
 
 Treat a categorical "group" predictor as a random effect:

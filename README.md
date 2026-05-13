@@ -256,7 +256,7 @@ Headline (`2d_gaussian_additive_n50000_k15_cr`, identity link):
 
 - Joint `(ρ, log φ)` outer Newton not yet implemented — the binding constraint for closing the remaining performance gap on dispersion-bearing GLMs. Tracked in `mgcv_rust - Backlog - Next Numerical Steps` (Obsidian).
 - `predict_diff` is identity-link only; non-identity raises with a workaround pointing at `get_posterior_samples`.
-- Auto-`k` tuning is wired up but most users should set `term_k_mapping` explicitly.
+- Auto-`k` tuning is **opt-in** via `Gam(auto_k=True)`. Default is a single fit at `k_default=10` (mgcv's default), with `term_k_mapping` overrides — closer to mgcv's "tune k, run k.check" convention and avoids hidden multi-fit costs.
 - sklearn `BaseEstimator` mixin (for `Pipeline` / `GridSearchCV`) is not yet wrapped — soft-dep, deferred.
 
 ## References

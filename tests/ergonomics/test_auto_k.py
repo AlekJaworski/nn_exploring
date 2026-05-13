@@ -72,8 +72,8 @@ def test_auto_k_convergence():
     y = np.sin(2 * np.pi * x) + rng.normal(0, 0.1, n)
     X = x.reshape(-1, 1)
 
-    # No term_k_mapping → auto-k loop activates.
-    gam = GAMFitter(predictors=("x0",))
+    # auto_k=True opts into the iterative growth loop.
+    gam = GAMFitter(predictors=("x0",), auto_k=True)
     gam.fit(X, y)
 
     final_k = gam._term_k["x0"]
@@ -103,11 +103,11 @@ def test_auto_k_cap_at_n_unique():
     y = np.sin(2 * np.pi * x) + rng.normal(0, 0.1, 500)
     X = x.reshape(-1, 1)
 
-    gam = GAMFitter(predictors=("x0",))
+    gam = GAMFitter(predictors=("x0",), auto_k=True)
     gam.fit(X, y)
 
     final_k = gam._term_k["x0"]
-    # n_unique = 5 → cap = 4; k_default=4 starts already at cap.
+    # n_unique = 5 → cap = 4; k_default starts already at cap.
     assert final_k <= 4, f"k={final_k} exceeds cap of n_unique-1=4"
 
 

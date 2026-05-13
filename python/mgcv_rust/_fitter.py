@@ -266,9 +266,17 @@ class Gam:
         consider_categorical: if True, columns with two or fewer unique
             values are dropped from the smooth specification. 📋 Not
             yet implemented; pass-through for API compatibility.
-        min_k / edf_cutoff / knots_increase_ratio /
-        min_points_to_save / max_points_to_save: auto-k tuning knobs
-            used by `_determine_optimal_k`. 📋 Auto-k is a followup.
+        auto_k: if True, iteratively refit growing ``k`` for any
+            predictor not covered by ``term_k_mapping`` until the
+            saturation check ``(k-1) - edf >= edf_cutoff`` passes.
+            Default ``False`` — closer to mgcv's convention where
+            ``k`` is a user knob and ``k.check`` is a diagnostic, and
+            avoids hidden multi-fit costs in production code.
+        min_k / edf_cutoff / knots_increase_ratio: auto-k tuning knobs,
+            ignored unless ``auto_k=True``.
+        min_points_to_save / max_points_to_save: pass-through ignored
+            knobs kept for back-compat with the neighbourhoods
+            constructor signature.
     """
 
     # -------------------------- Constructor -------------------------- #
@@ -293,6 +301,7 @@ class Gam:
         term_pc_mapping: Optional[dict[str, float]] = None,
         predictor_basis_map: Optional[dict[str, str]] = None,
         consider_categorical: bool = False,
+        auto_k: bool = False,
         **kwargs: Any,
     ) -> None:
         self.predictors: Optional[list[str]] = list(predictors) if predictors else None
@@ -321,6 +330,7 @@ class Gam:
         self.term_pc_mapping: dict[str, float] = dict(term_pc_mapping or {})
         self.predictor_basis_map: dict[str, str] = dict(predictor_basis_map or {})
         self.consider_categorical = consider_categorical
+        self.auto_k = auto_k
 
         # Filled at fit time:
         self._native: Optional[_NativeGAM] = None
@@ -343,9 +353,13 @@ class Gam:
         column names are matched against `self.predictors` (if set)
         before the fit.
 
-        When `term_k_mapping` covers all predictors, a single fit is
-        run (existing behavior). Otherwise, an iterative auto-k loop
-        grows k for under-saturated terms until convergence.
+        By default this is always a **single fit**: each predictor uses
+        ``term_k_mapping[name]`` if present, else ``self.k_default``
+        (capped at ``n_unique(x_j) - 1``). To iteratively grow ``k``
+        until saturation passes, opt in with ``Gam(auto_k=True)`` — see
+        :meth:`_auto_fit_k` for the heuristic. We default off because
+        the iterative path hides multi-fit cost and diverges from
+        mgcv's convention where ``k`` is a user knob.
         """
         X_arr, cols = _to_numpy_with_columns(X, self.predictors)
         y_arr = _to_1d_numpy(y)
@@ -380,15 +394,15 @@ class Gam:
             for name in self._effective_predictors
         )
 
-        if all_covered:
-            # Fixed-k path: single fit, no iteration.
+        if self.auto_k and not all_covered:
+            # Auto-k path: iteratively refit growing k for uncovered terms.
+            self._auto_fit_k(X_arr, y_arr)
+        else:
+            # Default single-fit path: k_default (or term_k_mapping) for each.
             ks = self._resolve_ks(X_arr, self._effective_predictors, self.term_k_mapping)
             self._term_k = dict(zip(self._effective_predictors, ks))
             self._auto_k_iterations = 0
             self._single_fit(X_arr, y_arr, ks)
-        else:
-            # Auto-k path: iteratively refit growing k for uncovered terms.
-            self._auto_fit_k(X_arr, y_arr)
 
         return self
 
