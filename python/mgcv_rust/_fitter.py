@@ -515,6 +515,113 @@ class Gam:
 
         return np.asarray(self._native.predict(X_arr), dtype=float)
 
+    # ------------------------- Inverse link --------------------------- #
+
+    def _inv_link(self, val: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        """Apply the inverse link function. Used by ``intercept_response_``
+        and by ``predict_ci`` to map link-scale values to response-scale.
+        """
+        link = (self.link or "identity").lower()
+        if link in ("identity", ""):
+            return val
+        if link == "log":
+            return np.exp(val)
+        if link == "logit":
+            return 1.0 / (1.0 + np.exp(-np.asarray(val)))
+        if link == "inverse":
+            v = np.asarray(val, dtype=float)
+            safe = np.where(np.abs(v) < 1e-10, np.sign(v) * 1e-10 + 1e-15, v)
+            return 1.0 / safe
+        raise NotImplementedError(f"_inv_link does not yet support link={link!r}")
+
+    # ------------------- sklearn-style fitted attrs ------------------- #
+
+    def _require_fitted(self) -> None:
+        if self._native is None:
+            raise RuntimeError("Model has not been fitted yet — call .fit() first.")
+
+    @property
+    def coef_(self) -> np.ndarray:
+        """Fitted β coefficients (intercept first, then per-smooth blocks)."""
+        self._require_fitted()
+        return np.asarray(self._native.get_coefficients(), dtype=float)  # type: ignore[union-attr]
+
+    @property
+    def lambda_(self) -> np.ndarray:
+        """Smoothing parameters λ, one per smooth term, in predictor order."""
+        self._require_fitted()
+        return np.asarray(self._native.get_all_lambdas(), dtype=float)  # type: ignore[union-attr]
+
+    @property
+    def vcov_(self) -> np.ndarray:
+        """Posterior covariance matrix of β̂, shape `(p, p)`."""
+        self._require_fitted()
+        return np.asarray(self._native.get_vcov(), dtype=float)  # type: ignore[union-attr]
+
+    @property
+    def intercept_(self) -> float:
+        """Intercept on the **link** scale (sklearn norm). Equals
+        `coef_[0]`. For identity link this is `mean(y_train)` directly;
+        for non-identity links, `inv_link(intercept_)` recovers the
+        response-scale mean."""
+        return float(self.coef_[0])
+
+    @property
+    def intercept_response_(self) -> float:
+        """Intercept mapped to the **response** scale via inverse link.
+        Equals `mean(y_train)` for any family/link combination at the
+        converged β."""
+        return float(self._inv_link(self.intercept_))
+
+    @property
+    def feature_names_in_(self) -> np.ndarray:
+        """Names of the features seen at fit time, in the column order
+        the model was fit on. sklearn norm."""
+        self._require_fitted()
+        return np.asarray(self._effective_predictors or [], dtype=object)
+
+    @property
+    def n_features_in_(self) -> int:
+        """Number of features seen at fit time. sklearn norm."""
+        self._require_fitted()
+        return len(self._effective_predictors or [])
+
+    @property
+    def k_(self) -> np.ndarray:
+        """Per-feature basis dimension k (after auto-capping at
+        `n_unique − 1`), in `feature_names_in_` order."""
+        self._require_fitted()
+        return np.asarray(
+            [self._term_k.get(name, 0) for name in (self._effective_predictors or [])],
+            dtype=int,
+        )
+
+    @property
+    def bs_(self) -> np.ndarray:
+        """Per-feature basis type (`'cr'`, `'tp'`, `'re'`, …), in
+        `feature_names_in_` order. Returns the global default for
+        features not overridden in `predictor_basis_map`."""
+        self._require_fitted()
+        return np.asarray(
+            [
+                self.predictor_basis_map.get(name, "cr")
+                for name in (self._effective_predictors or [])
+            ],
+            dtype=object,
+        )
+
+    @property
+    def edf_(self) -> np.ndarray:
+        """Per-feature effective degrees of freedom, in
+        `feature_names_in_` order. Sums (plus the intercept's 1 dof) to
+        the total model EDF."""
+        self._require_fitted()
+        edf_map = dict(self._native.get_edf_per_smooth())  # type: ignore[union-attr]
+        return np.asarray(
+            [float(edf_map.get(name, float("nan"))) for name in (self._effective_predictors or [])],
+            dtype=float,
+        )
+
     # -------------------------- Diagnostics --------------------------- #
 
     def get_lambdas(self) -> np.ndarray:
