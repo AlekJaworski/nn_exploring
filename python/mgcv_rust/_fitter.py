@@ -23,6 +23,8 @@ from typing import Any, Iterable, Optional, Sequence, Union
 
 import numpy as np
 
+__all__ = ["Gam", "GAMFitter", "TermContributions"]
+
 # Import the compiled Rust core. We import it directly (not as
 # `mgcv_rust.mgcv_rust`) so this file works whether the package is
 # installed in mixed-layout mode or as a flat compiled module.
@@ -65,6 +67,34 @@ _CANONICAL_LINK: dict[str, str] = {
     "t-dist": "identity",  # scat family
     "scat": "identity",
 }
+
+
+# ---------------------------------------------------------------------- #
+# Term-decomposition result                                              #
+# ---------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class TermContributions:
+    """Decomposition of a GAM prediction into intercept + per-smooth pieces.
+
+    Returned by :meth:`Gam.predict` when ``type='terms'``. Contributions are
+    on the **link** scale (so they sum linearly with the intercept). The
+    ``total`` field is on the **response** scale and equals
+    ``inv_link(intercept + contributions.sum(axis=1))`` — i.e. it matches
+    ``gam.predict(X)`` exactly.
+
+    Attributes:
+        intercept: scalar on the link scale (0.0 on subset views that don't
+            include the intercept).
+        contributions: ``pd.DataFrame`` of shape ``(n, m)`` with one column
+            per active smooth, link-scale, centered at 0 on training data
+            (mgcv's sum-to-zero identifiability constraint).
+        total: 1-D ndarray of shape ``(n,)`` on the response scale.
+    """
+    intercept: float
+    contributions: Any  # pd.DataFrame; lazy-imported, typed as Any to keep pandas optional
+    total: np.ndarray
 
 
 # ---------------------------------------------------------------------- #
@@ -500,20 +530,126 @@ class Gam:
 
     # ----------------------------------------------------------------- #
 
-    def predict(self, X: ArrayLike) -> np.ndarray:
-        """Predict at given X. Mirrors `r_fitting.GamFitter.predict`."""
-        if self._native is None:
-            raise RuntimeError("Model has not been fitted yet — call .fit() first.")
+    def predict(
+        self,
+        X: ArrayLike,
+        scale: str = "response",
+        type: Optional[str] = None,
+    ) -> Union[np.ndarray, TermContributions]:
+        """Predict at given X. Mirrors ``r_fitting.GamFitter.predict``.
+
+        Args:
+            X: input features (numpy / pandas / polars).
+            scale: output scale —
+                ``"response"`` (default): apply the inverse link (mgcv's
+                  ``predict(type="response")``).
+                ``"link"``: linear-predictor scale, no inverse link
+                  (mgcv's ``predict(type="link")``).
+                ``"deviation"``: link scale with the intercept also zeroed
+                  out. Only valid on subset views; gives the "marginal
+                  effect" of the selected smooths.
+            type: ``None`` (default) returns a 1-D ndarray. ``"terms"``
+                returns a :class:`TermContributions` decomposition.
+
+        Subset views (``gam[name]``) honour the same ``scale`` semantics:
+        ``scale="response"`` is the inverse link of the masked linear
+        predictor; ``scale="link"`` is the masked linear predictor itself.
+        """
+        self._require_fitted()
+        if type not in (None, "terms"):
+            raise ValueError(
+                f"type must be None or 'terms', got {type!r}"
+            )
+        if scale not in ("response", "link", "deviation"):
+            raise ValueError(
+                f"scale must be 'response', 'link', or 'deviation', got {scale!r}"
+            )
+
+        is_subset = getattr(self, "_subset_mask", None) is not None
+        if scale == "deviation" and not is_subset:
+            raise ValueError(
+                "scale='deviation' is only meaningful on subset views; "
+                "use scale='link' instead"
+            )
+
         X_arr, _ = _to_numpy_with_columns(X, self._effective_predictors)
 
-        subset_mask = getattr(self, "_subset_mask", None)
-        if subset_mask is not None:
-            lp = np.asarray(self._native.evaluate_lpmatrix(X_arr), dtype=float)
-            lp = self._apply_subset_mask(lp)
-            coef = np.asarray(self._native.get_coefficients(), dtype=float)
-            return lp @ coef
+        if type == "terms":
+            return self._predict_terms(X_arr, scale=scale, is_subset=is_subset)
 
-        return np.asarray(self._native.predict(X_arr), dtype=float)
+        lp = np.asarray(self._native.evaluate_lpmatrix(X_arr), dtype=float)
+        coef = np.asarray(self._native.get_coefficients(), dtype=float)
+
+        if is_subset:
+            lp = self._apply_subset_mask(lp)
+        if scale == "deviation":
+            # Zero the intercept column too — marginal effect of the
+            # selected smooths only.
+            lp = lp.copy()
+            lp[:, 0] = 0.0
+
+        eta = lp @ coef
+        if scale in ("link", "deviation"):
+            return eta
+        return np.asarray(self._inv_link(eta), dtype=float)
+
+    def _predict_terms(
+        self,
+        X_arr: np.ndarray,
+        scale: str,
+        is_subset: bool,
+    ) -> TermContributions:
+        """Build a :class:`TermContributions` for the given X.
+
+        Per-term contributions are always link-scale (so they sum with the
+        intercept). ``total`` honours the requested ``scale``:
+        ``"response"`` → ``inv_link(intercept + sum)``;
+        ``"link"`` → ``intercept + sum``;
+        ``"deviation"`` → ``sum`` (intercept zeroed; subset-only path).
+        """
+        try:
+            import pandas as pd  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "predict(type='terms') requires pandas. "
+                "Install it with: pip install pandas"
+            ) from exc
+
+        lp = np.asarray(self._native.evaluate_lpmatrix(X_arr), dtype=float)
+        coef = np.asarray(self._native.get_coefficients(), dtype=float)
+        term_indices_raw = self._native.get_term_indices()
+        predictors = self._effective_predictors or []
+        active = set(self._active_feature_names())
+
+        contributions: dict[str, np.ndarray] = {}
+        for user_name, (_native_name, first, last) in zip(
+            predictors, term_indices_raw, strict=False
+        ):
+            if is_subset and user_name not in active:
+                continue
+            contributions[user_name] = lp[:, first : last + 1] @ coef[first : last + 1]
+
+        intercept = float(coef[0]) if self._intercept_active() else 0.0
+
+        n = X_arr.shape[0]
+        if contributions:
+            summed = np.sum(np.column_stack(list(contributions.values())), axis=1)
+        else:
+            summed = np.zeros(n, dtype=float)
+
+        if scale == "deviation":
+            total = summed
+        elif scale == "link":
+            total = intercept + summed
+        else:  # response
+            total = np.asarray(self._inv_link(intercept + summed), dtype=float)
+
+        df = (
+            pd.DataFrame(contributions, columns=list(contributions.keys()))
+            if contributions
+            else pd.DataFrame(index=range(n))
+        )
+        return TermContributions(intercept=intercept, contributions=df, total=total)
 
     # ------------------------- Inverse link --------------------------- #
 
