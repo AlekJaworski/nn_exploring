@@ -26,6 +26,8 @@ Tolerances are initially set to current measured values (last refreshed
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +82,31 @@ QGAM_TOLERANCES = {
     "calibrate_pin":     {"max_abs": 0.05, "subject_delta_abs": 0.04},
     "calibrate_cal_kl":  {"max_abs": 0.06, "subject_delta_abs": 0.05},
 }
+
+# Perf budgets — catch R8-style 8-23× regressions early. Asserted unless
+# MGCV_REAL_DATA_SKIP_PERF=1 is set (useful when running on slow hardware).
+# Mean GAM: rust ≤ 3× mgcv's recorded fit time (per fold, from
+# metadata.json::fit_time_prod_s). 0.16.0 was 4-5× FASTER than mgcv on this
+# fixture, so 3× slower is a 12-15× regression and worth failing on.
+MEAN_GAM_PERF_RATIO_MAX = 3.0
+# qgam budgets are absolute (seconds). qgam reference is ~7s.
+QGAM_PERF_BUDGET_S = {
+    "default_heuristic": 0.5,   # rust heuristic σ should be very fast
+    "calibrate_pin":     8.0,   # pin CV is the operating point; tolerate moderate cost
+    "calibrate_cal_kl":  60.0,  # cal_kl is known-slow (5× slower than qgam); cap as sanity
+}
+
+PERF_ASSERT = os.environ.get("MGCV_REAL_DATA_SKIP_PERF", "0") != "1"
+
+
+def _print_perf(label: str, rust_s: float, ref_s: float, budget_s: float, pass_: bool) -> None:
+    """Always emit a perf line to stdout (visible with `pytest -s` or on failure)."""
+    ratio = rust_s / ref_s if ref_s > 0 else float("nan")
+    flag = "PASS" if pass_ else "FAIL"
+    print(
+        f"[perf {flag}] {label:<32} rust={rust_s:.3f}s  "
+        f"ref={ref_s:.3f}s  ratio={ratio:.2f}×  budget={budget_s:.2f}s"
+    )
 
 
 def _handoff_available() -> bool:
@@ -141,10 +168,17 @@ def test_mean_gam_real_data_parity(fold: str, meta: dict) -> None:
             **{c: "parametric" for c in PARAMETRIC},
         },
     )
+    t0 = time.perf_counter()
     gam.fit(X, y, sample_weight=w)
+    fit_s = time.perf_counter() - t0
     pred = np.asarray(gam.predict(X))
     ref = expected["pred_prod"].to_numpy()
     m = _diff_metrics(pred, ref)
+
+    mgcv_s = float(meta["fixtures"][fold]["fit_time_prod_s"])
+    perf_budget = mgcv_s * MEAN_GAM_PERF_RATIO_MAX
+    perf_ok = fit_s <= perf_budget
+    _print_perf(f"mean_gam[{fold}]", fit_s, mgcv_s, perf_budget, perf_ok)
 
     msg = (
         f"\n  fold={fold}  n={len(df)}"
@@ -152,10 +186,18 @@ def test_mean_gam_real_data_parity(fold: str, meta: dict) -> None:
         f"\n  p95_abs = {m['p95_abs']:.4f}  (tol {tol['p95_abs']:.4f})"
         f"\n  rmse    = {m['rmse']:.4f}  (tol {tol['rmse']:.4f})"
         f"\n  bias    = {m['bias']:+.4f}"
+        f"\n  fit_s   = {fit_s:.3f}  mgcv_s = {mgcv_s:.3f}  "
+        f"ratio = {fit_s/mgcv_s:.2f}×  (budget {MEAN_GAM_PERF_RATIO_MAX:.1f}×)"
     )
     assert m["max_abs"] <= tol["max_abs"], msg
     assert m["p95_abs"] <= tol["p95_abs"], msg
     assert m["rmse"] <= tol["rmse"], msg
+    if PERF_ASSERT:
+        assert perf_ok, (
+            f"\nmean_gam[{fold}] perf regression: rust took {fit_s:.3f}s vs "
+            f"mgcv {mgcv_s:.3f}s ({fit_s/mgcv_s:.2f}×, budget {MEAN_GAM_PERF_RATIO_MAX:.1f}×). "
+            f"Set MGCV_REAL_DATA_SKIP_PERF=1 to skip this gate."
+        )
 
 
 @pytest.mark.parametrize(
@@ -179,9 +221,11 @@ def test_qgam_q95_real_data_parity(label: str, kwargs: dict, meta: dict) -> None
     resid = expected_mean["y"].to_numpy() - expected_mean["pred_prod"].to_numpy()
     X = df[QGAM_SMOOTHS].to_numpy(dtype=float)
 
+    t0 = time.perf_counter()
     gam_q, _sigma, _info = fit_quantile(
         X, resid, tau=0.95, k=[5, 5, 5, 5], bs="cr", method="REML", **kwargs
     )
+    fit_s = time.perf_counter() - t0
     pred = np.asarray(gam_q.predict(X))
     ref = qgam_expected["qgam_q95_pred"].to_numpy()
     m = _diff_metrics(pred, ref)
@@ -192,15 +236,29 @@ def test_qgam_q95_real_data_parity(label: str, kwargs: dict, meta: dict) -> None
     qgam_subject = meta["fixtures"]["qgam_q95"]["subject_q95_pred"]
     subject_delta = rust_subject - qgam_subject
 
+    qgam_s = float(meta["fixtures"]["qgam_q95"]["fit_time_s"])
+    perf_budget = QGAM_PERF_BUDGET_S[label]
+    perf_ok = fit_s <= perf_budget
+    _print_perf(f"qgam[{label}]", fit_s, qgam_s, perf_budget, perf_ok)
+
     msg = (
         f"\n  config={label}"
         f"\n  row max_abs = {m['max_abs']:.4f}  (tol {tol['max_abs']:.4f})"
         f"\n  rust subject q95 = {rust_subject:+.4f}"
         f"\n  qgam subject q95 = {qgam_subject:+.4f}"
         f"\n  subject Δ        = {subject_delta:+.4f}  (tol ±{tol['subject_delta_abs']:.4f})"
+        f"\n  fit_s            = {fit_s:.3f}  qgam_s = {qgam_s:.3f}  "
+        f"budget = {perf_budget:.2f}s"
     )
     assert m["max_abs"] <= tol["max_abs"], msg
     assert abs(subject_delta) <= tol["subject_delta_abs"], msg
+    if PERF_ASSERT:
+        assert perf_ok, (
+            f"\nqgam[{label}] perf regression: rust took {fit_s:.3f}s "
+            f"vs budget {perf_budget:.2f}s "
+            f"(qgam reference: {qgam_s:.3f}s). "
+            f"Set MGCV_REAL_DATA_SKIP_PERF=1 to skip this gate."
+        )
 
 
 def test_mean_gam_subject_scalar_parity(meta: dict) -> None:
