@@ -50,6 +50,21 @@ strip = true               # Strip symbols for smaller binaries
 # Enable CPU-specific optimizations (requires nightly or RUSTFLAGS)
 # To use: RUSTFLAGS="-C target-cpu=native" cargo build --release
 
+# Fast dev-loop profile — release-quality runtime within a few percent
+# (BLAS GEMMs dominate the hot path, so codegen-units > 1 costs ~nothing
+# at runtime), but compiles ~3-4× faster than `release` by skipping `fat`
+# LTO and parallelising LLVM codegen. Use this for parity-development
+# iteration; keep `release` for CI, publishes, and perf-battery runs.
+#
+# Usage:
+#   maturin develop --profile release-fast --features python,blas,blas-system
+#   cargo build --profile release-fast --features python,blas,blas-system
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false              # Faster link; symbols help if a fit panics
+
 [profile.dev]
 opt-level = 1              # Some optimization in dev mode for faster iteration
 
