@@ -14,6 +14,11 @@ pub mod tk_kkt;
 #[cfg(feature = "blas")]
 pub use tk_kkt::{tk_kkt_hessian_analytical, tk_kkt_hessian_fd};
 
+pub mod search_vector;
+pub use search_vector::{ExtraKind, ExtraParam, OuterSearchVector};
+#[cfg(feature = "blas")]
+pub(crate) use search_vector::{newton_1d_with_halving, newton_2d_with_halving};
+
 use crate::block_penalty::BlockPenalty;
 use crate::linalg::{determinant, inverse, solve};
 use crate::pirls::{digamma, trigamma};

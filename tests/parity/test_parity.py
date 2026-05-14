@@ -104,13 +104,18 @@ def _fit(fix: Fixture):
         except Exception as exc:  # pragma: no cover - depends on Rust build
             pytest.skip(f"GAM({family!r}, {link_kw}) unavailable: {exc}")
 
+    fit_kwargs: dict = dict(
+        k=list(inp.k),
+        method=inp.method,
+        bs=inp.bs[0] if len(set(inp.bs)) == 1 else inp.bs,
+    )
+    if inp.weights is not None:
+        # Per-row prior weights from the fixture — wired through the
+        # low-level facade as `weights=`, mirroring mgcv's `weights=` arg.
+        fit_kwargs["weights"] = np.asarray(inp.weights, dtype=float)
+
     try:
-        result = gam.fit(
-            x_train, y_train,
-            k=list(inp.k),
-            method=inp.method,
-            bs=inp.bs[0] if len(set(inp.bs)) == 1 else inp.bs,
-        )
+        result = gam.fit(x_train, y_train, **fit_kwargs)
     except Exception as exc:
         pytest.fail(f"mgcv_rust fit raised on {fix.name}: {exc}")
     return gam, result

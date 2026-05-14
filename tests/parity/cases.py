@@ -552,7 +552,11 @@ class Case:
     generator: Callable[[np.random.Generator, int], tuple[np.ndarray, np.ndarray]]
     n_test: int = 100      # held-out, in-range
     n_extrap: int = 20     # extrapolation, just outside [x_min, x_max]
-    weights: Optional[np.ndarray] = None    # currently unused; placeholder
+    # Deterministic per-row prior weights, computed from (rng, x_train) at
+    # realize() time. None ⇒ unweighted (the default). The generator and
+    # harness both honour the realized weights end-to-end so parity
+    # fixtures cover weighted fits via the same pipeline as unweighted.
+    weights_fn: Optional[Callable[[np.random.Generator, np.ndarray], np.ndarray]] = None
 
     def realize(self) -> dict:
         """Materialize x_train, y_train, x_test, x_extrap. Deterministic via seed."""
@@ -572,6 +576,21 @@ class Case:
         high = rng.uniform(x_max + 1e-3, x_max + margin, (self.n_extrap - n_per_side, self.d))
         x_extrap = np.vstack([low, high])
 
+        weights = None
+        if self.weights_fn is not None:
+            w = np.asarray(self.weights_fn(rng, x_train), dtype=float)
+            if w.shape != (self.n,):
+                raise ValueError(
+                    f"weights_fn for {self.name!r} returned shape {w.shape}, "
+                    f"expected ({self.n},)"
+                )
+            if not np.all(np.isfinite(w)) or np.any(w <= 0.0):
+                raise ValueError(
+                    f"weights_fn for {self.name!r} must produce strictly "
+                    f"positive finite weights"
+                )
+            weights = w.tolist()
+
         return {
             "name": self.name,
             "description": self.description,
@@ -583,7 +602,7 @@ class Case:
             "family": self.family,
             "link": self.link,
             "method": self.method,
-            "weights": None if self.weights is None else self.weights.tolist(),
+            "weights": weights,
             "x_train": x_train.tolist(),
             "y_train": y_train.tolist(),
             "x_test": x_test.tolist(),
@@ -972,6 +991,29 @@ CASES: list[Case] = [
         seed=152, n=3000, d=7, k=[8] * 7, bs=["cr"] * 7,
         family="gaussian", link="identity", method="REML",
         generator=_gen_7d_compact,
+    ),
+
+    # ================================================================== #
+    # Weighted fixtures (0.14.0 sample_weight feature)                   #
+    # Per-row prior weights are sourced from mgcv via the parity         #
+    # generator, so these cases ride the full fast battery (no rpy2 at  #
+    # test time). Weights pattern: 1 + |x - 0.5| (heteroscedastic-ish). #
+    # ================================================================== #
+    Case(
+        name="1d_gaussian_weighted_n300_k10_cr",
+        description="Weighted Gaussian (w = 1 + |x - 0.5|) — covers sample_weight=",
+        seed=301, n=300, d=1, k=[10], bs=["cr"],
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_1d_smooth,
+        weights_fn=lambda rng, x: 1.0 + np.abs(x[:, 0] - 0.5),
+    ),
+    Case(
+        name="1d_poisson_weighted_n500_k10_cr",
+        description="Weighted Poisson — covers sample_weight= on a GLM family",
+        seed=302, n=500, d=1, k=[10], bs=["cr"],
+        family="poisson", link="log", method="REML",
+        generator=_gen_1d_poisson_log,
+        weights_fn=lambda rng, x: 1.0 + np.abs(x[:, 0] - 0.5),
     ),
 ]
 

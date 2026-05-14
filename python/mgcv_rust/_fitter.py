@@ -536,7 +536,31 @@ class Gam:
             col_idx = predictors.index(name)
             n_unique = int(np.unique(X_arr[:, col_idx]).size)
             cap = max(n_unique - 1, self.min_k)
-            ks.append(max(self.min_k, min(requested, cap)))
+            resolved = max(self.min_k, min(requested, cap))
+            if resolved != requested:
+                import warnings
+                source = (
+                    f"term_k_mapping[{name!r}]={requested}"
+                    if name in k_mapping else f"k_default={requested}"
+                )
+                if resolved > requested:
+                    warnings.warn(
+                        f"k for predictor {name!r} bumped from {requested} to "
+                        f"{resolved} (min_k floor; {source}). Pass "
+                        f"min_k={requested} to keep the requested value. "
+                        f"Note: mgcv has no such floor — k=2 there means a "
+                        f"truly linear smooth, while min_k=3 here gives a "
+                        f"2-effective-dim smooth (can fit a parabola).",
+                        UserWarning, stacklevel=3,
+                    )
+                else:  # requested > cap
+                    warnings.warn(
+                        f"k for predictor {name!r} capped from {requested} to "
+                        f"{resolved} (n_unique({name})-1; {source}). The basis "
+                        f"can't exceed the number of distinct x values minus 1.",
+                        UserWarning, stacklevel=3,
+                    )
+            ks.append(resolved)
         return ks
 
     def _make_native(self) -> _NativeGAM:

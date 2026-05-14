@@ -18,8 +18,10 @@ Bar A is `ok` flag from `predict()` agreement at the given tolerance (rtol/atol 
 | 1d_gaussian_smooth_n50_k10_cr | ✓ | ✓ | ✓ | 5.09e-09 | 8.03e-08 | 1.62e-08 | 5.53e-09 | 2.54e-09 | 1.31e-07 |
 | 1d_gaussian_sparse_edges_n400_k10_cr | ✓ | ✓ | ✓ | 5.95e-10 | 1.36e-07 | 1.16e-09 | 3.00e-10 | 1.04e-10 | 4.16e-08 |
 | 1d_gaussian_step_n500_k10_cr | ✓ | ✓ | ✓ | 2.57e-08 | 6.23e-07 | 3.92e-08 | 2.72e-08 | 3.92e-09 | 3.65e-06 |
+| 1d_gaussian_weighted_n300_k10_cr | ✓ | ✓ | ✓ | 6.99e-10 | 3.70e-07 | 1.81e-09 | 5.41e-10 | 1.99e-01 | 7.52e-08 |
 | 1d_gaussian_wiggly_n500_k20_cr | ✓ | ✓ | ✓ | 3.85e-10 | 8.18e-08 | 1.68e-09 | 4.09e-10 | 3.40e-11 | 5.52e-08 |
 | 1d_poisson_log_n500_k10_cr | ✓ | ✓ | ✓ | 7.23e-06 | 1.79e-06 | 1.68e-05 | 1.85e-06 | 4.14e+00 | 4.77e-05 |
+| 1d_poisson_weighted_n500_k10_cr | ✗ | ✗ | ✓ | 1.24e-02 | 1.83e-03 | 3.57e-02 | 2.02e-03 | 3.18e+00 | 7.26e-02 |
 | 1d_tw_log_n400_k20_cr | ✓ | ✓ | ✓ | 2.51e-04 | 1.02e-04 | 2.56e-04 | 1.06e-04 | 9.99e-01 | 1.34e-03 |
 | 1d_tweedie_log_n400_k20_cr_p15 | ✓ | ✓ | ✓ | 2.28e-06 | 1.42e-06 | 4.20e-06 | 1.57e-06 | 1.04e+00 | 2.37e-05 |
 | 2d_binomial_logit_n1000_k10_cr | ✓ | ✓ | ✓ | 3.08e-05 | 8.83e-05 | 4.49e-05 | 1.18e-04 | 8.37e-01 | 1.74e-03 |
@@ -71,8 +73,10 @@ Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. Bar at 1e
 | 1d_gaussian_smooth_n50_k10_cr | 5.09e-09 | 5.08e+00 | 5.08e+00 | 1.00e+00 |
 | 1d_gaussian_sparse_edges_n400_k10_cr | 5.95e-10 | 9.95e+00 | 9.95e+00 | 1.00e+00 |
 | 1d_gaussian_step_n500_k10_cr | 2.57e-08 | 6.51e-01 | 6.51e-01 | 1.00e+00 |
+| 1d_gaussian_weighted_n300_k10_cr | 1.80e-03 | 4.93e+00 | 6.14e+00 | 1.25e+00 |
 | 1d_gaussian_wiggly_n500_k20_cr | 3.85e-10 | 4.15e-01 | 4.15e-01 | 1.00e+00 |
 | 1d_poisson_log_n500_k10_cr | 7.23e-06 | 1.60e+02 | 1.60e+02 | 1.00e+00 |
+| 1d_poisson_weighted_n500_k10_cr | 5.30e-02 | 9.88e+01 | 9.52e+01 | 9.63e-01 |
 | 1d_tw_log_n400_k20_cr | 2.51e-04 | 1.28e+03 | 1.28e+03 | 1.00e+00 |
 | 1d_tweedie_log_n400_k20_cr_p15 | 2.28e-06 | 1.21e+03 | 1.21e+03 | 1.00e+00 |
 | 2d_binomial_logit_n1000_k10_cr | 3.08e-05 | 2.37e+01 | 2.37e+01 | 1.00e+00 |
@@ -124,8 +128,10 @@ First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's 
 | 1d_gaussian_smooth_n50_k10_cr | 5 | 3 | 1 | 6.47e+00 | 6.47e+00 |
 | 1d_gaussian_sparse_edges_n400_k10_cr | 5 | 4 | 1 | -1.69e+02 | -1.69e+02 |
 | 1d_gaussian_step_n500_k10_cr | 4 | 5 | — | -2.54e+02 | -2.54e+02 |
+| 1d_gaussian_weighted_n300_k10_cr | 5 | 5 | 1 | -4.85e+01 | -4.77e+01 |
 | 1d_gaussian_wiggly_n500_k20_cr | 5 | 6 | — | -1.74e+02 | -1.74e+02 |
 | 1d_poisson_log_n500_k10_cr | 4 | 3 | 1 | 1.10e+03 | 1.10e+03 |
+| 1d_poisson_weighted_n500_k10_cr | 5 | 4 | 1 | 1.11e+03 | 1.38e+03 |
 | 1d_tw_log_n400_k20_cr | 6 | 7 | 1 | 6.51e+02 | 6.51e+02 |
 | 1d_tweedie_log_n400_k20_cr_p15 | 6 | 6 | — | 6.51e+02 | 6.53e+02 |
 | 2d_binomial_logit_n1000_k10_cr | 7 | 4 | 1 | 5.23e+02 | 5.23e+02 |
@@ -163,49 +169,51 @@ First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's 
 
 | case | rust median ms | rust min ms | mgcv median ms | rust/mgcv |
 |---|---|---|---|---|
-| 10d_gaussian_n3000_k8_cr | 5.00e+01 | 4.85e+01 | 4.50e+02 | 1.11e-01 |
-| 1d_gaussian_low_signal_n1000_k10_cr | 1.24e+00 | 1.13e+00 | 6.34e+01 | 1.96e-02 |
-| 1d_gaussian_near_linear_n500_k10_cr | 2.02e+00 | 1.39e+00 | 4.11e+01 | 4.91e-02 |
-| 1d_gaussian_sigmoid_n300_k10_cr | 7.94e-01 | 7.40e-01 | 2.85e+01 | 2.78e-02 |
-| 1d_gaussian_smooth_n1000_k50_cr | 3.12e+01 | 2.77e+01 | 1.05e+02 | 2.97e-01 |
-| 1d_gaussian_smooth_n100_k10_cr | 9.15e-01 | 6.28e-01 | 2.76e+01 | 3.32e-02 |
-| 1d_gaussian_smooth_n2000_k30_cr | 1.09e+01 | 8.70e+00 | 5.34e+01 | 2.04e-01 |
-| 1d_gaussian_smooth_n500_k10_cr | 1.18e+00 | 1.10e+00 | 3.92e+01 | 3.01e-02 |
-| 1d_gaussian_smooth_n500_k20_bs | 3.66e+00 | 3.55e+00 | 5.03e+01 | 7.28e-02 |
-| 1d_gaussian_smooth_n50_k10_cr | 1.08e+00 | 7.67e-01 | 3.25e+01 | 3.33e-02 |
-| 1d_gaussian_sparse_edges_n400_k10_cr | 1.29e+00 | 8.65e-01 | 2.37e+01 | 5.46e-02 |
-| 1d_gaussian_step_n500_k10_cr | 5.45e-01 | 5.42e-01 | 2.74e+01 | 1.99e-02 |
-| 1d_gaussian_wiggly_n500_k20_cr | 2.72e+00 | 2.44e+00 | 2.68e+01 | 1.01e-01 |
-| 1d_poisson_log_n500_k10_cr | 3.91e+00 | 3.61e+00 | 8.92e+01 | 4.39e-02 |
-| 1d_tw_log_n400_k20_cr | 1.92e+02 | 1.75e+02 | 4.12e+02 | 4.67e-01 |
-| 1d_tweedie_log_n400_k20_cr_p15 | 1.24e+02 | 1.09e+02 | 1.25e+02 | 9.89e-01 |
-| 2d_binomial_logit_n1000_k10_cr | 4.68e+01 | 4.41e+01 | 1.12e+02 | 4.16e-01 |
-| 2d_binomial_logit_n200_k10_cr | 1.00e+01 | 9.58e+00 | 1.58e+02 | 6.35e-02 |
-| 2d_binomial_logit_n5000_k10_cr | 4.67e+02 | 4.24e+02 | 1.81e+02 | 2.58e+00 |
-| 2d_gamma_inverse_n1000_k10_cr | 3.17e+01 | 3.01e+01 | 3.00e+02 | 1.06e-01 |
-| 2d_gamma_log_n1000_k10_cr | 4.02e+01 | 3.53e+01 | 1.75e+02 | 2.30e-01 |
-| 2d_gamma_log_n200_k10_cr | 6.04e+00 | 5.94e+00 | 1.77e+02 | 3.40e-02 |
-| 2d_gaussian_additive_n2000_k15_cr | 4.67e+00 | 4.41e+00 | 4.80e+01 | 9.72e-02 |
-| 2d_gaussian_additive_n50000_k15_cr | 9.97e+01 | 9.79e+01 | 3.52e+02 | 2.84e-01 |
-| 2d_gaussian_additive_n500_k10_cr | 2.29e+00 | 1.70e+00 | 2.94e+01 | 7.82e-02 |
-| 2d_gaussian_bs_n1500_k15 | 8.49e+00 | 6.90e+00 | 4.35e+01 | 1.95e-01 |
-| 2d_invgauss_log_n800_k10_cr | 6.82e+01 | 6.39e+01 | 2.01e+02 | 3.39e-01 |
-| 2d_nb_log_n1000_k10_cr_theta2 | 3.02e+01 | 2.94e+01 | 1.55e+02 | 1.96e-01 |
-| 2d_nb_profile_log_n1000_k10_cr | 3.64e+01 | 3.49e+01 | 1.84e+02 | 1.97e-01 |
-| 2d_poisson_log_n1000_k10_cr | 3.39e+01 | 3.04e+01 | 1.21e+02 | 2.81e-01 |
-| 2d_poisson_log_n200_k10_cr | 1.14e+01 | 9.95e+00 | 1.26e+02 | 9.08e-02 |
-| 2d_poisson_log_n5000_k10_cr | 1.52e+02 | 1.43e+02 | 1.81e+02 | 8.40e-01 |
-| 2d_quasibinomial_logit_n1000_k10_cr | 5.82e+01 | 5.54e+01 | 1.30e+02 | 4.49e-01 |
-| 2d_quasipoisson_log_n1000_k10_cr | 2.94e+01 | 2.32e+01 | 1.79e+02 | 1.64e-01 |
-| 3d_gaussian_mixed_n800_k10_cr | 4.59e+00 | 4.52e+00 | 5.20e+01 | 8.84e-02 |
-| 3d_poisson_log_n2000_k10_cr | 9.60e+01 | 9.56e+01 | 1.82e+02 | 5.28e-01 |
-| 4d_binomial_logit_n2000_k8_cr | 1.45e+02 | 1.35e+02 | 1.74e+02 | 8.29e-01 |
-| 4d_gamma_log_n2000_k8_cr | 7.64e+01 | 6.78e+01 | 2.38e+02 | 3.21e-01 |
-| 4d_gaussian_bs_n2000_k10 | 1.37e+01 | 1.35e+01 | 8.59e+01 | 1.59e-01 |
-| 4d_gaussian_mixed_n1000_k10_cr | 1.09e+01 | 9.97e+00 | 7.20e+01 | 1.51e-01 |
-| 4d_small_neighbourhood_n300 | 5.93e+00 | 5.19e+00 | 5.43e+01 | 1.09e-01 |
-| 5d_gaussian_mixed_n1500_k8_cr | 1.24e+01 | 1.14e+01 | 9.62e+01 | 1.29e-01 |
-| 5d_skewed_features_n5000 | 2.61e+01 | 2.55e+01 | 1.22e+02 | 2.15e-01 |
-| 6d_heatmap_pricing_n8000 | 4.22e+01 | 4.07e+01 | 2.31e+02 | 1.83e-01 |
-| 7d_neighbourhoods_compact_n3000 | 1.91e+01 | 1.77e+01 | 1.40e+02 | 1.36e-01 |
-| 8d_neighbourhoods_like_n15000 | 9.30e+01 | 9.16e+01 | 6.52e+02 | 1.43e-01 |
+| 10d_gaussian_n3000_k8_cr | 8.10e+01 | 7.98e+01 | 5.32e+02 | 1.52e-01 |
+| 1d_gaussian_low_signal_n1000_k10_cr | 1.89e+00 | 1.60e+00 | 7.84e+01 | 2.41e-02 |
+| 1d_gaussian_near_linear_n500_k10_cr | 1.89e+00 | 1.86e+00 | 4.16e+01 | 4.56e-02 |
+| 1d_gaussian_sigmoid_n300_k10_cr | 7.38e-01 | 7.07e-01 | 3.78e+01 | 1.96e-02 |
+| 1d_gaussian_smooth_n1000_k50_cr | 4.45e+01 | 4.14e+01 | 1.21e+02 | 3.67e-01 |
+| 1d_gaussian_smooth_n100_k10_cr | 1.43e+00 | 1.35e+00 | 3.41e+01 | 4.20e-02 |
+| 1d_gaussian_smooth_n2000_k30_cr | 1.29e+01 | 1.20e+01 | 6.22e+01 | 2.07e-01 |
+| 1d_gaussian_smooth_n500_k10_cr | 1.26e+00 | 1.17e+00 | 3.60e+01 | 3.51e-02 |
+| 1d_gaussian_smooth_n500_k20_bs | 4.22e+00 | 3.79e+00 | 4.43e+01 | 9.53e-02 |
+| 1d_gaussian_smooth_n50_k10_cr | 9.80e-01 | 8.72e-01 | 3.28e+01 | 2.99e-02 |
+| 1d_gaussian_sparse_edges_n400_k10_cr | 9.82e-01 | 9.64e-01 | 3.11e+01 | 3.16e-02 |
+| 1d_gaussian_step_n500_k10_cr | 1.43e+00 | 1.02e+00 | 3.30e+01 | 4.34e-02 |
+| 1d_gaussian_weighted_n300_k10_cr | 9.53e-01 | 8.92e-01 | 4.25e+01 | 2.24e-02 |
+| 1d_gaussian_wiggly_n500_k20_cr | 3.70e+00 | 3.44e+00 | 4.13e+01 | 8.96e-02 |
+| 1d_poisson_log_n500_k10_cr | 8.60e+00 | 6.53e+00 | 1.07e+02 | 8.02e-02 |
+| 1d_poisson_weighted_n500_k10_cr | 9.95e+00 | 8.18e+00 | 1.12e+02 | 8.86e-02 |
+| 1d_tw_log_n400_k20_cr | 2.72e+02 | 2.59e+02 | 3.62e+02 | 7.51e-01 |
+| 1d_tweedie_log_n400_k20_cr_p15 | 1.47e+02 | 1.36e+02 | 1.26e+02 | 1.16e+00 |
+| 2d_binomial_logit_n1000_k10_cr | 5.85e+01 | 5.64e+01 | 1.46e+02 | 4.01e-01 |
+| 2d_binomial_logit_n200_k10_cr | 1.58e+01 | 1.44e+01 | 2.15e+02 | 7.36e-02 |
+| 2d_binomial_logit_n5000_k10_cr | 6.10e+02 | 6.00e+02 | 2.46e+02 | 2.48e+00 |
+| 2d_gamma_inverse_n1000_k10_cr | 5.25e+01 | 4.88e+01 | 3.55e+02 | 1.48e-01 |
+| 2d_gamma_log_n1000_k10_cr | 5.03e+01 | 4.81e+01 | 2.33e+02 | 2.16e-01 |
+| 2d_gamma_log_n200_k10_cr | 1.13e+01 | 9.13e+00 | 2.35e+02 | 4.81e-02 |
+| 2d_gaussian_additive_n2000_k15_cr | 6.67e+00 | 6.20e+00 | 4.96e+01 | 1.34e-01 |
+| 2d_gaussian_additive_n50000_k15_cr | 1.28e+02 | 1.15e+02 | 4.06e+02 | 3.15e-01 |
+| 2d_gaussian_additive_n500_k10_cr | 3.01e+00 | 2.42e+00 | 3.97e+01 | 7.56e-02 |
+| 2d_gaussian_bs_n1500_k15 | 8.91e+00 | 8.09e+00 | 5.10e+01 | 1.75e-01 |
+| 2d_invgauss_log_n800_k10_cr | 9.34e+01 | 9.21e+01 | 3.04e+02 | 3.07e-01 |
+| 2d_nb_log_n1000_k10_cr_theta2 | 4.67e+01 | 4.53e+01 | 2.41e+02 | 1.94e-01 |
+| 2d_nb_profile_log_n1000_k10_cr | 5.57e+01 | 5.49e+01 | 2.63e+02 | 2.12e-01 |
+| 2d_poisson_log_n1000_k10_cr | 4.47e+01 | 4.20e+01 | 1.77e+02 | 2.52e-01 |
+| 2d_poisson_log_n200_k10_cr | 1.50e+01 | 1.36e+01 | 1.87e+02 | 8.01e-02 |
+| 2d_poisson_log_n5000_k10_cr | 2.25e+02 | 2.21e+02 | 2.47e+02 | 9.12e-01 |
+| 2d_quasibinomial_logit_n1000_k10_cr | 8.16e+01 | 7.47e+01 | 1.90e+02 | 4.29e-01 |
+| 2d_quasipoisson_log_n1000_k10_cr | 3.49e+01 | 3.42e+01 | 1.88e+02 | 1.86e-01 |
+| 3d_gaussian_mixed_n800_k10_cr | 7.14e+00 | 6.76e+00 | 6.85e+01 | 1.04e-01 |
+| 3d_poisson_log_n2000_k10_cr | 1.41e+02 | 1.39e+02 | 2.51e+02 | 5.61e-01 |
+| 4d_binomial_logit_n2000_k8_cr | 2.26e+02 | 2.18e+02 | 2.71e+02 | 8.33e-01 |
+| 4d_gamma_log_n2000_k8_cr | 1.30e+02 | 1.25e+02 | 4.40e+02 | 2.95e-01 |
+| 4d_gaussian_bs_n2000_k10 | 3.22e+01 | 2.38e+01 | 1.58e+02 | 2.04e-01 |
+| 4d_gaussian_mixed_n1000_k10_cr | 1.93e+01 | 1.75e+01 | 1.12e+02 | 1.72e-01 |
+| 4d_small_neighbourhood_n300 | 8.42e+00 | 7.89e+00 | 8.01e+01 | 1.05e-01 |
+| 5d_gaussian_mixed_n1500_k8_cr | 9.89e+00 | 9.65e+00 | 1.35e+02 | 7.33e-02 |
+| 5d_skewed_features_n5000 | 3.83e+01 | 3.54e+01 | 2.04e+02 | 1.87e-01 |
+| 6d_heatmap_pricing_n8000 | 7.91e+01 | 7.20e+01 | 3.71e+02 | 2.13e-01 |
+| 7d_neighbourhoods_compact_n3000 | 3.40e+01 | 3.05e+01 | 2.18e+02 | 1.56e-01 |
+| 8d_neighbourhoods_like_n15000 | 1.43e+02 | 1.39e+02 | 1.04e+03 | 1.38e-01 |

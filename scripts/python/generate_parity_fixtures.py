@@ -172,6 +172,8 @@ def fit_one(case) -> dict[str, Any]:
 
     formula = _build_formula(case.d, case.k, case.bs)
 
+    weights_list = inputs.get("weights")
+
     with openrlib.rlock:
         r_train = _df_to_r(df_train)
         r_test = _df_to_r(df_test)
@@ -189,12 +191,18 @@ def fit_one(case) -> dict[str, Any]:
         # core uses the shorter "GCV". Translate so cases.py can stay
         # neutral (the case carries the Rust spelling).
         r_method = "GCV.Cp" if case.method == "GCV" else case.method
-        fit = fitter(
-            formula,
+        fit_kwargs = dict(
             data=r_train,
             method=r_method,
             family=family,
         )
+        if weights_list is not None:
+            # Pass per-row prior weights through to mgcv. mgcv's `gam`
+            # accepts a numeric vector via `weights=`; we use a base-R
+            # vector rather than a column on `r_train` so mgcv resolves
+            # it as the prior-weights slot (vs. a regressor).
+            fit_kwargs["weights"] = ro.FloatVector(weights_list)
+        fit = fitter(formula, **fit_kwargs)
 
         # Model summaries
         beta = _to_np(stats.coef(fit))

@@ -7,13 +7,15 @@ use crate::linalg::solve;
 pub use crate::reml::ScaleParameterMethod;
 #[cfg(feature = "blas")]
 use crate::reml::{
-    compute_xtwx_cholesky, gcv_criterion, penalty_sqrt, reml_criterion, reml_criterion_multi,
-    reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
-    reml_gradient_gamfit4_tdist_analytic, reml_gradient_mgcv_exact_closed_form,
-    reml_gradient_mgcv_exact_ift, reml_gradient_multi_qr_adaptive,
-    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
-    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
-    tdist_shape_derivatives_gamfit4, tweedie_theta_derivatives_cached, TweedieThetaCache,
+    compute_xtwx_cholesky, gcv_criterion, newton_1d_with_halving, newton_2d_with_halving,
+    penalty_sqrt, reml_criterion, reml_criterion_multi, reml_criterion_multi_cached,
+    reml_criterion_multi_cached_mgcv_exact, reml_gradient_gamfit4_tdist_analytic,
+    reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
+    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
+    reml_hessian_gamfit4_tdist_analytic, reml_hessian_mgcv_exact_closed_form,
+    reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached, tdist_shape_derivatives_gamfit4,
+    tweedie_theta_derivatives_cached, ExtraKind, ExtraParam, OuterSearchVector,
+    TweedieThetaCache,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -119,6 +121,24 @@ fn dispatch_reml_score_with_family(
         )
     } else {
         reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
+    }
+}
+
+/// Map Tweedie working parameter θ → p (mgcv convention, a=1.001, b=1.999).
+/// Two branches keep the formula numerically stable across the sign of θ.
+/// Used by the outer-Newton Tweedie profile-p block and (post-refactor)
+/// the `commit_outer_search_vector` path that publishes the accepted p
+/// back to `self.family`.
+#[cfg(feature = "blas")]
+pub(crate) fn tweedie_theta_to_p(th: f64) -> f64 {
+    let a = 1.001_f64;
+    let b = 1.999_f64;
+    if th > 0.0 {
+        let e = (-th).exp();
+        (b + a * e) / (e + 1.0)
+    } else {
+        let e = th.exp();
+        (b * e + a) / (e + 1.0)
     }
 }
 
@@ -738,6 +758,90 @@ impl SmoothingParameter {
     pub fn with_scale_method(mut self, method: ScaleParameterMethod) -> Self {
         self.scale_method = method;
         self
+    }
+
+    /// Build the outer-Newton search vector `[log λ; extras]` from current
+    /// state. Bounds and step caps match the historical per-family values
+    /// (preserving byte-identical behaviour with the pre-refactor blocks).
+    #[cfg(feature = "blas")]
+    pub(crate) fn build_outer_search_vector(&self, log_lambda: &[f64]) -> OuterSearchVector {
+        let mut extras: Vec<ExtraParam> = Vec::new();
+        if self.tweedie_profile {
+            extras.push(ExtraParam {
+                kind: ExtraKind::TweedieTheta,
+                value: self.tweedie_theta,
+                lo: f64::NEG_INFINITY,
+                hi: f64::INFINITY,
+                step_cap: 2.0,
+            });
+        }
+        if self.negbin_profile {
+            extras.push(ExtraParam {
+                kind: ExtraKind::NegBinLogTheta,
+                value: self.negbin_log_theta,
+                lo: f64::NEG_INFINITY,
+                hi: f64::INFINITY,
+                step_cap: 0.5,
+            });
+        }
+        if self.tdist_profile {
+            extras.push(ExtraParam {
+                kind: ExtraKind::TDistLogSigma2,
+                value: self.tdist_log_sigma2,
+                lo: self.tdist_log_sigma2_lo,
+                hi: self.tdist_log_sigma2_hi,
+                step_cap: 1.0,
+            });
+            extras.push(ExtraParam {
+                kind: ExtraKind::TDistLogDfM2,
+                value: self.tdist_log_df,
+                lo: 1e-8_f64.ln(),
+                hi: (100.0_f64 - 2.0).ln(),
+                step_cap: 1.0,
+            });
+        }
+        OuterSearchVector {
+            log_lambda: log_lambda.to_vec(),
+            extras,
+        }
+    }
+
+    /// Write accepted extras back into `self`, rebuild the Family enum
+    /// (Tweedie p → freeze if > 1.97; NegBin θ ∈ [0.5,50]; TDist df∈[2,100],
+    /// σ²∈[1e-8, 1e8]) and publish into the shared `family_cell` for the
+    /// next outer-iter's PIRLS callback.
+    #[cfg(feature = "blas")]
+    pub(crate) fn commit_outer_search_vector(&mut self, sv: &OuterSearchVector) {
+        for extra in sv.extras.iter() {
+            match extra.kind {
+                ExtraKind::TweedieTheta => {
+                    self.tweedie_theta = extra.value;
+                    let new_p = tweedie_theta_to_p(extra.value).max(1.001_f64).min(1.999_f64);
+                    if new_p > 1.97 {
+                        self.tweedie_profile = false;
+                    }
+                    self.family = crate::pirls::Family::Tweedie { p: new_p };
+                }
+                ExtraKind::NegBinLogTheta => {
+                    self.negbin_log_theta = extra.value;
+                    let new_theta = extra.value.exp().max(0.5_f64).min(50.0_f64);
+                    self.family = crate::pirls::Family::NegBin { theta: new_theta };
+                }
+                ExtraKind::TDistLogSigma2 => self.tdist_log_sigma2 = extra.value,
+                ExtraKind::TDistLogDfM2 => self.tdist_log_df = extra.value,
+            }
+        }
+        if self.tdist_profile {
+            self.family = crate::pirls::Family::TDist {
+                df: (self.tdist_log_df.exp() + 2.0).max(2.0_f64).min(100.0_f64),
+                sigma2: self.tdist_log_sigma2.exp().max(1e-8_f64).min(1e8_f64),
+            };
+        }
+        if let Some(cell) = self.family_cell.as_ref() {
+            if let Ok(mut g) = cell.lock() {
+                *g = self.family;
+            }
+        }
     }
 
     /// Optimize smoothing parameters using REML or GCV with adaptive initialization
@@ -2064,24 +2168,16 @@ impl SmoothingParameter {
             // verification.
             // -----------------------------------------------------------------------
             if self.tweedie_profile {
-                let theta = self.tweedie_theta;
+                let mut sv = self.build_outer_search_vector(&log_lambda);
+                let idx = sv.find_kind(ExtraKind::TweedieTheta).expect(
+                    "tweedie_profile=true but no TweedieTheta extra in OuterSearchVector",
+                );
+                let theta = sv.extras[idx].value;
+                let step_cap = sv.extras[idx].step_cap;
                 let h_th: f64 = 1e-3;
-                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
-
-                // Helper: map θ → p (mgcv convention, a=1.001 b=1.999)
-                fn tw_theta_to_p(th: f64) -> f64 {
-                    let a = 1.001_f64;
-                    let b = 1.999_f64;
-                    if th > 0.0 {
-                        let e = (-th).exp();
-                        (b + a * e) / (e + 1.0)
-                    } else {
-                        let e = th.exp();
-                        (b * e + a) / (e + 1.0)
-                    }
-                }
+                let current_lambdas: Vec<f64> = sv.log_lambda.iter().map(|l| l.exp()).collect();
                 let tw_theta_to_p_clamped =
-                    |th: f64| -> f64 { tw_theta_to_p(th).max(1.001_f64).min(1.999_f64) };
+                    |th: f64| -> f64 { tweedie_theta_to_p(th).max(1.001_f64).min(1.999_f64) };
 
                 // Choose the fast cached path (default) or the legacy FD path
                 // (env override) for verification.
@@ -2149,15 +2245,9 @@ impl SmoothingParameter {
                 };
 
                 if let Ok((rc, dlr_dth, d2lr_dth2, cache_opt)) = derivs {
-                    // Newton step: δθ = -g / |H| with |H| floored for stability
-                    let denom = d2lr_dth2.abs().max(1e-4);
-                    let delta_theta = -(dlr_dth / denom);
-                    let delta_theta = delta_theta.max(-2.0_f64).min(2.0_f64);
-
-                    // Line-search on θ: try full step, then half-step.
-                    // Compare against rc (REML at current θ with updated λ).
-                    // Reuse the cache for the candidate evaluations when we
-                    // have one — same frozen system, just a different p.
+                    // 1-D Newton + line-search via the shared helper. Reuse
+                    // the cache for the candidate evaluations when we have
+                    // one — same frozen system, just a different p.
                     let eval_at = |th_trial: f64| -> Result<f64> {
                         if let Some(cache) = cache_opt.as_ref() {
                             cache.score_at_p(tw_theta_to_p_clamped(th_trial))
@@ -2165,36 +2255,13 @@ impl SmoothingParameter {
                             tw_eval_fd!(th_trial)
                         }
                     };
+                    let accepted_theta = newton_1d_with_halving(
+                        theta, dlr_dth, d2lr_dth2, rc, step_cap, eval_at,
+                    );
 
-                    let mut accepted_theta = theta;
-                    let candidate = theta + delta_theta;
-                    if let Ok(r_new) = eval_at(candidate) {
-                        if r_new < rc {
-                            accepted_theta = candidate;
-                        } else {
-                            let half_cand = theta + delta_theta * 0.5;
-                            if let Ok(r_half) = eval_at(half_cand) {
-                                if r_half < rc {
-                                    accepted_theta = half_cand;
-                                }
-                            }
-                        }
-                    }
-
-                    self.tweedie_theta = accepted_theta;
+                    sv.extras[idx].value = accepted_theta;
+                    self.commit_outer_search_vector(&sv);
                     let new_p = tw_theta_to_p_clamped(accepted_theta);
-                    // Near p=2 the Wright series becomes intractable; freeze profiling.
-                    if new_p > 1.97 {
-                        self.tweedie_profile = false;
-                    }
-                    self.family = crate::pirls::Family::Tweedie { p: new_p };
-                    // Sync the closure-side cell so the next iter's PIRLS
-                    // refresh callback sees the freshly profiled p.
-                    if let Some(cell) = self.family_cell.as_ref() {
-                        if let Ok(mut g) = cell.lock() {
-                            *g = self.family;
-                        }
-                    }
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
@@ -2216,9 +2283,14 @@ impl SmoothingParameter {
             // Working in log-space enforces θ > 0 automatically.
             // -----------------------------------------------------------------------
             if self.negbin_profile {
-                let log_theta = self.negbin_log_theta;
+                let mut sv = self.build_outer_search_vector(&log_lambda);
+                let idx = sv.find_kind(ExtraKind::NegBinLogTheta).expect(
+                    "negbin_profile=true but no NegBinLogTheta extra in OuterSearchVector",
+                );
+                let log_theta = sv.extras[idx].value;
+                let step_cap = sv.extras[idx].step_cap;
                 let h_th: f64 = 1e-3;
-                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+                let current_lambdas: Vec<f64> = sv.log_lambda.iter().map(|l| l.exp()).collect();
 
                 // Inline helper: evaluate REML score at trial log(θ)
                 macro_rules! nb_eval {
@@ -2248,37 +2320,15 @@ impl SmoothingParameter {
                     let dlr_dlt = (rp - rm) / (2.0 * h_th);
                     let d2lr_dlt2 = (rp - 2.0 * rc + rm) / (h_th * h_th);
 
-                    let denom = d2lr_dlt2.abs().max(1e-4);
-                    let delta_lt = -(dlr_dlt / denom);
-                    // Clamp step to [-0.5, 0.5] per iteration
-                    let delta_lt = delta_lt.max(-0.5_f64).min(0.5_f64);
+                    // 1-D Newton + line-search via the shared helper.
+                    let eval_at = |lt_trial: f64| -> Result<f64> { nb_eval!(lt_trial) };
+                    let accepted_lt = newton_1d_with_halving(
+                        log_theta, dlr_dlt, d2lr_dlt2, rc, step_cap, eval_at,
+                    );
 
-                    // Line-search on log(θ)
-                    let mut accepted_lt = log_theta;
-                    let candidate = log_theta + delta_lt;
-                    if let Ok(r_new) = nb_eval!(candidate) {
-                        if r_new < rc {
-                            accepted_lt = candidate;
-                        } else {
-                            let half_cand = log_theta + delta_lt * 0.5;
-                            if let Ok(r_half) = nb_eval!(half_cand) {
-                                if r_half < rc {
-                                    accepted_lt = half_cand;
-                                }
-                            }
-                        }
-                    }
-
-                    self.negbin_log_theta = accepted_lt;
+                    sv.extras[idx].value = accepted_lt;
+                    self.commit_outer_search_vector(&sv);
                     let new_theta = accepted_lt.exp().max(0.5_f64).min(50.0_f64);
-                    self.family = crate::pirls::Family::NegBin { theta: new_theta };
-                    // Sync the closure-side cell so the next iter's PIRLS
-                    // refresh callback sees the freshly profiled θ.
-                    if let Some(cell) = self.family_cell.as_ref() {
-                        if let Ok(mut g) = cell.lock() {
-                            *g = self.family;
-                        }
-                    }
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
@@ -2300,18 +2350,23 @@ impl SmoothingParameter {
             // That replaces the previous frozen-β sequential σ²-then-df steps.
             // -----------------------------------------------------------------------
             if self.tdist_profile {
-                let log_sigma2 = self.tdist_log_sigma2;
-                let log_df = self.tdist_log_df;
-                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
-                let log_sigma2_lo = self.tdist_log_sigma2_lo;
-                let log_sigma2_hi = self.tdist_log_sigma2_hi;
-                let log_df_lo = 1e-8_f64.ln();
-                let log_df_hi = (100.0_f64 - 2.0).ln();
+                let mut sv = self.build_outer_search_vector(&log_lambda);
+                let idx_s = sv.find_kind(ExtraKind::TDistLogSigma2).expect(
+                    "tdist_profile=true but no TDistLogSigma2 extra in OuterSearchVector",
+                );
+                let idx_d = sv.find_kind(ExtraKind::TDistLogDfM2).expect(
+                    "tdist_profile=true but no TDistLogDfM2 extra in OuterSearchVector",
+                );
+                let log_sigma2 = sv.extras[idx_s].value;
+                let log_df = sv.extras[idx_d].value;
+                let bounds_s = (sv.extras[idx_s].lo, sv.extras[idx_s].hi);
+                let bounds_d = (sv.extras[idx_d].lo, sv.extras[idx_d].hi);
+                let current_lambdas: Vec<f64> = sv.log_lambda.iter().map(|l| l.exp()).collect();
 
                 macro_rules! shape_eval {
                     ($ls_trial:expr, $ld_trial:expr) => {{
-                        let ls_trial = ($ls_trial).max(log_sigma2_lo).min(log_sigma2_hi);
-                        let ld_trial = ($ld_trial).max(log_df_lo).min(log_df_hi);
+                        let ls_trial = ($ls_trial).max(bounds_s.0).min(bounds_s.1);
+                        let ld_trial = ($ld_trial).max(bounds_d.0).min(bounds_d.1);
                         let trial_fam = crate::pirls::Family::TDist {
                             df: (ld_trial.exp() + 2.0).max(2.0_f64).min(100.0_f64),
                             sigma2: ls_trial.exp().max(1e-8_f64).min(1e8_f64),
@@ -2377,53 +2432,17 @@ impl SmoothingParameter {
                     let h_ss = shape_hess[[0, 0]];
                     let h_dd = shape_hess[[1, 1]];
                     let h_sd = shape_hess[[0, 1]];
-                    let det = h_ss * h_dd - h_sd * h_sd;
 
-                    let (mut delta_s, mut delta_d) = if det.abs() > 1e-8 && det.is_finite() {
-                        (
-                            (-h_dd * g_s + h_sd * g_d) / det,
-                            (h_sd * g_s - h_ss * g_d) / det,
-                        )
-                    } else {
-                        (-g_s / h_ss.abs().max(1e-4), -g_d / h_dd.abs().max(1e-4))
-                    };
-                    let max_abs = delta_s.abs().max(delta_d.abs());
-                    if max_abs > 1.0 {
-                        delta_s /= max_abs;
-                        delta_d /= max_abs;
-                    }
+                    // 2-D Newton + 8-halving line-search via the shared helper.
+                    let eval_at = |s_t: f64, d_t: f64| -> Result<f64> { shape_eval!(s_t, d_t) };
+                    let (accepted_s, accepted_d) = newton_2d_with_halving(
+                        log_sigma2, log_df, g_s, g_d, h_ss, h_dd, h_sd, sc, bounds_s,
+                        bounds_d, 8, eval_at,
+                    );
 
-                    let mut accepted_s = log_sigma2;
-                    let mut accepted_d = log_df;
-                    let mut step_scale = 1.0;
-                    for _ in 0..8 {
-                        let cand_s = (log_sigma2 + step_scale * delta_s)
-                            .max(log_sigma2_lo)
-                            .min(log_sigma2_hi);
-                        let cand_d = (log_df + step_scale * delta_d)
-                            .max(log_df_lo)
-                            .min(log_df_hi);
-                        if let Ok(s_new) = shape_eval!(cand_s, cand_d) {
-                            if s_new < sc {
-                                accepted_s = cand_s;
-                                accepted_d = cand_d;
-                                break;
-                            }
-                        }
-                        step_scale *= 0.5;
-                    }
-
-                    self.tdist_log_sigma2 = accepted_s;
-                    self.tdist_log_df = accepted_d;
-                    self.family = crate::pirls::Family::TDist {
-                        df: (accepted_d.exp() + 2.0).max(2.0_f64).min(100.0_f64),
-                        sigma2: accepted_s.exp().max(1e-8_f64).min(1e8_f64),
-                    };
-                    if let Some(cell) = self.family_cell.as_ref() {
-                        if let Ok(mut g) = cell.lock() {
-                            *g = self.family;
-                        }
-                    }
+                    sv.extras[idx_s].value = accepted_s;
+                    sv.extras[idx_d].value = accepted_d;
+                    self.commit_outer_search_vector(&sv);
 
                     if std::env::var("MGCV_PROFILE").is_ok() {
                         eprintln!(
