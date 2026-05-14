@@ -43,6 +43,9 @@ _FAMILY_MAP = {
     "inverse.gaussian": "inverse.gaussian",
     "negative.binomial": "negbin",
     "nb": "nb",
+    # Scaled t-distribution (mgcv's scat()). Heavy-tailed alternative
+    # to Gaussian; df is profiled at fit time.
+    "scat": "t-dist",
 }
 
 # mgcv_rust's Family enum has no link parameter — only the canonical link
@@ -66,6 +69,8 @@ _CANONICAL_LINK = {
     "inverse.gaussian": "log",
     "negative.binomial": "log",
     "nb": "log",
+    # scat() supports identity link only.
+    "scat": "identity",
 }
 
 

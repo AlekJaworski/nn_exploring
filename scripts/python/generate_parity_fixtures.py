@@ -83,6 +83,11 @@ _FAMILY_BUILDERS = {
     "Tweedie": lambda link: ro.r(f'Tweedie(p=1.5, link="{link}")'),
     # Profile p — mgcv's tw() over default range a=1.001..b=1.999.
     "tw": lambda link: ro.r(f'tw(link="{link}")'),
+    # Scaled t-distribution (heavy-tailed) — mgcv's extended-family
+    # `scat()`. Only identity link is supported. df is profiled at fit
+    # time (we don't pass min.df / max.df so it falls back to mgcv's
+    # defaults; our Rust core uses the same Brent bracket [2, 100]).
+    "scat": lambda link: ro.r(f'scat(link="{link}")'),
     # Negative binomial. mgcv has its own `negbin(theta, link)` in
     # gam.fit3.r:2564 (fixed θ, gam.fit3 pipeline) and `nb(link)` in
     # efam.r:161 (profile θ, extended-family pipeline). MASS's

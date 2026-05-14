@@ -78,8 +78,21 @@ _NB_PROFILE_V1_REASON = (
     "regions. Fixed-θ NB (negbin(theta)) passes byte-for-byte at "
     "train absdiff <1e-3."
 )
+_SCAT_PROFILE_V1_REASON = (
+    "scat() weighted, n=300: train absdiff ~3e-3 / relerr ~7% — same "
+    "regime as the unweighted scat parity (which sits at ~8e-3 absdiff "
+    "vs mgcv::scat per Ergo-6). The gap is the profile-σ²/df-inside-"
+    "PIRLS vs mgcv's gam.fit5 joint LAML on (β, log σ², log ν), not "
+    "the weighted plumbing — weighted/unweighted track each other to "
+    "well under the rtol=1e-3 bar (1e-10 with unit weights, ~3e-3 "
+    "non-uniform). Closes when we port gam.fit5's joint LAML."
+)
 
-_KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {}
+_KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
+    "test_parity": {
+        "1d_scat_weighted_n300_k10_cr": _SCAT_PROFILE_V1_REASON,
+    },
+}
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:

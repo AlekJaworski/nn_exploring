@@ -1663,6 +1663,40 @@ pub fn profile_df(residuals: &[f64], sigma2: f64) -> f64 {
     brent_minimize(neg_pll, 2.0, 100.0, 1e-4, 50)
 }
 
+/// Prior-weighted version of `profile_df`. Each per-row log-density
+/// contribution is multiplied by `prior_weights[i]`, mirroring mgcv's
+/// `weights=` convention (each observation behaves like w_i replications
+/// of itself). Falls back to unweighted for `prior_weights = None`.
+pub fn profile_df_weighted(
+    residuals: &[f64],
+    sigma2: f64,
+    prior_weights: Option<&Array1<f64>>,
+) -> f64 {
+    let pw = match prior_weights {
+        None => return profile_df(residuals, sigma2),
+        Some(pw) => pw,
+    };
+    let neg_pll = |nu: f64| -> f64 {
+        let sum_pw: f64 = pw.iter().sum::<f64>().max(1e-300);
+        let half_nu_p1 = (nu + 1.0) / 2.0;
+        let half_nu = nu / 2.0;
+        let log_sum: f64 = residuals
+            .iter()
+            .zip(pw.iter())
+            .map(|(&r, &w)| {
+                let t2 = r * r / (nu * sigma2.max(1e-300));
+                w * (1.0 + t2).ln()
+            })
+            .sum();
+        -(sum_pw
+            * (log_gamma(half_nu_p1)
+                - log_gamma(half_nu)
+                - 0.5 * (nu * std::f64::consts::PI * sigma2.max(1e-300)).ln())
+            - half_nu_p1 * log_sum)
+    };
+    brent_minimize(neg_pll, 2.0, 100.0, 1e-4, 50)
+}
+
 /// Brent's method for univariate function minimization on [a, b].
 /// Adapted from the classic algorithm (no external dependencies).
 fn brent_minimize<F: Fn(f64) -> f64>(
@@ -1781,6 +1815,7 @@ pub fn fit_pirls_tdist(
     fixed_sigma2: Option<f64>,
     max_iter: usize,
     tolerance: f64,
+    prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
     let n = y.len();
     let p = x.ncols();
@@ -1796,6 +1831,15 @@ pub fn fit_pirls_tdist(
         return Err(GAMError::DimensionMismatch(
             "Number of lambdas must match number of penalty matrices".to_string(),
         ));
+    }
+    if let Some(pw) = prior_weights {
+        if pw.len() != n {
+            return Err(GAMError::DimensionMismatch(format!(
+                "prior_weights length ({}) must match y length ({})",
+                pw.len(),
+                n
+            )));
+        }
     }
 
     // Validate df if fixed
@@ -1884,7 +1928,11 @@ pub fn fit_pirls_tdist(
         // expected Hessian fallback when the observed curvature is negative.
         let eta: Array1<f64> = x.dot(&beta);
         let mut z_work = Array1::<f64>::zeros(n);
-        let w: Array1<f64> = y
+        // Per-row t-IRLS weight w_iᵗ. Computed independently of any prior
+        // weights so the σ²/df updates below see the textbook (unweighted)
+        // t-weight; mgcv `weights=` semantics multiply on top of the
+        // family's working weight, not into the family parameter MLE.
+        let w_tdist: Array1<f64> = y
             .iter()
             .zip(eta.iter())
             .enumerate()
@@ -1900,6 +1948,18 @@ pub fn fit_pirls_tdist(
                 }
             })
             .collect();
+        // Combine with prior_weights: mgcv treats `weights=` as a per-row
+        // multiplier on the log-likelihood, so it multiplies the IRLS
+        // working weight everywhere (X'WX, X'Wz). Without prior weights
+        // we pass through w_tdist unchanged.
+        let w: Array1<f64> = match prior_weights {
+            Some(pw) => w_tdist
+                .iter()
+                .zip(pw.iter())
+                .map(|(&wt, &wp)| wt * wp)
+                .collect(),
+            None => w_tdist.clone(),
+        };
 
         // X'WX via dense triple product
         let xtwx = crate::reml::compute_xtwx(x, &w);
@@ -1935,28 +1995,45 @@ pub fn fit_pirls_tdist(
 
         // ── MLE σ² update (mgcv's gam.fit5 inner-loop estimator) ──
         //
-        // From d log L/d σ² = 0:
-        //   σ²_new = (1/n) · Σ w_i · r_i²,   w_i = (ν+1)/(ν + r_i²/σ²)
+        // From d log L/d σ² = 0 (per-row contributions weighted by w_iᵖ):
+        //   σ²_new = Σ w_iᵖ · w_iᵗ · r_i² / Σ w_iᵖ,   w_iᵗ = (ν+1)/(ν + r²/σ²)
         // iterated to a fixed point inside the outer PIRLS loop. This is
-        // the MLE σ². Skipped when `fixed_sigma2` is supplied — the
-        // gam.fit5 outer Newton on log σ² (`smooth.rs`) drives σ² instead,
-        // letting the LAML score's Jeffreys-like correction shift σ² away
-        // from the MLE toward a finite-df minimum.
+        // the MLE σ². For unweighted fits (w_iᵖ = 1) this reduces to the
+        // textbook Σw·r²/n form. Skipped when `fixed_sigma2` is supplied —
+        // the gam.fit5 outer Newton on log σ² (`smooth.rs`) drives σ²
+        // instead, letting the LAML score's Jeffreys-like correction
+        // shift σ² away from the MLE toward a finite-df minimum.
         if fixed_sigma2.is_none() {
             let w_new: Vec<f64> = residuals.iter().map(|&r| t_weight(r, sigma2, df)).collect();
-            let sum_wr2: f64 = w_new
-                .iter()
-                .zip(residuals.iter())
-                .map(|(&wi, &ri)| wi * ri * ri)
-                .sum();
-            sigma2 = (sum_wr2 / n as f64).max(1e-6);
+            let (sum_wr2, sum_pw): (f64, f64) = match prior_weights {
+                Some(pw) => {
+                    let mut a = 0.0;
+                    let mut b = 0.0;
+                    for i in 0..n {
+                        a += pw[i] * w_new[i] * residuals[i] * residuals[i];
+                        b += pw[i];
+                    }
+                    (a, b.max(1e-300))
+                }
+                None => {
+                    let a: f64 = w_new
+                        .iter()
+                        .zip(residuals.iter())
+                        .map(|(&wi, &ri)| wi * ri * ri)
+                        .sum();
+                    (a, n as f64)
+                }
+            };
+            sigma2 = (sum_wr2 / sum_pw).max(1e-6);
         }
         let _ = p;
 
         // ── Update df via 1D Brent (skip if user fixed df) ───────────────
         if fixed_df.is_none() && outer_iter % 2 == 0 {
-            // Profile df on every other outer iteration for efficiency
-            df = profile_df(&residuals, sigma2);
+            // Profile df on every other outer iteration for efficiency.
+            // With prior weights the profile log-likelihood is Σ w_iᵖ ·
+            // log p_t(y_i | μ_i, σ², ν) — passed through `profile_df`.
+            df = profile_df_weighted(&residuals, sigma2, prior_weights);
         }
 
         // ── Convergence check ─────────────────────────────────────────────
@@ -1982,7 +2059,7 @@ pub fn fit_pirls_tdist(
         .map(|(&yi, &fi)| yi - fi)
         .collect();
 
-    let weights: Array1<f64> = residuals_final
+    let weights_tdist: Array1<f64> = residuals_final
         .iter()
         .zip(eta.iter())
         .map(|(&r, &etai)| {
@@ -1993,6 +2070,16 @@ pub fn fit_pirls_tdist(
             }
         })
         .collect();
+    // Multiply prior_weights into the final IRLS weights so the outer
+    // REML score sees the correct XᵀWX, matching the GLM path.
+    let weights: Array1<f64> = match prior_weights {
+        Some(pw) => weights_tdist
+            .iter()
+            .zip(pw.iter())
+            .map(|(&wt, &wp)| wt * wp)
+            .collect(),
+        None => weights_tdist,
+    };
     let working_response: Array1<f64> = residuals_final
         .iter()
         .zip(eta.iter())
@@ -2005,8 +2092,17 @@ pub fn fit_pirls_tdist(
         })
         .collect();
 
-    // Deviance as weighted RSS (used for REML score; not the t-log-likelihood).
-    let deviance: f64 = residuals_final.iter().map(|&r| r * r).sum();
+    // Deviance as prior-weighted RSS (used for REML score; not the
+    // t-log-likelihood). Mgcv treats `weights=` as a multiplier on the
+    // per-row deviance contribution; reduces to plain Σr² when w_p = 1.
+    let deviance: f64 = match prior_weights {
+        Some(pw) => residuals_final
+            .iter()
+            .zip(pw.iter())
+            .map(|(&r, &wp)| wp * r * r)
+            .sum(),
+        None => residuals_final.iter().map(|&r| r * r).sum(),
+    };
 
     Ok(PiRLSResult {
         coefficients: beta,

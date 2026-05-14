@@ -29,6 +29,15 @@ def _gen_1d_smooth(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.nda
     return x, y
 
 
+def _gen_1d_smooth_tdist(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """1D sin curve with heavy-tailed t-distributed noise (ν=4). Suitable
+    for the scat (scaled t) family — has occasional outliers a Gaussian
+    likelihood would over-fit."""
+    x = rng.uniform(0.0, 1.0, n).reshape(-1, 1)
+    y = np.sin(2 * np.pi * x.ravel()) + 0.2 * rng.standard_t(df=4, size=n)
+    return x, y
+
+
 def _gen_1d_wiggly(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
     x = rng.uniform(0.0, 1.0, n).reshape(-1, 1)
     y = (np.sin(4 * np.pi * x.ravel())
@@ -1013,6 +1022,17 @@ CASES: list[Case] = [
         seed=302, n=500, d=1, k=[10], bs=["cr"],
         family="poisson", link="log", method="REML",
         generator=_gen_1d_poisson_log,
+        weights_fn=lambda rng, x: 1.0 + np.abs(x[:, 0] - 0.5),
+    ),
+    Case(
+        name="1d_scat_weighted_n300_k10_cr",
+        description="Weighted t-dist (scat) — covers sample_weight= on the TDist family",
+        seed=303, n=300, d=1, k=[10], bs=["cr"],
+        family="scat", link="identity", method="REML",
+        generator=_gen_1d_smooth_tdist,
+        # Smooth, strictly positive prior weights: heaviest at the
+        # boundaries, lightest at x=0.5 — concrete asymmetry so the
+        # weighted fit visibly differs from the unweighted fit.
         weights_fn=lambda rng, x: 1.0 + np.abs(x[:, 0] - 0.5),
     ),
 ]

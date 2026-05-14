@@ -296,14 +296,6 @@ impl FitCache {
         // When `tdist_outer_sigma2` is true, σ² is also treated as fixed
         // (driven by the outer log σ² Newton block).
         if let crate::pirls::Family::TDist { df, sigma2 } = family {
-            if prior_weights.is_some() {
-                return Err(GAMError::OptimizationFailed(
-                    "weights= not yet supported for family='t-dist'; \
-                     supported families are: gaussian, binomial, poisson, \
-                     gamma, quasibinomial, quasipoisson"
-                        .to_string(),
-                ));
-            }
             let fixed_df = if df > 0.0 { Some(df) } else { None };
             let fixed_sigma2 = if tdist_outer_sigma2 {
                 Some(sigma2)
@@ -319,6 +311,7 @@ impl FitCache {
                 fixed_sigma2,
                 max_iter,
                 tolerance,
+                prior_weights,
             );
         }
 
@@ -328,7 +321,7 @@ impl FitCache {
                 return Err(GAMError::OptimizationFailed(
                     "weights= not yet supported for family='quantile'; \
                      supported families are: gaussian, binomial, poisson, \
-                     gamma, quasibinomial, quasipoisson"
+                     gamma, quasibinomial, quasipoisson, t-dist (scat)"
                         .to_string(),
                 ));
             }
