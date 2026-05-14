@@ -7,7 +7,7 @@ use crate::discrete::{
 use crate::linalg::solve;
 use crate::reml::compute_xtwx_dispatch;
 use crate::{GAMError, Result};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 
 /// REML / LAML score formula. Different families use structurally
 /// different criteria (see `Family::score_formula`).
@@ -1794,6 +1794,142 @@ fn brent_minimize<F: Fn(f64) -> f64>(
     x
 }
 
+/// Textbook EM t-distribution weight `w = (ν+1) / (ν + r²/σ²)`.
+///
+/// Used inside the inner-loop σ² MLE update (mgcv `gam.fit5` form) where the
+/// score equation `Σ wᵖ·wᵗ·r² = σ² · Σ wᵖ` requires the EM weight specifically,
+/// regardless of which working pair the IRLS step used. Floored at 1e-10 to
+/// avoid pathological zero-weight rows.
+#[inline]
+pub(crate) fn t_weight_em(r: f64, sigma2: f64, df: f64) -> f64 {
+    let t2 = r * r / sigma2.max(1e-300);
+    ((df + 1.0) / (df + t2)).max(1e-10)
+}
+
+/// Newton (observed-info) working pair `(w, z)` from mgcv `scat$Dd`.
+///
+/// Returns `(½·D''μ, η − D'μ/D''μ)`. Falls back to the expected-info form
+/// `(ν+1)/(σ²(ν+3))` when the observed curvature is non-PSD. Floored at 1e-10
+/// to keep the Hessian invertible. Used by [`tdist_irls_step`] when the
+/// caller is a gam.fit5-style outer Newton driver that supplies a fixed σ².
+#[inline]
+pub(crate) fn t_newton_working_pair(r: f64, eta: f64, sigma2: f64, df: f64) -> (f64, f64) {
+    let sigma2 = sigma2.max(1e-300);
+    let denom = df * sigma2 + r * r;
+    let dmu = -2.0 * (df + 1.0) * r / denom;
+    let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
+    let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+    let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
+        observed_dmu2
+    } else {
+        expected_dmu2.max(1e-12)
+    };
+    let z = eta - dmu / dmu2;
+    ((0.5 * dmu2).max(1e-10), z)
+}
+
+/// Per-observation working pair `(w, z)` for one t-distribution IRLS step.
+///
+/// Returned by [`tdist_irls_step`]. The values are the per-row working weight
+/// and working response *after* multiplying any caller-supplied prior weights
+/// into `w` — i.e. the vectors that the outer loop hands directly to the
+/// X'WX / X'Wz assembly.
+///
+/// Refactor R2 (Path B prep): both `fit_pirls_tdist` (dense) and
+/// `fit_pirls_tdist_discrete` route through this helper so the genuine
+/// per-row math lives in one place.
+pub(crate) struct TdistIrlsStep {
+    /// Combined working weight `w_i = w_iᵗ · w_iᵖ` (prior weights folded in).
+    pub w: Array1<f64>,
+    /// Working response `z_i` (textbook EM: `z_i = y_i`; Newton path:
+    /// `z_i = η_i − dμ/dμ²`).
+    pub z: Array1<f64>,
+}
+
+/// Compute one t-distribution IRLS working pair `(w, z)` at fixed `(σ², df)`.
+///
+/// Implements the per-row arithmetic that was previously inlined into
+/// [`fit_pirls_tdist`] and [`fit_pirls_tdist_discrete`]. Pure function: no
+/// allocation other than the two returned vectors, no I/O, no global state.
+///
+/// `use_newton_working` selects between:
+///   - `false` (textbook EM, used when the inner loop drives σ²/df itself):
+///     `w_i = (df+1) / (df + r_i² / σ²)`, `z_i = y_i`.
+///   - `true` (Newton observed-info, used when `fixed_sigma2` is supplied by
+///     the gam.fit5 outer Newton): `w_i = ½ · D''μ(r_i)`, `z_i = η_i − D'μ/D''μ`,
+///     with the expected-info fallback when the observed curvature is non-PSD.
+///
+/// The output weight has `prior_weights` (when supplied) already multiplied
+/// in row-wise, matching mgcv's `weights=` semantics where the prior weight is
+/// a per-row multiplier on the family's working weight.
+///
+/// **Lifted from** `fit_pirls_tdist` inner loop body — byte-identical
+/// arithmetic.
+pub(crate) fn tdist_irls_step(
+    y: ArrayView1<f64>,
+    eta: ArrayView1<f64>,
+    prior_weights: Option<ArrayView1<f64>>,
+    sigma2: f64,
+    df: f64,
+    use_newton_working: bool,
+) -> TdistIrlsStep {
+    let n = y.len();
+    debug_assert_eq!(eta.len(), n, "eta length must match y");
+    if let Some(pw) = prior_weights.as_ref() {
+        debug_assert_eq!(pw.len(), n, "prior_weights length must match y");
+    }
+
+    // EM-IRLS t-weight: w_i = (ν+1) / (ν + r²/σ²).
+    //
+    // Derivation: from d log L / d β = 0 with the t-density we get the
+    // weighted normal equations X'WX β = X'Wy where W = diag(w_i) above.
+    // This is the standard EM majorisation for t-regression and the form
+    // mgcv's gam.fit5 uses *implicitly* in the σ² score (the σ² MLE
+    // condition Σw·r² = nσ² inverts to σ² = Σw·r²/n with this same w).
+    //
+    // The 2026-05-08 attempt to switch IRLS to observed-info Dmu2/2 broke
+    // test_tdist_mgcv_parity (max relerr 0.10 → 0.44): observed-info has
+    // units of 1/σ², whereas the rest of the pipeline (penalty matrix S,
+    // ridge, λ) is calibrated for the unit-magnitude EM weight. The σ²
+    // MLE update also requires the EM weight to recover the t-likelihood
+    // MLE. Reverted; stayed with textbook EM-IRLS.
+    let mut z_work = Array1::<f64>::zeros(n);
+    // Per-row t-IRLS weight w_iᵗ. Computed independently of any prior
+    // weights so the σ²/df updates see the textbook (unweighted) t-weight;
+    // mgcv `weights=` semantics multiply on top of the family's working
+    // weight, not into the family parameter MLE.
+    let w_tdist: Array1<f64> = y
+        .iter()
+        .zip(eta.iter())
+        .enumerate()
+        .map(|(i, (&yi, &etai))| {
+            let r = yi - etai;
+            if use_newton_working {
+                let (wi, zi) = t_newton_working_pair(r, etai, sigma2, df);
+                z_work[i] = zi;
+                wi
+            } else {
+                z_work[i] = yi;
+                t_weight_em(r, sigma2, df)
+            }
+        })
+        .collect();
+    // Combine with prior_weights: mgcv treats `weights=` as a per-row
+    // multiplier on the log-likelihood, so it multiplies the IRLS
+    // working weight everywhere (X'WX, X'Wz). Without prior weights
+    // we pass through w_tdist unchanged.
+    let w: Array1<f64> = match prior_weights.as_ref() {
+        Some(pw) => w_tdist
+            .iter()
+            .zip(pw.iter())
+            .map(|(&wt, &wp)| wt * wp)
+            .collect(),
+        None => w_tdist,
+    };
+
+    TdistIrlsStep { w, z: z_work }
+}
+
 /// Fit a penalized GAM with scaled t-distribution errors.
 ///
 /// This is the outer loop for `Family::TDist` fitting. It alternates between:
@@ -1883,38 +2019,10 @@ pub fn fit_pirls_tdist(
     // df: start at user value or 5.0 (a reasonable default)
     let mut df = fixed_df.unwrap_or(5.0).clamp(2.0, 100.0);
 
-    // EM-IRLS t-weight: w_i = (ν+1) / (ν + r²/σ²).
-    //
-    // Derivation: from d log L / d β = 0 with the t-density we get the
-    // weighted normal equations X'WX β = X'Wy where W = diag(w_i) above.
-    // This is the standard EM majorisation for t-regression and the form
-    // mgcv's gam.fit5 uses *implicitly* in the σ² score (the σ² MLE
-    // condition Σw·r² = nσ² inverts to σ² = Σw·r²/n with this same w).
-    //
-    // The 2026-05-08 attempt to switch IRLS to observed-info Dmu2/2 broke
-    // test_tdist_mgcv_parity (max relerr 0.10 → 0.44): observed-info has
-    // units of 1/σ², whereas the rest of the pipeline (penalty matrix S,
-    // ridge, λ) is calibrated for the unit-magnitude EM weight. The σ²
-    // MLE update also requires the EM weight to recover the t-likelihood
-    // MLE. Reverted; stayed with textbook EM-IRLS.
-    let t_weight = |r: f64, sigma2: f64, df: f64| -> f64 {
-        let t2 = r * r / sigma2.max(1e-300);
-        ((df + 1.0) / (df + t2)).max(1e-10)
-    };
-    let t_newton_working = |r: f64, eta: f64, sigma2: f64, df: f64| -> (f64, f64) {
-        let sigma2 = sigma2.max(1e-300);
-        let denom = df * sigma2 + r * r;
-        let dmu = -2.0 * (df + 1.0) * r / denom;
-        let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
-        let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
-        let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
-            observed_dmu2
-        } else {
-            expected_dmu2.max(1e-12)
-        };
-        let z = eta - dmu / dmu2;
-        ((0.5 * dmu2).max(1e-10), z)
-    };
+    // Default/fixed-df legacy path uses textbook EM weights. The
+    // gam.fit5-style outer-LAML path (fixed σ² supplied by the outer
+    // shape Newton) uses mgcv scat$Dd observed Hessian weights with the
+    // expected Hessian fallback when the observed curvature is negative.
     let use_newton_working = fixed_sigma2.is_some();
 
     let mut converged = false;
@@ -1924,44 +2032,17 @@ pub fn fit_pirls_tdist(
         iter = outer_iter + 1;
 
         // ── Inner WLS: solve (X'WX + S) β = X'Wz with t weights ─────────
-        // Default/fixed-df legacy path uses textbook EM weights. The
-        // gam.fit5-style outer-LAML path (fixed σ² supplied by the outer
-        // shape Newton) uses mgcv scat$Dd observed Hessian weights with the
-        // expected Hessian fallback when the observed curvature is negative.
         let eta: Array1<f64> = x.dot(&beta);
-        let mut z_work = Array1::<f64>::zeros(n);
-        // Per-row t-IRLS weight w_iᵗ. Computed independently of any prior
-        // weights so the σ²/df updates below see the textbook (unweighted)
-        // t-weight; mgcv `weights=` semantics multiply on top of the
-        // family's working weight, not into the family parameter MLE.
-        let w_tdist: Array1<f64> = y
-            .iter()
-            .zip(eta.iter())
-            .enumerate()
-            .map(|(i, (&yi, &etai))| {
-                let r = yi - etai;
-                if use_newton_working {
-                    let (wi, zi) = t_newton_working(r, etai, sigma2, df);
-                    z_work[i] = zi;
-                    wi
-                } else {
-                    z_work[i] = yi;
-                    t_weight(r, sigma2, df)
-                }
-            })
-            .collect();
-        // Combine with prior_weights: mgcv treats `weights=` as a per-row
-        // multiplier on the log-likelihood, so it multiplies the IRLS
-        // working weight everywhere (X'WX, X'Wz). Without prior weights
-        // we pass through w_tdist unchanged.
-        let w: Array1<f64> = match prior_weights {
-            Some(pw) => w_tdist
-                .iter()
-                .zip(pw.iter())
-                .map(|(&wt, &wp)| wt * wp)
-                .collect(),
-            None => w_tdist.clone(),
-        };
+        let step = tdist_irls_step(
+            y.view(),
+            eta.view(),
+            prior_weights.map(|pw| pw.view()),
+            sigma2,
+            df,
+            use_newton_working,
+        );
+        let w = step.w;
+        let z_work = step.z;
 
         // X'WX via dense triple product
         let xtwx = crate::reml::compute_xtwx_dispatch(None, x, &w);
@@ -2006,7 +2087,10 @@ pub fn fit_pirls_tdist(
         // instead, letting the LAML score's Jeffreys-like correction
         // shift σ² away from the MLE toward a finite-df minimum.
         if fixed_sigma2.is_none() {
-            let w_new: Vec<f64> = residuals.iter().map(|&r| t_weight(r, sigma2, df)).collect();
+            let w_new: Vec<f64> = residuals
+                .iter()
+                .map(|&r| t_weight_em(r, sigma2, df))
+                .collect();
             let (sum_wr2, sum_pw): (f64, f64) = match prior_weights {
                 Some(pw) => {
                     let mut a = 0.0;
@@ -2051,7 +2135,9 @@ pub fn fit_pirls_tdist(
         }
     }
 
-    // Final quantities
+    // Final quantities. Reuse the IRLS-step helper at the converged β so the
+    // final (weights, working_response) pair is bit-identical to the one the
+    // outer REML loop will see when it re-evaluates the family weights.
     let eta: Array1<f64> = x.dot(&beta);
     let fitted_values = eta.clone();
 
@@ -2061,38 +2147,19 @@ pub fn fit_pirls_tdist(
         .map(|(&yi, &fi)| yi - fi)
         .collect();
 
-    let weights_tdist: Array1<f64> = residuals_final
-        .iter()
-        .zip(eta.iter())
-        .map(|(&r, &etai)| {
-            if use_newton_working {
-                t_newton_working(r, etai, sigma2, df).0
-            } else {
-                t_weight(r, sigma2, df)
-            }
-        })
-        .collect();
-    // Multiply prior_weights into the final IRLS weights so the outer
-    // REML score sees the correct XᵀWX, matching the GLM path.
-    let weights: Array1<f64> = match prior_weights {
-        Some(pw) => weights_tdist
-            .iter()
-            .zip(pw.iter())
-            .map(|(&wt, &wp)| wt * wp)
-            .collect(),
-        None => weights_tdist,
-    };
-    let working_response: Array1<f64> = residuals_final
-        .iter()
-        .zip(eta.iter())
-        .map(|(&r, &etai)| {
-            if use_newton_working {
-                t_newton_working(r, etai, sigma2, df).1
-            } else {
-                etai + r
-            }
-        })
-        .collect();
+    let final_step = tdist_irls_step(
+        y.view(),
+        eta.view(),
+        prior_weights.map(|pw| pw.view()),
+        sigma2,
+        df,
+        use_newton_working,
+    );
+    let weights = final_step.w;
+    // EM branch returns z_i = y_i, so the textbook working response
+    // η_i + r_i = y_i matches z. Newton branch produces η_i − dμ/dμ² which
+    // is exactly the helper's `z_work[i]`.
+    let working_response = final_step.z;
 
     // Deviance as prior-weighted RSS (used for REML score; not the
     // t-log-likelihood). Mgcv treats `weights=` as a multiplier on the
@@ -2211,25 +2278,9 @@ pub fn fit_pirls_tdist_discrete(
 
     let mut df = fixed_df.unwrap_or(5.0).clamp(2.0, 100.0);
 
-    // EM-IRLS t-weight (per-row, basis-agnostic — identical to fit_pirls_tdist).
-    let t_weight = |r: f64, sigma2: f64, df: f64| -> f64 {
-        let t2 = r * r / sigma2.max(1e-300);
-        ((df + 1.0) / (df + t2)).max(1e-10)
-    };
-    let t_newton_working = |r: f64, eta: f64, sigma2: f64, df: f64| -> (f64, f64) {
-        let sigma2 = sigma2.max(1e-300);
-        let denom = df * sigma2 + r * r;
-        let dmu = -2.0 * (df + 1.0) * r / denom;
-        let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
-        let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
-        let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
-            observed_dmu2
-        } else {
-            expected_dmu2.max(1e-12)
-        };
-        let z = eta - dmu / dmu2;
-        ((0.5 * dmu2).max(1e-10), z)
-    };
+    // Per-row IRLS weights/z share the helper used by the dense path
+    // (`tdist_irls_step`). Only η differs: discrete uses the compressed
+    // gather, dense uses `x.dot(&beta)`.
     let use_newton_working = fixed_sigma2.is_some();
 
     let mut converged = false;
@@ -2241,31 +2292,16 @@ pub fn fit_pirls_tdist_discrete(
         // ── Inner WLS: solve (X'WX + S) β = X'Wz with t weights ─────────
         // η uses the compressed-gather kernel instead of x.dot(&beta).
         let eta: Array1<f64> = compute_eta_discrete(disc, &beta);
-        let mut z_work = Array1::<f64>::zeros(n);
-        let w_tdist: Array1<f64> = y
-            .iter()
-            .zip(eta.iter())
-            .enumerate()
-            .map(|(i, (&yi, &etai))| {
-                let r = yi - etai;
-                if use_newton_working {
-                    let (wi, zi) = t_newton_working(r, etai, sigma2, df);
-                    z_work[i] = zi;
-                    wi
-                } else {
-                    z_work[i] = yi;
-                    t_weight(r, sigma2, df)
-                }
-            })
-            .collect();
-        let w: Array1<f64> = match prior_weights {
-            Some(pw) => w_tdist
-                .iter()
-                .zip(pw.iter())
-                .map(|(&wt, &wp)| wt * wp)
-                .collect(),
-            None => w_tdist.clone(),
-        };
+        let step = tdist_irls_step(
+            y.view(),
+            eta.view(),
+            prior_weights.map(|pw| pw.view()),
+            sigma2,
+            df,
+            use_newton_working,
+        );
+        let w = step.w;
+        let z_work = step.z;
 
         // X'WX via discrete scatter-gather (mgcv XWXd) — the basis-only
         // change vs `fit_pirls_tdist`. O(n + Σ m_a·p_a² + Σ m_a·m_b·(p_a+p_b)).
@@ -2300,7 +2336,10 @@ pub fn fit_pirls_tdist_discrete(
             .collect();
 
         if fixed_sigma2.is_none() {
-            let w_new: Vec<f64> = residuals.iter().map(|&r| t_weight(r, sigma2, df)).collect();
+            let w_new: Vec<f64> = residuals
+                .iter()
+                .map(|&r| t_weight_em(r, sigma2, df))
+                .collect();
             let (sum_wr2, sum_pw): (f64, f64) = match prior_weights {
                 Some(pw) => {
                     let mut a = 0.0;
@@ -2342,7 +2381,9 @@ pub fn fit_pirls_tdist_discrete(
         }
     }
 
-    // Final quantities — η built via the compressed gather.
+    // Final quantities — η built via the compressed gather. Reuse the
+    // IRLS-step helper at the converged β so (weights, working_response)
+    // are bit-identical to one more inner step.
     let eta: Array1<f64> = compute_eta_discrete(disc, &beta);
     let fitted_values = eta.clone();
 
@@ -2352,36 +2393,16 @@ pub fn fit_pirls_tdist_discrete(
         .map(|(&yi, &fi)| yi - fi)
         .collect();
 
-    let weights_tdist: Array1<f64> = residuals_final
-        .iter()
-        .zip(eta.iter())
-        .map(|(&r, &etai)| {
-            if use_newton_working {
-                t_newton_working(r, etai, sigma2, df).0
-            } else {
-                t_weight(r, sigma2, df)
-            }
-        })
-        .collect();
-    let weights: Array1<f64> = match prior_weights {
-        Some(pw) => weights_tdist
-            .iter()
-            .zip(pw.iter())
-            .map(|(&wt, &wp)| wt * wp)
-            .collect(),
-        None => weights_tdist,
-    };
-    let working_response: Array1<f64> = residuals_final
-        .iter()
-        .zip(eta.iter())
-        .map(|(&r, &etai)| {
-            if use_newton_working {
-                t_newton_working(r, etai, sigma2, df).1
-            } else {
-                etai + r
-            }
-        })
-        .collect();
+    let final_step = tdist_irls_step(
+        y.view(),
+        eta.view(),
+        prior_weights.map(|pw| pw.view()),
+        sigma2,
+        df,
+        use_newton_working,
+    );
+    let weights = final_step.w;
+    let working_response = final_step.z;
 
     let deviance: f64 = match prior_weights {
         Some(pw) => residuals_final
@@ -3822,6 +3843,127 @@ mod tests {
             "Gamma phi = {}, GammaLog phi = {}",
             phi_gamma,
             phi_gammalog
+        );
+    }
+
+    /// `tdist_irls_step` per-row math vs hand-computed reference (R2 refactor
+    /// guard). Fixture-free synthetic 50-point check covering:
+    ///   - EM branch (use_newton_working = false): w_i = (df+1)/(df + r²/σ²),
+    ///     z_i = y_i; prior weights multiplied into w.
+    ///   - Newton branch (use_newton_working = true): observed-info w/z from
+    ///     `scat$Dd` with expected-info fallback when curvature is non-PSD;
+    ///     prior weights multiplied into w.
+    /// Tolerance is 1e-12 absolute (pure scalar arithmetic, no BLAS).
+    #[test]
+    fn test_tdist_irls_step_hand_computed() {
+        let n = 50usize;
+        let sigma2 = 1.7_f64;
+        let df = 5.5_f64;
+
+        // Deterministic synthetic y/eta with a mix of small and large residuals
+        // so both Newton branches (observed-PSD when r²<df·σ², expected-info
+        // fallback when r²>df·σ², ≈3.06) are exercised. Indices alternate
+        // sign + magnitude.
+        let y: Array1<f64> = (0..n)
+            .map(|i| 0.1 * (i as f64) - 0.07 * ((i * i) as f64))
+            .collect();
+        let eta: Array1<f64> = (0..n)
+            .map(|i| {
+                let base = 0.1 * (i as f64) - 0.07 * ((i * i) as f64);
+                // Every 5th row gets a 4.5-magnitude perturbation so |r| > √(df·σ²);
+                // others stay small to exercise the observed-PSD branch.
+                let pert = if i % 5 == 0 { 4.5 } else { 0.25 } * ((i as f64).sin());
+                base + pert
+            })
+            .collect();
+        // Non-trivial prior weights (exclude 1.0 sentinel to verify the
+        // multiplication path is hit).
+        let pw: Array1<f64> = (0..n).map(|i| 0.5 + 0.03 * (i as f64)).collect();
+
+        // ── EM branch ─────────────────────────────────────────────────────
+        let step_em = tdist_irls_step(
+            y.view(),
+            eta.view(),
+            Some(pw.view()),
+            sigma2,
+            df,
+            /* use_newton_working = */ false,
+        );
+        for i in 0..n {
+            let r = y[i] - eta[i];
+            let w_t = ((df + 1.0) / (df + r * r / sigma2)).max(1e-10);
+            let w_expected = w_t * pw[i];
+            let z_expected = y[i];
+            assert!(
+                (step_em.w[i] - w_expected).abs() < 1e-12,
+                "EM w[{}]: got {}, want {}",
+                i,
+                step_em.w[i],
+                w_expected
+            );
+            assert!(
+                (step_em.z[i] - z_expected).abs() < 1e-12,
+                "EM z[{}]: got {}, want {}",
+                i,
+                step_em.z[i],
+                z_expected
+            );
+        }
+
+        // ── Newton branch ─────────────────────────────────────────────────
+        let step_n = tdist_irls_step(
+            y.view(),
+            eta.view(),
+            Some(pw.view()),
+            sigma2,
+            df,
+            /* use_newton_working = */ true,
+        );
+        for i in 0..n {
+            let r = y[i] - eta[i];
+            let denom = df * sigma2 + r * r;
+            let dmu = -2.0 * (df + 1.0) * r / denom;
+            let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
+            let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+            let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
+                observed_dmu2
+            } else {
+                expected_dmu2.max(1e-12)
+            };
+            let w_n = (0.5 * dmu2).max(1e-10);
+            let z_expected = eta[i] - dmu / dmu2;
+            let w_expected = w_n * pw[i];
+            assert!(
+                (step_n.w[i] - w_expected).abs() < 1e-12,
+                "Newton w[{}]: got {}, want {} (r={})",
+                i,
+                step_n.w[i],
+                w_expected,
+                r
+            );
+            assert!(
+                (step_n.z[i] - z_expected).abs() < 1e-12,
+                "Newton z[{}]: got {}, want {} (r={})",
+                i,
+                step_n.z[i],
+                z_expected,
+                r
+            );
+        }
+
+        // Sanity: at least one row should have hit the expected-info fallback
+        // (negative observed curvature when r² > df·σ²).
+        let mut hit_fallback = false;
+        for i in 0..n {
+            let r = y[i] - eta[i];
+            if r * r > df * sigma2 {
+                hit_fallback = true;
+                break;
+            }
+        }
+        assert!(
+            hit_fallback,
+            "fixture should exercise the expected-info fallback at least once"
         );
     }
 }
