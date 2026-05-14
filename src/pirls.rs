@@ -3845,9 +3845,11 @@ pub fn fit_pirls_fastreml(
     }
 
     // ───── C1: Mp = p − Σ rank_k (mgcv `Sl.setup` Mp output, bam.r:544) ─────
+    // Use estimate_rank_eigen — see block_penalty.rs::log_det_singleton_with_derivs
+    // for the rationale (row-norm rank overcounts on banded penalties).
     let mut mp_signed: i64 = p as i64;
     for s in sl {
-        mp_signed -= s.estimate_rank() as i64;
+        mp_signed -= crate::reml::estimate_rank_eigen(s) as i64;
     }
     let mp = mp_signed.max(0) as usize;
 

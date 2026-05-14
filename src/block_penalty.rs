@@ -262,7 +262,11 @@ impl BlockPenalty {
     /// Reuses `crate::reml::pseudo_determinant` for the unit-S log-det.
     #[cfg(feature = "blas")]
     pub fn log_det_singleton_with_derivs(&self, rho: f64) -> (f64, f64, f64) {
-        let rank = self.estimate_rank() as f64;
+        // True (eigen) rank — matches mgcv `ldetS` (fast-REML.r:834). The
+        // legacy row-norm `estimate_rank()` overcounts on banded penalties
+        // (2nd-diff k=10 → 10 vs true 8), creating a (rank_row − rank_eigen)·ρ
+        // drift vs the rest of the REML code which uses estimate_rank_eigen.
+        let rank = crate::reml::estimate_rank_eigen(self) as f64;
         // Unit-scaled S log-pseudo-determinant — independent of ρ.
         // `pseudo_determinant` returns log Π_{i: λ_i>0} λ_i for the block's S.
         let log_pseudo_det_unit = crate::reml::pseudo_determinant(self)
