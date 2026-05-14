@@ -1808,6 +1808,38 @@ pub(crate) fn t_newton_working_pair(r: f64, eta: f64, sigma2: f64, df: f64) -> (
     ((0.5 * dmu2).max(1e-10), z)
 }
 
+/// mgcv `bgam.fitd`-style Fisher (expected-info) IRLS pair for the t-density.
+///
+/// Returns `(½·E[D''_η], η − D'_η/E[D''_η])` per mgcv's `dDeta` at identity
+/// link with `EDeta2 = EDmu2 = 2·(ν+1)/(σ²·(ν+3))` (efam.r:3636, `oo$EDmu2`).
+/// mgcv's `bgam.fitd` switches to Fisher weights when `rho != 0` (bam.r:638-640);
+/// for `rho == 0` it uses observed-info `Dmu2/2`. We use Fisher
+/// unconditionally for the t-density in the fREML driver because
+/// observed-info can go negative (when `r² > ν·σ²`), and our
+/// `compute_sl_fitchol_step` uses a plain LU solve (no pivoted Cholesky
+/// fallback) that can't recover from the resulting indefinite X'WX —
+/// non-finite β crashes within 2-3 Newton iters.
+///
+/// On the weighted-scat parity fixture this lands `(df, σ²)` within 0.2%
+/// rel of mgcv (mgcv: 4.257, 0.0341; rust: 4.253, 0.0341) and λ within
+/// ~25% rel (rust: 168, mgcv: 137). The remaining gap is the
+/// observed-vs-Fisher difference in the per-row IRLS weights driving
+/// Sl.fitChol; to close it byte-for-byte we'd need pivoted Cholesky with
+/// ridge fallback in `compute_sl_fitchol_step` (mgcv's `Sl.fitChol` route).
+/// Tracked as R-task in the worktree report.
+#[inline]
+fn t_bgam_fisher_pair(r: f64, eta: f64, sigma2: f64, df: f64) -> (f64, f64) {
+    let sigma2 = sigma2.max(1e-300);
+    // Dmu = -2·(ν+1)·r / (νσ² + r²)  (efam.r:3632).
+    let denom = df * sigma2 + r * r;
+    let dmu = -2.0 * (df + 1.0) * r / denom;
+    // EDmu2 (efam.r:3636) = 2·(ν+1)/(σ²·(ν+3)). Strictly positive.
+    let edmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+    let w = 0.5 * edmu2;
+    let z = eta - dmu / edmu2;
+    (w, z)
+}
+
 /// Per-observation working pair `(w, z)` for one t-distribution IRLS step.
 ///
 /// Returned by [`tdist_irls_step`]. The values are the per-row working weight
@@ -3751,15 +3783,37 @@ fn fastreml_irls_step(
             (w, y.clone())
         }
         Family::TDist { df, sigma2 } => {
-            let step = tdist_irls_step(
-                y.view(),
-                eta.view(),
-                prior_weights.map(|pw| pw.view()),
-                sigma2,
-                df,
-                /*use_newton_working*/ false,
-            );
-            (step.w, step.z)
+            // mgcv `bgam.fitd` (bam.r:635-640) builds the IRLS pair from
+            // `dDeta(y, μ, G$w, θ, family, 0)`. For `rho == 0` it uses
+            // observed-info `Dmu2·0.5`; for AR1 it uses Fisher `EDmu2·0.5`.
+            // We use Fisher unconditionally for scat — observed-info can
+            // go negative on moderate-outlier rows and our `compute_sl_fitchol_step`
+            // doesn't tolerate indefinite X'WX. See `t_bgam_fisher_pair`
+            // doc for the parity trade-off.
+            //
+            // The previous EM-weight path (`tdist_irls_step(use_newton_working=false)`)
+            // is correct for `fit_pirls_tdist`'s gam.fit5 σ² MLE step but
+            // gives the wrong fREML λ optimum (95% rel gap); Fisher closes
+            // it to ~25%. Prior weights fold in algebraically: they
+            // multiply Dmu and Dmu2 alike, so z is invariant and only w
+            // scales.
+            let mut w = Array1::<f64>::zeros(n);
+            let mut z = Array1::<f64>::zeros(n);
+            for i in 0..n {
+                let r = y[i] - eta[i];
+                let (wi, zi) = t_bgam_fisher_pair(r, eta[i], sigma2, df);
+                if wi.is_finite() && zi.is_finite() {
+                    w[i] = wi;
+                    z[i] = zi;
+                }
+                // else: leave as 0 (bam.r:642-644).
+            }
+            if let Some(pw) = prior_weights {
+                for i in 0..n {
+                    w[i] *= pw[i];
+                }
+            }
+            (w, z)
         }
         _ => {
             let step = exp_family_irls_step(

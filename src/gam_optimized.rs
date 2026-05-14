@@ -720,17 +720,23 @@ impl GAM {
                     | crate::pirls::Family::Quantile { .. }
             );
 
-            // For scat: wire the B5 outer Newton on (log σ², log(df-2)) as
-            // the family-shape callback. The callback returns a refreshed
-            // `Family::TDist` with updated `(df, sigma2)`.
+            // For scat: wire the B5 outer Newton on (log σ², log(df-min_df))
+            // as the family-shape callback. The callback returns a refreshed
+            // `Family::TDist` with updated `(df, sigma2)`. `min_df` matches
+            // mgcv's `scat(min.df = 3)` default — see `family_theta::DEFAULT_MIN_DF`
+            // for the parity rationale.
             let tdist_profile = self.tdist_profile;
-            let fixed_df_for_scat = if let crate::pirls::Family::TDist { df, .. } = self.family {
-                Some(df)
-            } else {
-                None
-            };
+            let scat_min_df = crate::family_theta::DEFAULT_MIN_DF;
+            // `tdist_profile = true` ⇒ user did not supply df (lib.rs:289 sets
+            // it when `df.is_none()`), so we run the 2-D Newton over (σ², df).
+            // `tdist_profile = false` ⇒ user-fixed df: 1-D Newton on log σ² only.
             let mut scat_cb_state: Option<(f64, f64)> = match self.family {
-                crate::pirls::Family::TDist { df, sigma2 } => Some((sigma2.ln(), (df - 2.0).max(1e-6).ln())),
+                crate::pirls::Family::TDist { df, sigma2 } => {
+                    // Seed log(df - min_df); if user-supplied df is below the
+                    // floor, clamp to a tiny positive offset (matches mgcv's
+                    // `min.df reset` branch at efam.r:3578 in spirit).
+                    Some((sigma2.ln(), (df - scat_min_df).max(1e-6).ln()))
+                }
                 _ => None,
             };
             let mut scat_callback = |y_in: &Array1<f64>,
@@ -741,7 +747,7 @@ impl GAM {
              -> Result<crate::pirls::Family> {
                 if let crate::pirls::Family::TDist { .. } = fam_in {
                     let (log_s2_cur, log_d_cur) = scat_cb_state.expect("scat state initialised");
-                    let step = if tdist_profile && fixed_df_for_scat.is_none() {
+                    let step = if tdist_profile {
                         crate::family_theta::estimate_scat_theta_outer(
                             y_in,
                             mu_in,
@@ -764,7 +770,10 @@ impl GAM {
                         )
                     };
                     scat_cb_state = Some((step.log_sigma2, step.log_df_minus2));
-                    let df_new = step.log_df_minus2.exp() + 2.0;
+                    // `log_df_minus2` is named for the legacy min_df=2 default but
+                    // now stores `log(df - scat_min_df)` — convert back via the
+                    // same `scat_min_df` used in the seed.
+                    let df_new = step.log_df_minus2.exp() + scat_min_df;
                     let sigma2_new = step.log_sigma2.exp();
                     Ok(crate::pirls::Family::TDist {
                         df: df_new,

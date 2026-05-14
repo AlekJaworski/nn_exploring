@@ -14,9 +14,14 @@
 //! ### Math contract
 //!
 //! Working coords (user-facing): `θ = (log σ², log(ν - min_df))`. We default
-//! `min_df = 2.0` (so ν is bounded above 2, the t-density's variance floor).
-//! mgcv `scat` defaults to `min.df = 3` but exposes the constant; we keep
-//! it configurable.
+//! `min_df = 3.0` to match mgcv `scat`'s `min.df = 3` (efam.r:3552), which the
+//! fREML outer-Newton requires for parity: the step clamp, PSD Hessian
+//! thresholding, and convergence tolerance all act on the transformed
+//! variable, so the floor matters even though the (β, ν, σ²) optimum is
+//! basis-invariant in theory. Kept configurable via
+//! [`estimate_scat_theta_outer_with_min_df`]. Note the t-density's variance
+//! floor is ν > 2; mgcv's `min.df = 3` is a stricter bound for numerical
+//! stability of the IRLS weights.
 //!
 //! Negative log-likelihood (per `nlogl` in efam.r:14):
 //!     nll(σ², ν) = Σ_i w_i · [
@@ -64,10 +69,12 @@ pub struct ThetaNewtonStep {
     pub grad_inf_norm: f64,
 }
 
-/// Default value for `min_df`. Matches the user-facing API spec
-/// `(log σ², log(df - 2))`. mgcv's scat default is 3 — passable via
+/// Default value for `min_df`. Matches mgcv's `scat(min.df = 3)` default
+/// (efam.r:3552). The fREML outer Newton's step clamp / PSD threshold /
+/// convergence test all act on `log(ν - min_df)`, so this floor must match
+/// mgcv to land on the same fREML optimum. Override via
 /// [`estimate_scat_theta_outer_with_min_df`] when needed.
-pub const DEFAULT_MIN_DF: f64 = 2.0;
+pub const DEFAULT_MIN_DF: f64 = 3.0;
 
 /// 2-D outer Newton on `(log σ², log(df - 2))` at fixed β. See module-level
 /// docs for the math contract.
