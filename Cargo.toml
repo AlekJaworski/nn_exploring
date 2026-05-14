@@ -22,13 +22,20 @@ version = "0.17"
 optional = true
 default-features = false
 
+# Raw LAPACK FFI for routines not exposed by ndarray-linalg (e.g. dpstrf
+# pivoted Cholesky used in the R8 fREML stabiliser). Kept optional and tied
+# to the `blas` feature — when BLAS is off there is no LAPACK to call.
+[dependencies.lapack-sys]
+version = "0.14"
+optional = true
+
 [features]
 default = []
 python = ["pyo3", "numpy"]
 # BLAS features:
 # - Use 'blas,blas-system' for system OpenBLAS (development, requires libopenblas-dev)
 # - Use 'blas,blas-static' for statically linked OpenBLAS (wheel distribution)
-blas = ["ndarray-linalg", "rand", "rand_chacha"]
+blas = ["ndarray-linalg", "dep:lapack-sys", "rand", "rand_chacha"]
 blas-system = ["ndarray-linalg/openblas-system"]    # Use system OpenBLAS
 blas-static = ["ndarray-linalg/openblas-static"]    # Statically link OpenBLAS (includes LAPACK)
 blas-mkl-static = ["ndarray-linalg/intel-mkl-static"]  # Windows: static Intel MKL — avoids Fortran toolchain

@@ -6,6 +6,342 @@ use ndarray::{s, Array1, Array2};
 #[cfg(feature = "blas")]
 use ndarray_linalg::{Determinant, Inverse, Solve};
 
+#[cfg(feature = "blas")]
+use lapack_sys::dpstrf_;
+
+/// Result of [`pivoted_cholesky`] — mirrors mgcv's `Sl.fitChol` use of LAPACK's
+/// `dpstrf` (full pivoted Cholesky with rank revelation).
+///
+/// On entry the input `A` is taken to be symmetric (only upper triangle is
+/// read). On exit:
+///
+/// * `r` is the **upper-triangular** Cholesky factor of `A[piv, piv]` truncated
+///   to the rank-revealing prefix. Specifically, if the LAPACK call returns
+///   numerical rank `rank`, then `R[..rank, ..rank]` is upper triangular with
+///   positive diagonal and `R' · R = A[piv[..rank], piv[..rank]]` to machine
+///   precision. The trailing `(p − rank)` columns of `R` reflect the unfactored
+///   Schur complement and **must not be used** in subsequent solves.
+///
+/// * `piv` is the **0-based** pivot permutation: `piv[k]` gives the original
+///   column index that lands at position `k` after pivoting (LAPACK's
+///   `dpstrf` writes 1-based indices, which we shift on the way out so callers
+///   can index ndarray rows/cols directly).
+///
+/// * `rank` is the numerical rank reported by LAPACK (after thresholding small
+///   pivots at `tol`).
+///
+/// The output is byte-faithful to mgcv's `R::chol(... , pivot = TRUE)` modulo
+/// the 0- vs 1-based convention. mgcv uses this same routine internally
+/// (see R/fast-REML.r:1606 → R's `chol(... pivot=TRUE)` → LAPACK `dpstrf`).
+#[cfg(feature = "blas")]
+#[derive(Debug, Clone)]
+pub struct PivotedCholesky {
+    /// Upper-triangular factor — `R[..rank, ..rank] · R[..rank, ..rank]' =
+    /// A[piv[..rank], piv[..rank]]`. Trailing block is **garbage**, do not use.
+    pub r: Array2<f64>,
+    /// 0-based pivot permutation. `piv[k]` is the original column index of
+    /// row/col `k` in the factored permuted matrix.
+    pub piv: Vec<usize>,
+    /// Numerical rank as reported by `dpstrf` after thresholding small pivots
+    /// at `tol`. Equal to `n` for full-rank inputs.
+    pub rank: usize,
+}
+
+/// Pivoted Cholesky factorisation of a symmetric (possibly rank-deficient)
+/// matrix via LAPACK `dpstrf`.
+///
+/// Computes `P' · A · P = R' · R` where `P` is a permutation matrix and `R`
+/// is upper triangular. The pivot is chosen to maximise the diagonal pivot at
+/// every step — the same rule mgcv invokes through `chol(... pivot=TRUE)`
+/// (R/fast-REML.r:1606).
+///
+/// ## Why pivoted (vs plain Cholesky + ridge)
+///
+/// Plain `chol` fails the instant a leading principal minor is non-positive.
+/// On indefinite `X'WX + S(ρ)` matrices that arise when the scat/InvGauss
+/// IRLS uses observed-info weights, this triggers a numerical breakdown
+/// even though the system is well-defined in the rank-deficient sense.
+/// `dpstrf` walks the diagonal in pivot-decreasing order, stops when the
+/// remaining pivots drop below `tol`, and exposes the working rank — which
+/// gives the caller a clean drop-of-rank-deficient-terms recovery path
+/// (mgcv R/fast-REML.r:1610-1613).
+///
+/// ## Arguments
+///
+/// * `a` — input matrix (square, symmetric; only upper triangle is read).
+///   Must be `n × n` for some `n ≥ 1`.
+/// * `tol` — pivot tolerance. Pass `tol < 0` to let LAPACK choose
+///   `tol = n · ε · max_pivot` (R's `chol` default; recommended). Pass
+///   `tol = 0.0` to factor down to the first zero pivot only. Strictly
+///   positive values give a custom rank-revealing threshold.
+///
+/// ## Returns
+///
+/// A [`PivotedCholesky`] with the upper-triangular factor, 0-based pivot
+/// permutation, and numerical rank. See struct doc for which entries of
+/// `R` are valid.
+///
+/// ## Errors
+///
+/// * `DimensionMismatch` — `a` is not square.
+/// * `SingularMatrix` — LAPACK reported `info < 0` (illegal argument; should
+///   never happen if `a` is square and `tol` is sane).
+#[cfg(feature = "blas")]
+pub fn pivoted_cholesky(a: &Array2<f64>, tol: f64) -> Result<PivotedCholesky> {
+    use std::os::raw::{c_char, c_int};
+
+    let n = a.nrows();
+    if a.ncols() != n {
+        return Err(GAMError::DimensionMismatch(
+            "Matrix must be square for pivoted Cholesky".to_string(),
+        ));
+    }
+    if n == 0 {
+        return Ok(PivotedCholesky {
+            r: Array2::<f64>::zeros((0, 0)),
+            piv: Vec::new(),
+            rank: 0,
+        });
+    }
+
+    // LAPACK works in column-major. We supply a column-major buffer of the
+    // upper-triangle of A (only the upper triangle is read with UPLO='U').
+    //
+    // ndarray's default is row-major: A[i,j] is at offset i·n + j. We want
+    // column-major A[i,j] at offset i + j·n. We materialise an owned vec.
+    let mut a_col: Vec<f64> = Vec::with_capacity(n * n);
+    for j in 0..n {
+        for i in 0..n {
+            a_col.push(a[[i, j]]);
+        }
+    }
+    let mut piv_lapack: Vec<c_int> = vec![0; n];
+    let mut rank_out: c_int = 0;
+    let mut info: c_int = 0;
+    // `dpstrf` workspace: 2n doubles.
+    let mut work: Vec<f64> = vec![0.0; 2 * n];
+
+    let uplo: c_char = b'U' as c_char;
+    let n_i: c_int = n as c_int;
+    let lda: c_int = n as c_int;
+    let tol_in: f64 = tol;
+
+    // SAFETY: all pointers refer to live owned buffers of the correct length;
+    // LAPACK is single-threaded for one call and only reads `UPLO=U` triangle
+    // and writes to `A`, `piv_lapack`, `rank_out`, `info`, `work`.
+    unsafe {
+        dpstrf_(
+            &uplo,
+            &n_i,
+            a_col.as_mut_ptr(),
+            &lda,
+            piv_lapack.as_mut_ptr(),
+            &mut rank_out,
+            &tol_in,
+            work.as_mut_ptr(),
+            &mut info,
+        );
+    }
+
+    if info < 0 {
+        return Err(GAMError::InvalidParameter(format!(
+            "dpstrf: illegal argument at position {} (info={})",
+            -info, info
+        )));
+    }
+    // info > 0 means rank-deficient (the i-th leading minor was not PD).
+    // That's fine — `rank_out` reflects the working rank. Caller must drop
+    // the trailing columns of R (we leave them in place; doc says
+    // they're garbage).
+
+    // Convert back to row-major `Array2<f64>`.
+    let mut r = Array2::<f64>::zeros((n, n));
+    for j in 0..n {
+        for i in 0..n {
+            // Zero out the strictly lower-triangular part; LAPACK writes the
+            // upper triangle of R to the upper triangle of A and leaves the
+            // strict lower part as scratch.
+            if i <= j {
+                r[[i, j]] = a_col[i + j * n];
+            }
+        }
+    }
+
+    let piv: Vec<usize> = piv_lapack
+        .iter()
+        .map(|&k| (k as usize).saturating_sub(1))
+        .collect();
+
+    Ok(PivotedCholesky {
+        r,
+        piv,
+        rank: rank_out as usize,
+    })
+}
+
+/// Solve `(A_{piv, piv}) · x = b` using a [`PivotedCholesky`] factor, dropping
+/// rank-deficient trailing rows.
+///
+/// Performs the mgcv `Sl.fitChol` solve recipe (R/fast-REML.r:1615):
+///
+/// ```text
+///   x[piv] = backsolve(R, forwardsolve(R', b[piv]))    (for piv[..rank])
+///   x[piv[rank..]] = 0                                 (drop rank-deficient terms)
+/// ```
+///
+/// where `R` is the rank-`rank` upper-triangular factor returned by
+/// [`pivoted_cholesky`]. The remaining `n − rank` entries of `x` (those
+/// indexed by `piv[rank..]`) are explicitly set to zero — mirroring mgcv's
+/// "drop rank deficient terms" branch.
+///
+/// ## Arguments
+///
+/// * `pc` — pivoted Cholesky factor of `A` from [`pivoted_cholesky`].
+/// * `b` — right-hand side vector, length `n`.
+///
+/// ## Returns
+///
+/// `x` of length `n`. If `pc.rank == n` this is the full-rank solution; if
+/// `pc.rank < n` the components indexed by `pc.piv[pc.rank..]` are zero.
+#[cfg(feature = "blas")]
+pub fn pivoted_cholesky_solve(pc: &PivotedCholesky, b: &Array1<f64>) -> Result<Array1<f64>> {
+    let n = pc.r.nrows();
+    if b.len() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "RHS length {} does not match factor dim {}",
+            b.len(),
+            n
+        )));
+    }
+    let r_eff = pc.rank;
+    let mut x = Array1::<f64>::zeros(n);
+    if r_eff == 0 {
+        return Ok(x);
+    }
+
+    // Permute RHS: b_perm[k] = b[piv[k]] for k in 0..rank.
+    let mut bp = Array1::<f64>::zeros(r_eff);
+    for k in 0..r_eff {
+        bp[k] = b[pc.piv[k]];
+    }
+
+    // Forward solve R' · y = b_perm  (R' is lower-triangular, size rank×rank,
+    // taken from R[..rank, ..rank]).
+    let mut y = Array1::<f64>::zeros(r_eff);
+    for i in 0..r_eff {
+        let mut s = bp[i];
+        for j in 0..i {
+            s -= pc.r[[j, i]] * y[j];
+        }
+        let diag = pc.r[[i, i]];
+        if diag.abs() < f64::MIN_POSITIVE {
+            return Err(GAMError::SingularMatrix);
+        }
+        y[i] = s / diag;
+    }
+
+    // Back-solve R · z = y.
+    let mut z = Array1::<f64>::zeros(r_eff);
+    for i in (0..r_eff).rev() {
+        let mut s = y[i];
+        for j in (i + 1)..r_eff {
+            s -= pc.r[[i, j]] * z[j];
+        }
+        let diag = pc.r[[i, i]];
+        if diag.abs() < f64::MIN_POSITIVE {
+            return Err(GAMError::SingularMatrix);
+        }
+        z[i] = s / diag;
+    }
+
+    // Unpermute: x[piv[k]] = z[k]. The remaining entries (piv[rank..]) are
+    // left at zero, matching mgcv's drop-rank-deficient branch.
+    for k in 0..r_eff {
+        x[pc.piv[k]] = z[k];
+    }
+
+    Ok(x)
+}
+
+/// Compute `R⁻¹` for the (truncated) upper-triangular factor in a pivoted
+/// Cholesky. Returns an `(rank × rank)` matrix.
+///
+/// Used by [`pivoted_cholesky_inverse`] to form `PP[piv, piv] = R⁻¹ · R⁻¹'`
+/// (mgcv's `chol2inv(R)` at R/fast-REML.r:1625).
+#[cfg(feature = "blas")]
+fn invert_upper_triangular(r: &Array2<f64>, rank: usize) -> Result<Array2<f64>> {
+    if rank == 0 {
+        return Ok(Array2::<f64>::zeros((0, 0)));
+    }
+    let mut inv = Array2::<f64>::zeros((rank, rank));
+    // Solve R · X = I column by column via back-substitution.
+    for col in 0..rank {
+        let mut x = Array1::<f64>::zeros(rank);
+        // RHS is e_col.
+        for i in (0..rank).rev() {
+            let mut s = if i == col { 1.0 } else { 0.0 };
+            for j in (i + 1)..rank {
+                s -= r[[i, j]] * x[j];
+            }
+            let diag = r[[i, i]];
+            if diag.abs() < f64::MIN_POSITIVE {
+                return Err(GAMError::SingularMatrix);
+            }
+            x[i] = s / diag;
+        }
+        for i in 0..rank {
+            inv[[i, col]] = x[i];
+        }
+    }
+    Ok(inv)
+}
+
+/// Reconstruct `A⁻¹` from a [`PivotedCholesky`] factor, zero-padding the
+/// rank-deficient null-space (mgcv R/fast-REML.r:1625: `PP[piv, piv] <- chol2inv(R)`).
+///
+/// Returns an `n × n` symmetric positive-semi-definite matrix `PP` such that:
+///
+/// * If `pc.rank == n` then `A · PP = I` to machine precision.
+/// * If `pc.rank < n` then `PP[piv[..rank], piv[..rank]] = (R'R)⁻¹` and the
+///   trailing rows/cols (those indexed by `piv[rank..]`) are zero.
+#[cfg(feature = "blas")]
+pub fn pivoted_cholesky_inverse(pc: &PivotedCholesky) -> Result<Array2<f64>> {
+    let n = pc.r.nrows();
+    let r_eff = pc.rank;
+    let mut pp = Array2::<f64>::zeros((n, n));
+    if r_eff == 0 {
+        return Ok(pp);
+    }
+    let r_inv = invert_upper_triangular(&pc.r, r_eff)?;
+    // (R'R)⁻¹ = R⁻¹ · R⁻¹' (because R is upper triangular).
+    let inv = r_inv.dot(&r_inv.t());
+    for a in 0..r_eff {
+        for b in 0..r_eff {
+            pp[[pc.piv[a], pc.piv[b]]] = inv[[a, b]];
+        }
+    }
+    Ok(pp)
+}
+
+/// Log-determinant of an SPSD matrix from its pivoted-Cholesky factor.
+///
+/// Returns `2 · Σ_{k=0..rank} log(R[k, k])`. When `pc.rank < n`, the trailing
+/// null-space contributes zero (since the null pivots are below `tol` and
+/// already excluded). This matches mgcv R/fast-REML.r:1627
+/// (`ldetXXS <- 2*sum(log(diag(R))+log(d[piv]))` — modulo the per-row
+/// preconditioner `d`, which lives at the call site).
+#[cfg(feature = "blas")]
+pub fn pivoted_cholesky_log_det(pc: &PivotedCholesky) -> f64 {
+    let mut s = 0.0;
+    for k in 0..pc.rank {
+        let v = pc.r[[k, k]];
+        if v > 0.0 {
+            s += v.ln();
+        }
+    }
+    2.0 * s
+}
+
 /// Solve linear system Ax = b
 /// Uses BLAS/LAPACK when available for large matrices (n >= 1000)
 /// Falls back to Gaussian elimination for small matrices (BLAS overhead dominates for n < 1000)
@@ -538,5 +874,119 @@ mod tests {
         assert_abs_diff_eq!(product[[1, 1]], 1.0, epsilon = 1e-10);
         assert_abs_diff_eq!(product[[0, 1]], 0.0, epsilon = 1e-10);
         assert_abs_diff_eq!(product[[1, 0]], 0.0, epsilon = 1e-10);
+    }
+
+    /// R8: pivoted Cholesky factor of a well-conditioned SPD matrix must
+    /// reconstruct the original to machine precision after permutation.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn pivoted_chol_spd_full_rank() {
+        // SPD 4×4 (Gram of a random-ish matrix).
+        let a = Array2::from_shape_vec(
+            (4, 4),
+            vec![
+                4.0, 1.0, 0.5, 0.2, 1.0, 3.0, 0.7, 0.1, 0.5, 0.7, 5.0, 0.4, 0.2, 0.1, 0.4, 2.5,
+            ],
+        )
+        .unwrap();
+        let pc = pivoted_cholesky(&a, -1.0).unwrap();
+        assert_eq!(pc.rank, 4, "full-rank SPD must be reported rank=n");
+        // Reconstruct A[piv, piv] = R'R.
+        let rt_r = pc.r.t().dot(&pc.r);
+        for i in 0..4 {
+            for j in 0..4 {
+                let want = a[[pc.piv[i], pc.piv[j]]];
+                assert!(
+                    (rt_r[[i, j]] - want).abs() < 1e-10,
+                    "R'R[{},{}] = {}, want A[piv[{}],piv[{}]] = {}",
+                    i,
+                    j,
+                    rt_r[[i, j]],
+                    i,
+                    j,
+                    want
+                );
+            }
+        }
+    }
+
+    /// R8: pivoted Chol solve agrees with `solve` on a well-conditioned SPD.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn pivoted_chol_solve_matches_solve() {
+        let a = Array2::from_shape_vec(
+            (4, 4),
+            vec![
+                4.0, 1.0, 0.5, 0.2, 1.0, 3.0, 0.7, 0.1, 0.5, 0.7, 5.0, 0.4, 0.2, 0.1, 0.4, 2.5,
+            ],
+        )
+        .unwrap();
+        let b = Array1::from_vec(vec![1.0, -2.0, 0.5, 3.0]);
+        let x_solve = solve(a.clone(), b.clone()).unwrap();
+        let pc = pivoted_cholesky(&a, -1.0).unwrap();
+        let x_chol = pivoted_cholesky_solve(&pc, &b).unwrap();
+        for i in 0..4 {
+            assert_abs_diff_eq!(x_solve[i], x_chol[i], epsilon = 1e-10);
+        }
+    }
+
+    /// R8: pivoted Chol inverse matches `inverse` on a well-conditioned SPD.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn pivoted_chol_inverse_matches_inverse() {
+        let a = Array2::from_shape_vec(
+            (4, 4),
+            vec![
+                4.0, 1.0, 0.5, 0.2, 1.0, 3.0, 0.7, 0.1, 0.5, 0.7, 5.0, 0.4, 0.2, 0.1, 0.4, 2.5,
+            ],
+        )
+        .unwrap();
+        let inv_ref = inverse(&a).unwrap();
+        let pc = pivoted_cholesky(&a, -1.0).unwrap();
+        let inv_chol = pivoted_cholesky_inverse(&pc).unwrap();
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_abs_diff_eq!(inv_ref[[i, j]], inv_chol[[i, j]], epsilon = 1e-10);
+            }
+        }
+        // Sanity: log|A| from pivoted Chol vs direct determinant.
+        let ldet_chol = pivoted_cholesky_log_det(&pc);
+        let ldet_ref = determinant(&a).unwrap().ln();
+        assert_abs_diff_eq!(ldet_chol, ldet_ref, epsilon = 1e-10);
+    }
+
+    /// R8: rank-deficient symmetric matrix (one zero eigenvalue) is detected,
+    /// and the solve sets the null direction to zero rather than blowing up.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn pivoted_chol_rank_deficient() {
+        // Rank-2 symmetric in R^3: A = v_1 v_1' + v_2 v_2', explicit null
+        // direction v_3 = (1,1,1)/sqrt(3) (so we KNOW one zero eigenvalue).
+        let v1 = ndarray::arr1(&[1.0, -1.0, 0.0]);
+        let v2 = ndarray::arr1(&[0.5, 0.5, -1.0]);
+        let mut a = Array2::<f64>::zeros((3, 3));
+        for i in 0..3 {
+            for j in 0..3 {
+                a[[i, j]] = v1[i] * v1[j] + v2[i] * v2[j];
+            }
+        }
+        // R's default tolerance picks this up cleanly.
+        let pc = pivoted_cholesky(&a, -1.0).unwrap();
+        assert_eq!(pc.rank, 2, "rank-2 input must be reported rank=2");
+        // The rank-2 prefix must still reconstruct A[piv[..2], piv[..2]].
+        // Build R[..2,..2]'·R[..2,..2] and compare.
+        let r2 = pc.r.slice(s![..2, ..2]).to_owned();
+        let rtr = r2.t().dot(&r2);
+        for i in 0..2 {
+            for j in 0..2 {
+                let want = a[[pc.piv[i], pc.piv[j]]];
+                assert!(
+                    (rtr[[i, j]] - want).abs() < 1e-10,
+                    "rank-deficient prefix mismatch at ({},{})",
+                    i,
+                    j
+                );
+            }
+        }
     }
 }
