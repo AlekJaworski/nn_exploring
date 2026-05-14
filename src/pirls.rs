@@ -2122,6 +2122,290 @@ pub fn fit_pirls_tdist(
     })
 }
 
+/// Discrete-binning fast-path twin of [`fit_pirls_tdist`].
+///
+/// Mathematically byte-identical to `fit_pirls_tdist` — every per-row
+/// quantity (t-weight, σ² MLE update, df Brent profile, residual
+/// formation, working response, deviance) is computed on the same
+/// length-n vectors. The only difference is the X'WX, X'Wy, and η = Xβ
+/// assemblies, which run through the scatter-gather kernels in
+/// `discrete.rs` instead of the dense BLAS triple-product.
+///
+/// On pure-dedup fixtures (`nunique ≤ max_bins_1d`) the result is
+/// 1e-12-equal to `fit_pirls_tdist`. With quantile-grid binning the
+/// design-doc accuracy floor is ~5e-3 on β.
+///
+/// This function is invoked from
+/// [`crate::gam_optimized::FitCache::run_pirls_with_options`] when the
+/// fit cache holds a `DiscreteDesign` and the family is `TDist`. Outside
+/// that dispatch, callers should keep using `fit_pirls_tdist`.
+pub fn fit_pirls_tdist_discrete(
+    y: &Array1<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    fixed_df: Option<f64>,
+    fixed_sigma2: Option<f64>,
+    max_iter: usize,
+    tolerance: f64,
+    prior_weights: Option<&Array1<f64>>,
+    disc: &DiscreteDesign,
+) -> Result<PiRLSResult> {
+    let n = y.len();
+    let p = disc.total_basis;
+
+    if disc.n != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "DiscreteDesign has n={} but y has {} elements",
+            disc.n, n
+        )));
+    }
+    if lambda.len() != penalties.len() {
+        return Err(GAMError::DimensionMismatch(
+            "Number of lambdas must match number of penalty matrices".to_string(),
+        ));
+    }
+    if let Some(pw) = prior_weights {
+        if pw.len() != n {
+            return Err(GAMError::DimensionMismatch(format!(
+                "prior_weights length ({}) must match y length ({})",
+                pw.len(),
+                n
+            )));
+        }
+    }
+
+    // Validate df if fixed (identical to fit_pirls_tdist).
+    if let Some(df) = fixed_df {
+        if df < 2.0 {
+            return Err(GAMError::InvalidParameter(format!(
+                "t-dist df must be >= 2.0, got {}",
+                df
+            )));
+        }
+        if df > 100.0 {
+            return Err(GAMError::InvalidParameter(format!(
+                "t-dist df must be <= 100.0, got {}",
+                df
+            )));
+        }
+    }
+
+    // Build penalty total once (identical to fit_pirls_tdist).
+    let mut penalty_total = Array2::<f64>::zeros((p, p));
+    for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
+        penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
+    }
+
+    let num_penalties = lambda.len();
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
+
+    let mut beta = Array1::zeros(p);
+    let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
+    let y_var: f64 =
+        y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
+    let mut sigma2 = fixed_sigma2.unwrap_or_else(|| y_var.max(1e-6)).max(1e-6);
+
+    let mut df = fixed_df.unwrap_or(5.0).clamp(2.0, 100.0);
+
+    // EM-IRLS t-weight (per-row, basis-agnostic — identical to fit_pirls_tdist).
+    let t_weight = |r: f64, sigma2: f64, df: f64| -> f64 {
+        let t2 = r * r / sigma2.max(1e-300);
+        ((df + 1.0) / (df + t2)).max(1e-10)
+    };
+    let t_newton_working = |r: f64, eta: f64, sigma2: f64, df: f64| -> (f64, f64) {
+        let sigma2 = sigma2.max(1e-300);
+        let denom = df * sigma2 + r * r;
+        let dmu = -2.0 * (df + 1.0) * r / denom;
+        let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
+        let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+        let dmu2 = if observed_dmu2.is_finite() && observed_dmu2 > 1e-12 {
+            observed_dmu2
+        } else {
+            expected_dmu2.max(1e-12)
+        };
+        let z = eta - dmu / dmu2;
+        ((0.5 * dmu2).max(1e-10), z)
+    };
+    let use_newton_working = fixed_sigma2.is_some();
+
+    let mut converged = false;
+    let mut iter = 0;
+
+    for outer_iter in 0..max_iter {
+        iter = outer_iter + 1;
+
+        // ── Inner WLS: solve (X'WX + S) β = X'Wz with t weights ─────────
+        // η uses the compressed-gather kernel instead of x.dot(&beta).
+        let eta: Array1<f64> = compute_eta_discrete(disc, &beta);
+        let mut z_work = Array1::<f64>::zeros(n);
+        let w_tdist: Array1<f64> = y
+            .iter()
+            .zip(eta.iter())
+            .enumerate()
+            .map(|(i, (&yi, &etai))| {
+                let r = yi - etai;
+                if use_newton_working {
+                    let (wi, zi) = t_newton_working(r, etai, sigma2, df);
+                    z_work[i] = zi;
+                    wi
+                } else {
+                    z_work[i] = yi;
+                    t_weight(r, sigma2, df)
+                }
+            })
+            .collect();
+        let w: Array1<f64> = match prior_weights {
+            Some(pw) => w_tdist
+                .iter()
+                .zip(pw.iter())
+                .map(|(&wt, &wp)| wt * wp)
+                .collect(),
+            None => w_tdist.clone(),
+        };
+
+        // X'WX via discrete scatter-gather (mgcv XWXd) — the basis-only
+        // change vs `fit_pirls_tdist`. O(n + Σ m_a·p_a² + Σ m_a·m_b·(p_a+p_b)).
+        let xtwx = compute_xtwx_discrete(disc, &w);
+
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p {
+            max_diag = max_diag.max(xtwx[[i, i]].abs());
+        }
+
+        let mut a = xtwx + &penalty_total;
+        let ridge = ridge_scale * max_diag;
+        for i in 0..p {
+            a[[i, i]] += ridge;
+        }
+
+        // X'Wz via discrete scatter-gather (mgcv XWyd). compute_xtwy_discrete
+        // forms Σ_i w_i·z_i per bin then gathers via X̃' — same arithmetic as
+        // the un-binned X'·diag(w)·z.
+        let xtwz = compute_xtwy_discrete(disc, &w, &z_work);
+
+        let beta_old = beta.clone();
+        beta = solve(a, xtwz)?;
+
+        // ── Update σ² via MLE (same per-row math, recompute η on the
+        // updated β via the discrete gather) ─────────────────────────────
+        let eta_new: Array1<f64> = compute_eta_discrete(disc, &beta);
+        let residuals: Vec<f64> = y
+            .iter()
+            .zip(eta_new.iter())
+            .map(|(&yi, &etai)| yi - etai)
+            .collect();
+
+        if fixed_sigma2.is_none() {
+            let w_new: Vec<f64> = residuals.iter().map(|&r| t_weight(r, sigma2, df)).collect();
+            let (sum_wr2, sum_pw): (f64, f64) = match prior_weights {
+                Some(pw) => {
+                    let mut a = 0.0;
+                    let mut b = 0.0;
+                    for i in 0..n {
+                        a += pw[i] * w_new[i] * residuals[i] * residuals[i];
+                        b += pw[i];
+                    }
+                    (a, b.max(1e-300))
+                }
+                None => {
+                    let a: f64 = w_new
+                        .iter()
+                        .zip(residuals.iter())
+                        .map(|(&wi, &ri)| wi * ri * ri)
+                        .sum();
+                    (a, n as f64)
+                }
+            };
+            sigma2 = (sum_wr2 / sum_pw).max(1e-6);
+        }
+        let _ = p;
+
+        // ── Update df via 1D Brent (same as fit_pirls_tdist) ─────────────
+        if fixed_df.is_none() && outer_iter % 2 == 0 {
+            df = profile_df_weighted(&residuals, sigma2, prior_weights);
+        }
+
+        // ── Convergence check ─────────────────────────────────────────────
+        let max_change = beta
+            .iter()
+            .zip(beta_old.iter())
+            .map(|(b, b_old)| (b - b_old).abs())
+            .fold(0.0f64, f64::max);
+
+        if max_change < tolerance {
+            converged = true;
+            break;
+        }
+    }
+
+    // Final quantities — η built via the compressed gather.
+    let eta: Array1<f64> = compute_eta_discrete(disc, &beta);
+    let fitted_values = eta.clone();
+
+    let residuals_final: Vec<f64> = y
+        .iter()
+        .zip(fitted_values.iter())
+        .map(|(&yi, &fi)| yi - fi)
+        .collect();
+
+    let weights_tdist: Array1<f64> = residuals_final
+        .iter()
+        .zip(eta.iter())
+        .map(|(&r, &etai)| {
+            if use_newton_working {
+                t_newton_working(r, etai, sigma2, df).0
+            } else {
+                t_weight(r, sigma2, df)
+            }
+        })
+        .collect();
+    let weights: Array1<f64> = match prior_weights {
+        Some(pw) => weights_tdist
+            .iter()
+            .zip(pw.iter())
+            .map(|(&wt, &wp)| wt * wp)
+            .collect(),
+        None => weights_tdist,
+    };
+    let working_response: Array1<f64> = residuals_final
+        .iter()
+        .zip(eta.iter())
+        .map(|(&r, &etai)| {
+            if use_newton_working {
+                t_newton_working(r, etai, sigma2, df).1
+            } else {
+                etai + r
+            }
+        })
+        .collect();
+
+    let deviance: f64 = match prior_weights {
+        Some(pw) => residuals_final
+            .iter()
+            .zip(pw.iter())
+            .map(|(&r, &wp)| wp * r * r)
+            .sum(),
+        None => residuals_final.iter().map(|&r| r * r).sum(),
+    };
+
+    Ok(PiRLSResult {
+        coefficients: beta,
+        fitted_values,
+        linear_predictor: eta,
+        weights,
+        working_response,
+        deviance,
+        iterations: iter,
+        converged,
+        sigma2: Some(sigma2),
+        df: Some(df),
+    })
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Quantile (qgam-style) family — IRLS on ELF (Extended Log-F) loss
 // ────────────────────────────────────────────────────────────────────────────
