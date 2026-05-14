@@ -6,7 +6,7 @@ use crate::{
     block_penalty::BlockPenalty,
     discrete::{compute_xtwx_discrete, DiscreteConfig, DiscreteDesign},
     gam::{SmoothTerm, GAM},
-    pirls::{fit_pirls_cached, fit_pirls_discretized, fit_pirls_tdist},
+    pirls::{fit_pirls_cached, fit_pirls_discretized, fit_pirls_tdist, fit_pirls_tdist_discrete},
     reml::compute_xtwx_dispatch,
     smooth::{OptimizationMethod, SmoothingParameter},
     GAMError, Result,
@@ -313,6 +313,23 @@ impl FitCache {
             } else {
                 None
             };
+            // D6: when the fit cache holds a DiscreteDesign, route TDist
+            // PIRLS through the scatter-gather hot path. Each inner IRLS
+            // iteration rebuilds X'WX with fresh t-weights, so binning
+            // amortises beautifully across iterations (design doc §1.5).
+            if let Some(ref disc) = self.discrete {
+                return fit_pirls_tdist_discrete(
+                    y,
+                    lambda,
+                    &self.penalties,
+                    fixed_df,
+                    fixed_sigma2,
+                    max_iter,
+                    tolerance,
+                    prior_weights,
+                    disc,
+                );
+            }
             return fit_pirls_tdist(
                 y,
                 &self.design_matrix,
