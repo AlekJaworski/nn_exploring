@@ -1470,6 +1470,82 @@ pub fn reml_hessian_gamfit4_tdist_analytic(
     Ok(hess)
 }
 
+/// Joint analytic gam.fit4-style LAML gradient + Hessian for mgcv's scat
+/// extended family, in **outer-Newton coordinate order**:
+/// `[log λ_1, ..., log λ_M, log σ², log(df - 2)]`.
+///
+/// Returns the full `(M+2)`-dim gradient and `(M+2, M+2)` Hessian — cross-
+/// terms between `log λ` and `(log σ², log df)` included.
+///
+/// Internally `tdist_gdi2_native` works in mgcv's native order
+/// `[log(df-2), log σ, log λ_1, ..., log λ_M]`. The remap here applies:
+///   - Permutation: native indices `(0, 1, 2..M+1)` ↔ outer indices
+///     `(M+1, M, 0..M-1)`. (mgcv has `(theta_df, theta_sigma, ...λ)`;
+///     outer has `(...λ, log σ², log(df-2))`.)
+///   - Jacobian for `log σ → log σ²`: `log σ² = 2 log σ`, so
+///     `d/d(log σ²) = (1/2) · d/d(log σ)`.
+///       grad scaling: 0.5;
+///       Hessian scaling on the `log σ²` row/col: 0.5 per intersection
+///       (0.25 for the `log σ²` diagonal).
+#[cfg(feature = "blas")]
+pub fn reml_joint_gh_gamfit4_tdist_analytic(
+    y_work: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    y_original: &Array1<f64>,
+    family: crate::pirls::Family,
+) -> Result<(Array1<f64>, Array2<f64>)> {
+    let (native_grad, native_hess) = tdist_gdi2_native(
+        y_original,
+        y_work,
+        x,
+        w,
+        lambdas,
+        penalties,
+        cached_xtwx,
+        family,
+    )?;
+    let m = lambdas.len();
+    let ntot = m + 2;
+    // outer→native index map.
+    // outer 0..M-1  → native 2..M+1   (log λ block)
+    // outer M       → native 1         (log σ² ↔ log σ, with 1/2 Jacobian)
+    // outer M+1     → native 0         (log(df-2), identical)
+    let outer_to_native = |i: usize| -> usize {
+        if i < m {
+            2 + i
+        } else if i == m {
+            1
+        } else {
+            0
+        }
+    };
+    // Jacobian factor d native / d outer for axis `i`.
+    //   For log σ² → log σ (native), d(log σ)/d(log σ²) = 1/2.
+    //   For all others 1.
+    let scale = |i: usize| -> f64 {
+        if i == m {
+            0.5
+        } else {
+            1.0
+        }
+    };
+    let mut grad = Array1::<f64>::zeros(ntot);
+    let mut hess = Array2::<f64>::zeros((ntot, ntot));
+    for i in 0..ntot {
+        let ni = outer_to_native(i);
+        grad[i] = scale(i) * native_grad[ni];
+        for j in 0..ntot {
+            let nj = outer_to_native(j);
+            hess[[i, j]] = scale(i) * scale(j) * native_hess[[ni, nj]];
+        }
+    }
+    Ok((grad, hess))
+}
+
 // ============================================================================
 // IFT-based gradient and Hessian (Option B per Parity 4t)
 // ============================================================================

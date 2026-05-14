@@ -7,15 +7,14 @@ use crate::linalg::solve;
 pub use crate::reml::ScaleParameterMethod;
 #[cfg(feature = "blas")]
 use crate::reml::{
-    compute_xtwx_cholesky, gcv_criterion, newton_1d_with_halving, newton_2d_with_halving,
-    penalty_sqrt, reml_criterion, reml_criterion_multi, reml_criterion_multi_cached,
-    reml_criterion_multi_cached_mgcv_exact, reml_gradient_gamfit4_tdist_analytic,
-    reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
-    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
-    reml_hessian_gamfit4_tdist_analytic, reml_hessian_mgcv_exact_closed_form,
-    reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached, tdist_shape_derivatives_gamfit4,
-    tweedie_theta_derivatives_cached, ExtraKind, ExtraParam, OuterSearchVector,
-    TweedieThetaCache,
+    compute_xtwx_cholesky, gcv_criterion, newton_1d_with_halving, penalty_sqrt, reml_criterion,
+    reml_criterion_multi, reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
+    reml_gradient_gamfit4_tdist_analytic, reml_gradient_mgcv_exact_closed_form,
+    reml_gradient_mgcv_exact_ift, reml_gradient_multi_qr_adaptive,
+    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
+    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
+    reml_joint_gh_gamfit4_tdist_analytic, tweedie_theta_derivatives_cached, ExtraKind, ExtraParam,
+    OuterSearchVector, TweedieThetaCache,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -1229,6 +1228,80 @@ impl SmoothingParameter {
         // Work in log space for stability
         let mut log_lambda: Vec<f64> = self.lambda.iter().map(|l| l.ln()).collect();
 
+        // -------------------------------------------------------------------
+        // Joint outer-Newton setup (Step 3 of JOINT_OUTER_NEWTON_DESIGN.md).
+        //
+        // When the family has shape extras with an analytic joint Hessian
+        // available (TDist today), the outer Newton steps the full `(M+K)`-dim
+        // vector `[log λ; extras]` in one update using the cross-term-bearing
+        // joint Hessian, instead of alternating ρ-step then extras-step. This
+        // closes the 2-3× scat-vs-mgcv.gam(scat) speed gap because mgcv solves
+        // the joint system directly.
+        //
+        // `extras_values` carries the K family-shape extras in working coords,
+        // mirrored 1:1 from `SmoothingParameter` fields at iter start (so a
+        // user-visible "current" remains a single source of truth). At iter
+        // end, accepted values are committed back via `commit_outer_search_vector`.
+        //
+        // `joint_active = false` falls through to the legacy M-dim Newton path
+        // (Tweedie / NegBin profile blocks still run their 1-D Newton after
+        // the ρ step; that gap is tracked for a follow-up since their cross
+        // terms come from FD, not analytic).
+        // -------------------------------------------------------------------
+        let joint_active = self.mgcv_exact_score
+            && self.tdist_profile
+            && matches!(self.family, crate::pirls::Family::TDist { .. });
+        let extras_template: Vec<ExtraParam> = if joint_active {
+            self.build_outer_search_vector(&log_lambda).extras
+        } else {
+            Vec::new()
+        };
+        let k_extras = extras_template.len();
+        let dim = m + k_extras;
+        let mut extras_values: Vec<f64> = extras_template.iter().map(|e| e.value).collect();
+        let extras_lo: Vec<f64> = extras_template.iter().map(|e| e.lo).collect();
+        let extras_hi: Vec<f64> = extras_template.iter().map(|e| e.hi).collect();
+        let extras_step_cap: Vec<f64> = extras_template.iter().map(|e| e.step_cap).collect();
+        let extras_kinds: Vec<ExtraKind> = extras_template.iter().map(|e| e.kind).collect();
+
+        // Snapshot of (df, σ²) at fit start — used as the fallback values
+        // when building a trial Family from the joint search-vector tail
+        // (the extras only cover the working coords we step on; any
+        // family-shape param the joint Newton does *not* drive must come
+        // from a constant snapshot so the trial family stays consistent).
+        let (snapshot_df, snapshot_sigma2) =
+            if let crate::pirls::Family::TDist { df, sigma2 } = self.family {
+                (df, sigma2)
+            } else {
+                (5.0_f64, 1.0_f64)
+            };
+        let extras_kinds_for_trial = extras_kinds.clone();
+        // Build a trial Family enum for the given joint search-vector tail
+        // (extras only). Free-function-style closure (no `self` capture) so
+        // the borrow checker is happy when we call this inside a context
+        // where `self` is later mutated (e.g. `self.commit_outer_search_vector`
+        // in the accept branch).
+        let trial_family_for_extras = move |extras: &[f64]| -> crate::pirls::Family {
+            let mut df_v = snapshot_df;
+            let mut sigma2_v = snapshot_sigma2;
+            for (k, &kind) in extras_kinds_for_trial.iter().enumerate() {
+                match kind {
+                    ExtraKind::TDistLogSigma2 => {
+                        sigma2_v = extras[k].exp().max(1e-8_f64).min(1e8_f64);
+                    }
+                    ExtraKind::TDistLogDfM2 => {
+                        df_v = (extras[k].exp() + 2.0).max(2.0_f64).min(100.0_f64);
+                    }
+                    // Tweedie / NegBin not yet on the joint path.
+                    _ => {}
+                }
+            }
+            crate::pirls::Family::TDist {
+                df: df_v,
+                sigma2: sigma2_v,
+            }
+        };
+
         // Maximum step size in log space. mgcv's `newton` uses
         // `maxNstep=5` (gam.fit3.r:1411) — slightly larger than our
         // historical 4. For saturating-λ smooths the Newton direction is
@@ -1319,7 +1392,28 @@ impl SmoothingParameter {
                 self.family.score_formula() == crate::pirls::ScoreFormula::GamFit5;
 
             let t_grad = Instant::now();
-            let gradient = if self.mgcv_exact_score {
+            // When joint Newton is active (TDist today) we compute the full
+            // (M+K)-dim gradient and Hessian in one pass via the joint
+            // analytic so the outer Newton step uses cross-terms. Otherwise
+            // fall through to the existing per-family closed-form / IFT paths
+            // returning M-dim arrays.
+            let joint_gh: Option<(Array1<f64>, Array2<f64>)> = if joint_active {
+                Some(reml_joint_gh_gamfit4_tdist_analytic(
+                    &y_local,
+                    x,
+                    &w_local,
+                    &lambdas,
+                    penalties,
+                    Some(&xtwx_local),
+                    self.y_original.as_ref().unwrap_or(&y_local),
+                    self.family,
+                )?)
+            } else {
+                None
+            };
+            let gradient = if let Some((ref g_joint, _)) = joint_gh {
+                g_joint.clone()
+            } else if self.mgcv_exact_score {
                 if matches!(self.family, crate::pirls::Family::TDist { .. }) {
                     reml_gradient_gamfit4_tdist_analytic(
                         &y_local,
@@ -1415,7 +1509,9 @@ impl SmoothingParameter {
             let grad_time = t_grad.elapsed().as_micros();
 
             let t_hess = Instant::now();
-            let mut hessian = if self.mgcv_exact_score {
+            let mut hessian = if let Some((_, ref h_joint)) = joint_gh {
+                h_joint.clone()
+            } else if self.mgcv_exact_score {
                 if matches!(self.family, crate::pirls::Family::TDist { .. }) {
                     reml_hessian_gamfit4_tdist_analytic(
                         &y_local,
@@ -1478,8 +1574,8 @@ impl SmoothingParameter {
             // Debug output: show raw Hessian before conditioning
             if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
                 eprintln!("\n[SMOOTH_DEBUG] Raw Hessian at λ={:?}:", lambdas);
-                for i in 0..m {
-                    for j in 0..m {
+                for i in 0..dim {
+                    for j in 0..dim {
                         eprint!("  H[{},{}]={:.6e}", i, j, hessian[[i, j]]);
                     }
                     eprintln!();
@@ -1492,20 +1588,25 @@ impl SmoothingParameter {
             // ===================================================================
             // mgcv uses ridge regularization + diagonal preconditioning
             // This prevents ill-conditioning that causes tiny steps in late iterations
+            //
+            // When joint Newton is active the (M+K)×(M+K) Hessian contains
+            // the (log λ, log σ², log df) cross-terms; preconditioning is
+            // applied uniformly over all `dim` axes so the extras get the
+            // same condition-number control as the smoothing-parameter axes.
 
             // 1. Add adaptive ridge FIRST (before preconditioning)
             //    Ridge increases with iteration to handle increasing ill-conditioning
-            let min_diag_orig = (0..m)
+            let min_diag_orig = (0..dim)
                 .map(|i| hessian[[i, i]])
                 .fold(f64::INFINITY, f64::min);
-            let max_diag_orig = (0..m).map(|i| hessian[[i, i]]).fold(0.0f64, f64::max);
+            let max_diag_orig = (0..dim).map(|i| hessian[[i, i]]).fold(0.0f64, f64::max);
 
             // CRITICAL: Diagonal preconditioning like mgcv (fast-REML.r)
             // This handles ill-conditioning from vastly different smoothing parameter scales
             // Transform: H_new = D^-1 * H * D^-1 where D = diag(sqrt(diag(H)))
 
-            let mut diag_precond = Array1::<f64>::zeros(m);
-            for i in 0..m {
+            let mut diag_precond = Array1::<f64>::zeros(dim);
+            for i in 0..dim {
                 let d = hessian[[i, i]];
                 // If diagonal is negative or tiny, use 1.0 (don't precondition that component)
                 diag_precond[i] = if d > 1e-10 { d.sqrt() } else { 1.0 };
@@ -1524,15 +1625,15 @@ impl SmoothingParameter {
             }
 
             // Apply preconditioning to Hessian: H_ij = H_ij / (d_i * d_j)
-            for i in 0..m {
-                for j in 0..m {
+            for i in 0..dim {
+                for j in 0..dim {
                     hessian[[i, j]] /= diag_precond[i] * diag_precond[j];
                 }
             }
 
             // Add small ridge for numerical stability (after preconditioning)
             let ridge = 1e-7;
-            for i in 0..m {
+            for i in 0..dim {
                 hessian[[i, i]] += ridge;
             }
 
@@ -1649,8 +1750,8 @@ impl SmoothingParameter {
             // 1d_near_linear) in our parity battery.
 
             // Precondition gradient: g_precond = D^-1 * g
-            let mut gradient_precond = Array1::<f64>::zeros(m);
-            for i in 0..m {
+            let mut gradient_precond = Array1::<f64>::zeros(dim);
+            for i in 0..dim {
                 gradient_precond[i] = gradient[i] / diag_precond[i];
             }
 
@@ -1681,7 +1782,7 @@ impl SmoothingParameter {
             // 4d_binomial xfail, 11 fixtures improve >10%, no regressions.
             let score_scale = current_reml.abs() + 1.0;
             let dim_grad_tol = score_scale * 1.0e-7;
-            let active: Vec<usize> = (0..m)
+            let active: Vec<usize> = (0..dim)
                 .filter(|&i| {
                     let gi = gradient[i].abs();
                     let hii_raw = diag_precond[i] * diag_precond[i];
@@ -1691,7 +1792,7 @@ impl SmoothingParameter {
 
             // mgcv safeguard (line 1432): ensure at least one dim is active.
             let active = if active.is_empty() {
-                let argmax = (0..m)
+                let argmax = (0..dim)
                     .max_by(|&a, &b| gradient[a].abs().total_cmp(&gradient[b].abs()))
                     .unwrap_or(0);
                 vec![argmax]
@@ -1700,17 +1801,17 @@ impl SmoothingParameter {
             };
             let n_active = active.len();
 
-            if std::env::var("MGCV_PROFILE").is_ok() && n_active < m {
+            if std::env::var("MGCV_PROFILE").is_ok() && n_active < dim {
                 eprintln!(
                     "[PROFILE]   Subset Newton: {}/{} dims active (frozen: {:?})",
                     n_active,
-                    m,
-                    (0..m).filter(|i| !active.contains(i)).collect::<Vec<_>>()
+                    dim,
+                    (0..dim).filter(|i| !active.contains(i)).collect::<Vec<_>>()
                 );
             }
 
             // Build subset Hessian and gradient (preconditioned forms).
-            let h_sub = if n_active == m {
+            let h_sub = if n_active == dim {
                 hessian.clone()
             } else {
                 let mut hs = Array2::<f64>::zeros((n_active, n_active));
@@ -1721,7 +1822,7 @@ impl SmoothingParameter {
                 }
                 hs
             };
-            let g_sub: Array1<f64> = if n_active == m {
+            let g_sub: Array1<f64> = if n_active == dim {
                 gradient_precond.clone()
             } else {
                 let mut gs = Array1::<f64>::zeros(n_active);
@@ -1761,12 +1862,18 @@ impl SmoothingParameter {
 
             // Back-transform: step = D^-1 * step_precond, padded to full size
             // with zeros on frozen dims.
-            let mut step = Array1::<f64>::zeros(m);
+            let mut step = Array1::<f64>::zeros(dim);
             for (ki, &ai) in active.iter().enumerate() {
                 step[ai] = step_sub_precond[ki] / diag_precond[ai];
             }
 
-            // Limit step size (Wood 2011: max step = 4-5 in log space)
+            // Trust-region cap (Wood 2011 / mgcv `gam.fit3.r:1411` newton
+            // maxNstep=5). Applied to the L2 norm of the full joint step
+            // including extras — mgcv's joint outer Newton uses a single L2
+            // cap and does not distinguish extra axes for trust-region
+            // purposes. (The Rust sequential 2-D shape block historically
+            // used a per-coord L∞ cap=1.0; under joint Newton the cross-term
+            // accuracy makes that artificial.)
             let step_size: f64 = step.iter().map(|s| s * s).sum::<f64>().sqrt();
             if step_size > max_step {
                 let scale = max_step / step_size;
@@ -1774,6 +1881,7 @@ impl SmoothingParameter {
                     *s *= scale;
                 }
             }
+            let step_size: f64 = step.iter().map(|s| s * s).sum::<f64>().sqrt();
 
             // OPTIMIZATION: Adaptive line search with Armijo condition
             // Compute directional derivative: gradient · step (for Armijo condition)
@@ -1847,17 +1955,46 @@ impl SmoothingParameter {
 
             let mut halvings_attempted: usize = 0;
             let t_linesearch = Instant::now();
+            // Snapshot of family at iter start — restored after the line search
+            // if no improving step is accepted, so trial extras don't leak.
+            let family_at_iter_start = self.family;
             for half in 0..=max_half {
                 let step_scale = 0.5_f64.powi(half as i32);
 
                 // Try new log_lambda values
                 let new_log_lambda: Vec<f64> = log_lambda
                     .iter()
-                    .zip(step.iter())
+                    .zip(step.iter().take(m))
                     .map(|(l, s)| l + s * step_scale)
                     .collect();
 
                 let new_lambdas: Vec<f64> = new_log_lambda.iter().map(|l| l.exp()).collect();
+
+                // Joint Newton: trial extras = base extras + step_scale * step[m..]
+                // Bounds-clamped, then published into `family_cell` (and the
+                // local `self.family`) so the PIRLS callback below sees the
+                // trial (df, σ²). Without this publication the trial PIRLS
+                // would refit β at the OLD (df, σ²) which makes the trial
+                // score inconsistent and breaks joint-Newton convergence.
+                let new_extras: Vec<f64> = if k_extras > 0 {
+                    extras_values
+                        .iter()
+                        .zip(step.iter().skip(m))
+                        .enumerate()
+                        .map(|(k, (v, s))| (v + s * step_scale).max(extras_lo[k]).min(extras_hi[k]))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if joint_active && k_extras > 0 {
+                    let trial_fam = trial_family_for_extras(&new_extras);
+                    self.family = trial_fam;
+                    if let Some(cell) = self.family_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = trial_fam;
+                        }
+                    }
+                }
 
                 // Evaluate REML (mgcv-exact dispatch). When `pirls_callback`
                 // is supplied (non-Gaussian), refresh inner PIRLS at the
@@ -1993,7 +2130,7 @@ impl SmoothingParameter {
                 );
             }
 
-            // Update log_lambda
+            // Update log_lambda (and joint extras).
             // Reject steps smaller than 1e-6 as they're effectively zero and waste time
             const MIN_STEP_SIZE: f64 = 1e-6;
 
@@ -2007,7 +2144,39 @@ impl SmoothingParameter {
                 for i in 0..m {
                     log_lambda[i] += step[i] * best_step_scale;
                 }
+                // Joint Newton: also accept the extras step (clamped to bounds).
+                // The accepted extras are committed back into `self` via
+                // `commit_outer_search_vector` so `self.family`,
+                // `self.tdist_log_sigma2`, etc. stay in sync. The trial that
+                // produced the accepted score also published the accepted
+                // family into `family_cell`, but the line-search may have
+                // accepted an earlier (larger-scale) trial then explored
+                // further — re-publish here to be sure.
+                if k_extras > 0 {
+                    for (k, v) in extras_values.iter_mut().enumerate() {
+                        let updated = (*v + step[m + k] * best_step_scale)
+                            .max(extras_lo[k])
+                            .min(extras_hi[k]);
+                        *v = updated;
+                    }
+                    let mut accepted_sv = self.build_outer_search_vector(&log_lambda);
+                    for (k, &v) in extras_values.iter().enumerate() {
+                        accepted_sv.extras[k].value = v;
+                    }
+                    self.commit_outer_search_vector(&accepted_sv);
+                }
             } else {
+                // No improving Newton step — restore the family snapshot so
+                // trial extras don't bleed into the convergence-check / SD
+                // fallback paths below.
+                if joint_active && k_extras > 0 {
+                    self.family = family_at_iter_start;
+                    if let Some(cell) = self.family_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = family_at_iter_start;
+                        }
+                    }
+                }
                 // Newton line search found no meaningful improvement (step too small or zero)
                 // If gradient is already small, accept convergence rather than waste time
                 if std::env::var("MGCV_PROFILE").is_ok() {
@@ -2340,126 +2509,14 @@ impl SmoothingParameter {
             }
             // End of NegBin profile-θ step
 
-            // -----------------------------------------------------------------------
-            // scat (TDist) profile-shape: joint Newton on (log σ², log df).
-            //
-            // This is the first gam.fit5-style structural port: each finite-
-            // difference shape trial publishes the trial family into
-            // `family_cell`, refits β through the PIRLS callback at the current
-            // λ, then evaluates the LAML score using the refreshed β/w/X'WX.
-            // That replaces the previous frozen-β sequential σ²-then-df steps.
-            // -----------------------------------------------------------------------
-            if self.tdist_profile {
-                let mut sv = self.build_outer_search_vector(&log_lambda);
-                let idx_s = sv.find_kind(ExtraKind::TDistLogSigma2).expect(
-                    "tdist_profile=true but no TDistLogSigma2 extra in OuterSearchVector",
-                );
-                let idx_d = sv.find_kind(ExtraKind::TDistLogDfM2).expect(
-                    "tdist_profile=true but no TDistLogDfM2 extra in OuterSearchVector",
-                );
-                let log_sigma2 = sv.extras[idx_s].value;
-                let log_df = sv.extras[idx_d].value;
-                let bounds_s = (sv.extras[idx_s].lo, sv.extras[idx_s].hi);
-                let bounds_d = (sv.extras[idx_d].lo, sv.extras[idx_d].hi);
-                let current_lambdas: Vec<f64> = sv.log_lambda.iter().map(|l| l.exp()).collect();
-
-                macro_rules! shape_eval {
-                    ($ls_trial:expr, $ld_trial:expr) => {{
-                        let ls_trial = ($ls_trial).max(bounds_s.0).min(bounds_s.1);
-                        let ld_trial = ($ld_trial).max(bounds_d.0).min(bounds_d.1);
-                        let trial_fam = crate::pirls::Family::TDist {
-                            df: (ld_trial.exp() + 2.0).max(2.0_f64).min(100.0_f64),
-                            sigma2: ls_trial.exp().max(1e-8_f64).min(1e8_f64),
-                        };
-                        if let Some(cell) = self.family_cell.as_ref() {
-                            if let Ok(mut g) = cell.lock() {
-                                *g = trial_fam;
-                            }
-                        }
-                        // When a PIRLS callback is available, refresh (z, w, X'WX) at
-                        // the trial family + current λ before evaluating the score. The
-                        // stale y_local/w_local/xtwx_local reflect (df, σ²) from the
-                        // START of the current Newton iteration; using them for the shape
-                        // line search gives an inconsistent score (old weights, new
-                        // parameters) that causes valid Newton steps to be rejected.
-                        if let Some(cb) = pirls_callback.as_mut() {
-                            match cb(&current_lambdas) {
-                                Ok(ref refresh) => reml_criterion_multi_cached_mgcv_exact(
-                                    &refresh.working_response,
-                                    x,
-                                    &refresh.weights,
-                                    &current_lambdas,
-                                    penalties,
-                                    Some(&refresh.xtwx),
-                                    None,
-                                    self.mp,
-                                    trial_fam,
-                                    self.y_original.as_ref(),
-                                ),
-                                Err(e) => Err(e),
-                            }
-                        } else {
-                            dispatch_reml_score_with_family(
-                                self,
-                                &y_local,
-                                x,
-                                &w_local,
-                                &current_lambdas,
-                                penalties,
-                                Some(&xtwx_local),
-                                Some(&xtwy_local),
-                                trial_fam,
-                            )
-                        }
-                    }};
-                }
-
-                let sc = shape_eval!(log_sigma2, log_df);
-                let deriv = tdist_shape_derivatives_gamfit4(
-                    self.y_original.as_ref().unwrap_or(&y_local),
-                    &y_local,
-                    x,
-                    &w_local,
-                    &current_lambdas,
-                    penalties,
-                    Some(&xtwx_local),
-                    self.family,
-                );
-
-                if let (Ok(sc), Ok((shape_grad, shape_hess))) = (sc, deriv) {
-                    let g_s = shape_grad[0];
-                    let g_d = shape_grad[1];
-                    let h_ss = shape_hess[[0, 0]];
-                    let h_dd = shape_hess[[1, 1]];
-                    let h_sd = shape_hess[[0, 1]];
-
-                    // 2-D Newton + 8-halving line-search via the shared helper.
-                    let eval_at = |s_t: f64, d_t: f64| -> Result<f64> { shape_eval!(s_t, d_t) };
-                    let (accepted_s, accepted_d) = newton_2d_with_halving(
-                        log_sigma2, log_df, g_s, g_d, h_ss, h_dd, h_sd, sc, bounds_s,
-                        bounds_d, 8, eval_at,
-                    );
-
-                    sv.extras[idx_s].value = accepted_s;
-                    sv.extras[idx_d].value = accepted_d;
-                    self.commit_outer_search_vector(&sv);
-
-                    if std::env::var("MGCV_PROFILE").is_ok() {
-                        eprintln!(
-                            "[PROFILE]   scat joint shape: log_σ² {:.4}→{:.4} σ²={:.6}; theta_df {:.4}→{:.4} df={:.4}; grad=({:.3e},{:.3e})",
-                            log_sigma2,
-                            accepted_s,
-                            accepted_s.exp(),
-                            log_df,
-                            accepted_d,
-                            accepted_d.exp() + 2.0,
-                            g_s,
-                            g_d,
-                        );
-                    }
-                }
-            }
-            // End of scat (TDist) joint profile-shape step
+            // TDist (scat) shape extras are now driven by the joint outer
+            // Newton step at the top of this iteration via
+            // `reml_joint_gh_gamfit4_tdist_analytic` — using the full
+            // (M+2)×(M+2) gradient/Hessian with cross-terms instead of the
+            // previous sequential `(ρ then (log σ², log df))` pattern.
+            // The dedicated 2-D shape Newton block that used to live here
+            // has been removed; `commit_outer_search_vector` is called from
+            // the line-search acceptance branch above.
         }
 
         // Update final lambdas
