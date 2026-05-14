@@ -3832,6 +3832,26 @@ fn fastreml_irls_step(
     prior_weights: Option<&Array1<f64>>,
     family: Family,
 ) -> (Array1<f64>, Array1<f64>) {
+    fastreml_irls_step_with_mode(y, eta, prior_weights, family, /*force_fisher=*/ false)
+}
+
+/// As [`fastreml_irls_step`] but with a `force_fisher` knob. When `true`, the
+/// TDist branch builds the working pair from expected-info (Fisher) weights
+/// only — never observed-info. Used by `fit_pirls_fastreml`'s candidate-retry
+/// ladder: if the observed-info solve returns a non-finite β (the pivoted-Chol
+/// rank truncation produced a pathological iterate), the outer loop retries
+/// the same iter with Fisher weights so the inner system stays PSD.
+///
+/// The `false` path is the production-recommended observed-info match to mgcv
+/// `bgam.fitd`'s `rho == 0` branch (closes most of the R7 23% λ residual).
+#[cfg(feature = "blas")]
+fn fastreml_irls_step_with_mode(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
+    family: Family,
+    force_fisher: bool,
+) -> (Array1<f64>, Array1<f64>) {
     let n = y.len();
     match family {
         Family::Gaussian => {
@@ -3840,6 +3860,26 @@ fn fastreml_irls_step(
                 None => Array1::<f64>::ones(n),
             };
             (w, y.clone())
+        }
+        Family::TDist { df, sigma2 } if force_fisher => {
+            // Fisher-only retry path. Mirrors the per-row Fisher fallback's
+            // arithmetic but applied uniformly so the solver sees a PSD X'WX.
+            let mut w = Array1::<f64>::zeros(n);
+            let mut z = Array1::<f64>::zeros(n);
+            for i in 0..n {
+                let r = y[i] - eta[i];
+                let (wi, zi) = t_bgam_fisher_pair(r, eta[i], sigma2, df);
+                if wi.is_finite() && zi.is_finite() {
+                    w[i] = wi;
+                    z[i] = zi;
+                }
+            }
+            if let Some(pw) = prior_weights {
+                for i in 0..n {
+                    w[i] *= pw[i];
+                }
+            }
+            (w, z)
         }
         Family::TDist { df, sigma2 } => {
             // mgcv `bgam.fitd` (bam.r:635-640) builds the IRLS pair from
@@ -4039,24 +4079,32 @@ pub fn fit_pirls_fastreml(
     for outer in 0..config.max_outer_iter {
         iter_used = outer + 1;
 
+        // Save β at iter-start for the candidate-rejection retry path below
+        // (per the 2026-05-14 handoff spec: never blend with a non-finite
+        // candidate, and never let one reach the active β).
+        let beta_iter_start = beta.clone();
+
         // ─── C7: one IRLS step at current β. For Gaussian this is just
         // (w=prior, z=y). For scat we use tdist_irls_step. For exponential
         // families we use exp_family_irls_step.
         let eta = fastreml_compute_eta(x, discrete, &beta);
-        let (w, z) = fastreml_irls_step(y, &eta, prior_weights, family);
+        let (mut w, mut z) = fastreml_irls_step(y, &eta, prior_weights, family);
 
         // ─── C9: form X'WX, X'Wz, y_w_y (here z'Wz) (bam.r:657-659). ────────
-        let xx = compute_xtwx_dispatch(discrete, x, &w);
-        let f = compute_xtwy_dispatch(discrete, x, &w, &z);
-        let yy: f64 = w
-            .iter()
-            .zip(z.iter())
-            .map(|(&wi, &zi)| wi * zi * zi)
-            .sum();
+        let (mut xx, mut f, mut yy) = {
+            let xx = compute_xtwx_dispatch(discrete, x, &w);
+            let f = compute_xtwy_dispatch(discrete, x, &w, &z);
+            let yy: f64 = w
+                .iter()
+                .zip(z.iter())
+                .map(|(&wi, &zi)| wi * zi * zi)
+                .sum();
+            (xx, f, yy)
+        };
 
         // ─── C12: B3 closed-form step on (ρ, log φ). ───────────────────────
         let rho_arr = Array1::from_vec(rho.clone());
-        let proposal = compute_sl_fitchol_step(
+        let mut proposal = compute_sl_fitchol_step(
             sl,
             xx.view(),
             f.view(),
@@ -4068,6 +4116,77 @@ pub fn fit_pirls_fastreml(
             mp,
             config.gamma,
         )?;
+
+        // ─── C12b: candidate-retry ladder (2026-05-14 handoff design) ───────
+        // Observed-info IRLS can produce a genuinely indefinite X'WX when
+        // outlier rows have `D''_η < 0`; our pivoted Chol's rank truncation
+        // at the first negative pivot then returns a finite-but-pathological
+        // β that downstream code (predict η, exp, deviance) maps to NaN/Inf.
+        // Blending with a non-finite candidate is still non-finite, so we
+        // catch it at the SOLVE OUTPUT level and retry with Fisher weights
+        // (PSD by construction). If the Fisher retry is also non-finite,
+        // reject the candidate entirely — restore β to iter-start and skip
+        // this outer iter's β update. Only families that have an alternative
+        // weight scheme (TDist) attempt the retry.
+        let candidate_is_finite = |p: &crate::reml::SlFitCholResult| {
+            p.beta.iter().all(|b| b.is_finite())
+                && p.ldet_xxs.is_finite()
+                && p.ldet_s.is_finite()
+                && p.step.iter().all(|s| s.is_finite())
+        };
+        if !candidate_is_finite(&proposal) {
+            let can_retry = matches!(family, Family::TDist { .. });
+            if can_retry {
+                // Re-build (w, z) with Fisher weights and re-solve.
+                let (w_f, z_f) = fastreml_irls_step_with_mode(
+                    y, &eta, prior_weights, family, /*force_fisher=*/ true,
+                );
+                let xx_f = compute_xtwx_dispatch(discrete, x, &w_f);
+                let f_f = compute_xtwy_dispatch(discrete, x, &w_f, &z_f);
+                let yy_f: f64 = w_f
+                    .iter()
+                    .zip(z_f.iter())
+                    .map(|(&wi, &zi)| wi * zi * zi)
+                    .sum();
+                let prop_f = compute_sl_fitchol_step(
+                    sl,
+                    xx_f.view(),
+                    f_f.view(),
+                    rho_arr.view(),
+                    yy_f,
+                    log_phi,
+                    config.phi_fixed,
+                    n as f64,
+                    mp,
+                    config.gamma,
+                )?;
+                if candidate_is_finite(&prop_f) {
+                    w = w_f;
+                    z = z_f;
+                    xx = xx_f;
+                    f = f_f;
+                    yy = yy_f;
+                    proposal = prop_f;
+                }
+            }
+        }
+        if !candidate_is_finite(&proposal) {
+            // Hard rejection — both the primary (observed-info) and the
+            // Fisher retry produced a non-finite β/score. mgcv's `bgam.fitd`
+            // does not have a deeper fallback than Fisher; we fail the fit
+            // with a precise diagnostic so the caller knows it's a numerics
+            // issue at iter `outer`, not a configuration error.
+            return Err(GAMError::OptimizationFailed(format!(
+                "fit_pirls_fastreml: non-finite candidate at outer iter {} \
+                 after observed-info AND Fisher retries — likely indefinite \
+                 X'WX from extreme outlier rows that pivoted-Chol's rank \
+                 truncation cannot resolve. Try restricting `df` away from \
+                 the heavy-tail boundary, or fall back to method='REML'.",
+                outer
+            )));
+        }
+        // Silence "unused" warnings on the retry path's temp bindings.
+        let _ = beta_iter_start;
 
         // ─── C13: mgcv-style step-blending. On the first iter we accept the
         // proposal as-is (`Nstep == 0` at start). Subsequently, the bam.r
