@@ -8,6 +8,37 @@
 
 use ndarray::{s, Array1, Array2};
 
+/// Per-block "initial reparameterization" transform from mgcv's `Sl.initial.repara`
+/// (R/fast-REML.r:517). For a singleton block, the eigendecomposition
+/// `S_k = U · diag(D) · U'` gives a basis rotation `D_k` such that the rotated
+/// penalty has 1's on the rank-r entries and 0's on the null. The transform is
+/// `sp`-independent and computed once at block-setup time.
+///
+/// In the rotated basis, the linear system `(X'WX + S(ρ)) β = f` becomes better
+/// conditioned because S is reduced to a partial identity. We rotate `XX`, `f`
+/// at the entry of `compute_sl_fitchol_step` and rotate `β`, `db`, `PP` back at
+/// exit, so the external contract is unchanged.
+///
+/// We only store the dense (eigen) case used by mgcv's eigen-stabilised path
+/// (line 288-302). The Cholesky-pivoted `singleStrans` branch (line 280-287)
+/// is not yet ported — that branch adds a `−log|D|` term to the score via
+/// `Sl[[b]]$ldet`, which we deliberately set to zero (line 296).
+#[derive(Debug, Clone)]
+pub struct ReparaTransform {
+    /// Forward transform `D` (k×k). Maps from the original basis to the
+    /// reparameterised basis. `D = U · diag(1/sqrt(D_+))` with `D_+` clamped
+    /// to 1 on null components (mgcv line 300-301). On a diagonal S this
+    /// degenerates to `diag(1/sqrt(D_+))`.
+    pub d_mat: Array2<f64>,
+    /// Inverse transform `Di = D^{-1}`. mgcv stores it explicitly (line 302)
+    /// to avoid the matrix inverse at every call.
+    pub di_mat: Array2<f64>,
+    /// Estimated rank of S_k from the eigen-spectrum. The leading `rank`
+    /// components are the penalised range; the trailing `k - rank` are the
+    /// null space.
+    pub rank: usize,
+}
+
 /// A penalty matrix stored as a single non-zero block on the diagonal.
 ///
 /// Represents a p×p matrix that is zero everywhere except for a k×k block
@@ -20,6 +51,11 @@ pub struct BlockPenalty {
     pub offset: usize,
     /// Total size of the full matrix (p = total_basis)
     pub total_size: usize,
+    /// Optional per-block reparameterisation transform (mgcv `Sl.initial.repara`).
+    /// Populated on demand via [`BlockPenalty::setup_initial_repara`]. When
+    /// `None`, rotation operations are no-ops, so existing call sites that
+    /// haven't opted in see identical behaviour.
+    pub repara: Option<ReparaTransform>,
 }
 
 impl BlockPenalty {
@@ -39,6 +75,7 @@ impl BlockPenalty {
             block,
             offset,
             total_size,
+            repara: None,
         }
     }
 
@@ -110,6 +147,12 @@ impl BlockPenalty {
             block: &self.block * scale,
             offset: self.offset,
             total_size: self.total_size,
+            // Scaling λ·S doesn't change the rotation basis (eigenvectors of
+            // λS = eigenvectors of S, eigenvalues scale by λ). Re-deriving on
+            // demand keeps the API simple; production callers compute repara
+            // on the unit-scaled S anyway (mgcv's `Sl.setup` operates on
+            // unit-S, then folds λ in via `lambda`).
+            repara: None,
         }
     }
 
@@ -282,6 +325,304 @@ impl BlockPenalty {
     pub fn log_det_singleton_with_derivs(&self, rho: f64) -> (f64, f64, f64) {
         let rank = self.estimate_rank() as f64;
         (rank * rho, rank, 0.0)
+    }
+
+    // =========================================================================
+    // Initial reparameterisation (mgcv R/fast-REML.r `Sl.initial.repara`)
+    // =========================================================================
+
+    /// Compute and cache the per-block initial reparameterisation transform.
+    ///
+    /// Mirrors the eigen-stabilised branch of mgcv's `Sl.setup` (R/fast-REML.r
+    /// lines 268-302). The diagonal-S shortcut (line 268-278) is detected and
+    /// uses the cheap `1/sqrt(diag)` path; otherwise we run an eigendecomposition
+    /// of the k×k block and form `D = U · diag(1/sqrt(D_+))` with the null
+    /// components clamped to 1.
+    ///
+    /// Idempotent — calling twice on the same block is a no-op after the first
+    /// call (return early when `self.repara` is already populated).
+    ///
+    /// **Not implemented yet**: multi-S blocks (tensor smooths with multiple
+    /// penalty marginals). B3's `log_det_singleton_with_derivs` already panics
+    /// with `todo!()` on multi-S; repara follows the same precedent.
+    #[cfg(feature = "blas")]
+    pub fn setup_initial_repara(&mut self) {
+        use ndarray_linalg::Eigh;
+
+        if self.repara.is_some() {
+            return;
+        }
+        let k = self.block_size();
+        if k == 0 {
+            self.repara = Some(ReparaTransform {
+                d_mat: Array2::<f64>::zeros((0, 0)),
+                di_mat: Array2::<f64>::zeros((0, 0)),
+                rank: 0,
+            });
+            return;
+        }
+
+        // Detect diagonal S — mgcv line 268. Use a tight tolerance relative to
+        // the diagonal magnitude.
+        let max_abs = (0..k)
+            .map(|i| self.block[[i, i]].abs())
+            .fold(0.0f64, f64::max);
+        let tol = (1e-14 * max_abs).max(0.0);
+        let mut is_diag = true;
+        'outer: for i in 0..k {
+            for j in 0..k {
+                if i != j && self.block[[i, j]].abs() > tol {
+                    is_diag = false;
+                    break 'outer;
+                }
+            }
+        }
+
+        if is_diag {
+            // mgcv lines 273-278: D[ind] = 1/sqrt(D[ind]); D[!ind] = 1.
+            let mut d_diag = Array1::<f64>::zeros(k);
+            let mut rank = 0usize;
+            let threshold = 1e-10 * max_abs.max(1.0);
+            for i in 0..k {
+                let v = self.block[[i, i]];
+                if v > threshold {
+                    d_diag[i] = 1.0 / v.sqrt();
+                    rank += 1;
+                } else {
+                    d_diag[i] = 1.0;
+                }
+            }
+            // Embed diagonal as a dense k×k. The matrix branch carries it
+            // uniformly with the eigen path so the rotation helpers don't
+            // have to branch on representation.
+            let mut d_mat = Array2::<f64>::zeros((k, k));
+            let mut di_mat = Array2::<f64>::zeros((k, k));
+            for i in 0..k {
+                d_mat[[i, i]] = d_diag[i];
+                di_mat[[i, i]] = 1.0 / d_diag[i];
+            }
+            self.repara = Some(ReparaTransform {
+                d_mat,
+                di_mat,
+                rank,
+            });
+            return;
+        }
+
+        // Dense S: eigen branch (mgcv lines 289-302).
+        // ndarray-linalg returns eigenvalues ascending. mgcv's `eigen()` returns
+        // DESCENDING by default — `ind[1:rank] <- TRUE` (line 298) puts the
+        // range-space at the TOP of the basis. We REVERSE both arrays here so
+        // the "leading rank columns" of D correspond to the range space and
+        // the null components sit at the bottom — matching mgcv's index
+        // convention. This is essential for the rotated-S → partial-identity
+        // shortcut at the top of `compute_sl_fitchol_step` to be valid
+        // (`diag(1..1, 0..0)` with 1's at indices `0..rank`).
+        let (eigvals_asc, eigvecs_asc) = match self.block.eigh(ndarray_linalg::UPLO::Upper) {
+            Ok(p) => p,
+            Err(_) => {
+                // Pathological block: fall back to identity (no-op rotation).
+                let d_mat = Array2::<f64>::eye(k);
+                let di_mat = Array2::<f64>::eye(k);
+                self.repara = Some(ReparaTransform {
+                    d_mat,
+                    di_mat,
+                    rank: 0,
+                });
+                return;
+            }
+        };
+        // Reverse eigvals and reorder eigvecs columns to match descending order.
+        let mut eigvals = Array1::<f64>::zeros(k);
+        let mut eigvecs = Array2::<f64>::zeros((k, k));
+        for j in 0..k {
+            eigvals[j] = eigvals_asc[k - 1 - j];
+            for i in 0..k {
+                eigvecs[[i, j]] = eigvecs_asc[[i, k - 1 - j]];
+            }
+        }
+        let max_eig = eigvals.iter().copied().fold(0.0f64, f64::max);
+        let rank_threshold = max_eig * f64::EPSILON.powf(0.8);
+        let mut scale = Array1::<f64>::zeros(k);
+        let mut rank = 0usize;
+        for (i, &ev) in eigvals.iter().enumerate() {
+            if ev > rank_threshold && ev > 0.0 {
+                scale[i] = 1.0 / ev.sqrt();
+                rank += 1;
+            } else {
+                scale[i] = 1.0;
+            }
+        }
+        // D[:, j] = U[:, j] · scale[j]   (eigvecs is U with descending eigvals).
+        let mut d_mat = Array2::<f64>::zeros((k, k));
+        for i in 0..k {
+            for j in 0..k {
+                d_mat[[i, j]] = eigvecs[[i, j]] * scale[j];
+            }
+        }
+        // Di = U' / scale (mgcv line 302). Di[j, i] = U[i, j] / scale[j].
+        let mut di_mat = Array2::<f64>::zeros((k, k));
+        for j in 0..k {
+            let inv_scale = 1.0 / scale[j];
+            for i in 0..k {
+                di_mat[[j, i]] = eigvecs[[i, j]] * inv_scale;
+            }
+        }
+        self.repara = Some(ReparaTransform {
+            d_mat,
+            di_mat,
+            rank,
+        });
+    }
+
+    /// Non-BLAS fallback: no eigendecomposition available, so the transform
+    /// is the identity (rotation is a no-op).
+    #[cfg(not(feature = "blas"))]
+    pub fn setup_initial_repara(&mut self) {
+        if self.repara.is_some() {
+            return;
+        }
+        let k = self.block_size();
+        let d_mat = Array2::<f64>::eye(k);
+        let di_mat = Array2::<f64>::eye(k);
+        self.repara = Some(ReparaTransform {
+            d_mat,
+            di_mat,
+            rank: 0,
+        });
+    }
+
+    /// Forward-rotate a symmetric "outer-product" matrix in place.
+    ///
+    /// Maps `X[ind, ind] ← D' · X[ind, ind] · D` where `ind = offset..offset+k`.
+    /// Equivalent to mgcv's `Sl.initial.repara(X, inverse=FALSE, both.sides=TRUE,
+    /// cov=FALSE)` for the block region (R/fast-REML.r:568-571).
+    ///
+    /// Use this for `XX = X'WX` at the entry of the score evaluator.
+    pub fn rotate_xx_in_place(&self, x: &mut Array2<f64>) {
+        let repara = match &self.repara {
+            Some(r) => r,
+            None => return,
+        };
+        let k = self.block_size();
+        if k == 0 {
+            return;
+        }
+        let p = self.total_size;
+        let off = self.offset;
+        let end = off + k;
+        debug_assert_eq!(x.nrows(), p);
+        debug_assert_eq!(x.ncols(), p);
+
+        // Step 1: row-side  X[ind, :] ← D' · X[ind, :]  (operate over ALL p cols).
+        // Slice out the k×p row block, replace with D' · block.
+        let row_block = x.slice(s![off..end, ..]).to_owned();
+        let new_rows = repara.d_mat.t().dot(&row_block);
+        x.slice_mut(s![off..end, ..]).assign(&new_rows);
+
+        // Step 2: col-side  X[:, ind] ← X[:, ind] · D  (operate over ALL p rows).
+        let col_block = x.slice(s![.., off..end]).to_owned();
+        let new_cols = col_block.dot(&repara.d_mat);
+        x.slice_mut(s![.., off..end]).assign(&new_cols);
+    }
+
+    /// Forward-rotate a model-matrix-shaped vector / column in place.
+    ///
+    /// Maps `v[ind] ← D' · v[ind]`. Use this for `f = X'Wy` at the entry of the
+    /// score evaluator. Mirrors mgcv's vector branch at line 577-579
+    /// (`both.sides=TRUE` vector path: "vector to be treated like model matrix
+    /// X").
+    pub fn rotate_f_in_place(&self, v: &mut Array1<f64>) {
+        let repara = match &self.repara {
+            Some(r) => r,
+            None => return,
+        };
+        let k = self.block_size();
+        if k == 0 {
+            return;
+        }
+        let off = self.offset;
+        let end = off + k;
+        let block = v.slice(s![off..end]).to_owned();
+        let new_block = repara.d_mat.t().dot(&block);
+        v.slice_mut(s![off..end]).assign(&new_block);
+    }
+
+    /// Inverse-rotate a parameter (coefficient) vector in place.
+    ///
+    /// Maps `v[ind] ← D · v[ind]`. Use this for `β̂` returned from the rotated
+    /// solve. Mirrors mgcv's parameter-vector branch at line 558-562
+    /// (`inverse=TRUE`, vector, matrix-D case: `Sl[[b]]$D %*% X[ind]`).
+    ///
+    /// Predictions invariance: at the rotated optimum `(XX_rot + S_rot) β_rot = f_rot`
+    /// with `XX_rot = D' XX D`, `f_rot = D' f`, `S_rot = D' S D`. Multiplying both
+    /// sides on the left by `D` and using `D D' XX D = D (D' XX D)`, the
+    /// unrotated coefficient is `β = D · β_rot`, so `X · β = X · D · β_rot`. We
+    /// rotate `β_rot` back here to restore the original-basis coefficients.
+    pub fn inverse_rotate_beta_in_place(&self, v: &mut Array1<f64>) {
+        let repara = match &self.repara {
+            Some(r) => r,
+            None => return,
+        };
+        let k = self.block_size();
+        if k == 0 {
+            return;
+        }
+        let off = self.offset;
+        let end = off + k;
+        let block = v.slice(s![off..end]).to_owned();
+        let new_block = repara.d_mat.dot(&block);
+        v.slice_mut(s![off..end]).assign(&new_block);
+    }
+
+    /// Inverse-rotate a covariance-shape matrix in place.
+    ///
+    /// Maps `X[ind, ind] ← D · X[ind, ind] · D'` where `ind = offset..offset+k`.
+    /// Mirrors mgcv's covariance branch with `inverse=TRUE, both.sides=TRUE,
+    /// cov=TRUE` (R/fast-REML.r:528-540).
+    ///
+    /// Use this for `PP = (X'X+S)⁻¹` and for each column of `db = dβ/dρ` (mgcv
+    /// treats `db` columns as covariance-style vectors, applying the same
+    /// `inverse=TRUE, cov=TRUE, both.sides=TRUE` rotation at bam.r:801).
+    pub fn inverse_rotate_cov_in_place(&self, x: &mut Array2<f64>) {
+        let repara = match &self.repara {
+            Some(r) => r,
+            None => return,
+        };
+        let k = self.block_size();
+        if k == 0 {
+            return;
+        }
+        let p = self.total_size;
+        let off = self.offset;
+        let end = off + k;
+        debug_assert_eq!(x.nrows(), p);
+        debug_assert_eq!(x.ncols(), p);
+
+        // Step 1: row-side  X[ind, :] ← D · X[ind, :].
+        let row_block = x.slice(s![off..end, ..]).to_owned();
+        let new_rows = repara.d_mat.dot(&row_block);
+        x.slice_mut(s![off..end, ..]).assign(&new_rows);
+
+        // Step 2: col-side  X[:, ind] ← X[:, ind] · D'.
+        let col_block = x.slice(s![.., off..end]).to_owned();
+        let new_cols = col_block.dot(&repara.d_mat.t());
+        x.slice_mut(s![.., off..end]).assign(&new_cols);
+    }
+
+    /// Inverse-rotate a single dβ/dρ column in place.
+    ///
+    /// `db[:, k]` is a length-`p` vector; mgcv applies the same cov-style
+    /// rotation as for a matrix slice (bam.r:800-801 passes
+    /// `as.numeric(prop$db[,i])` to `Sl.initial.repara` with `inverse=TRUE,
+    /// both.sides=TRUE, cov=TRUE`). For a vector under those flags, the
+    /// parameter-vector branch (line 557-562) applies `X[ind] ← D · X[ind]`,
+    /// matching `inverse_rotate_beta_in_place`. The `both.sides=TRUE, cov=TRUE`
+    /// flags don't change behaviour on a vector — they only affect the matrix
+    /// branch. So this is a thin alias documenting the call site.
+    #[inline]
+    pub fn inverse_rotate_db_column_in_place(&self, v: &mut Array1<f64>) {
+        self.inverse_rotate_beta_in_place(v);
     }
 }
 
@@ -459,6 +800,285 @@ mod tests {
             val_shift,
             expected
         );
+    }
+
+    /// Round-trip: rotate `XX` forward (`D' · XX · D` on block) and verify the
+    /// rotated matrix matches the analytical sandwich computed via dense
+    /// `D'·XX·D` on a full p×p `D`-embedding. This is the load-bearing
+    /// correctness check: it pins the block-level rotation against the
+    /// reference formula without mixing in unrelated inverse-cov semantics.
+    ///
+    /// NOTE: there is no "round-trip XX → XX" via forward + inverse cov
+    /// rotation. mgcv's `inverse_rotate_cov` is `D · · D'`, which is the
+    /// inverse for PP (since `A_rot⁻¹ = Di A⁻¹ Di'` and inverting gives
+    /// `A⁻¹ = D · PP_rot · D'`). Composing forward then inverse-cov gives
+    /// `D (D' XX D) D' = (DD') XX (DD')`, which is XX only when D is
+    /// orthogonal (it isn't, since D scales by `1/sqrt(D_+)`).
+    #[cfg(feature = "blas")]
+    #[test]
+    fn repara_round_trip_xx() {
+        // 3 blocks of different sizes at different offsets.
+        let p = 12;
+        let mut sl = vec![
+            BlockPenalty::new(
+                Array2::from_shape_vec(
+                    (3, 3),
+                    vec![4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0],
+                )
+                .unwrap(),
+                0,
+                p,
+            ),
+            BlockPenalty::new(
+                Array2::from_shape_vec((4, 4), {
+                    // Singular block: rank 3, last row/col zero.
+                    let mut v = vec![
+                        2.0, 0.5, 0.0, 0.0, 0.5, 2.0, 0.5, 0.0, 0.0, 0.5, 2.0, 0.0, 0.0, 0.0, 0.0,
+                        0.0,
+                    ];
+                    // Force exact symmetry (paranoia).
+                    for i in 0..4 {
+                        for j in (i + 1)..4 {
+                            v[j * 4 + i] = v[i * 4 + j];
+                        }
+                    }
+                    v
+                })
+                .unwrap(),
+                3,
+                p,
+            ),
+            BlockPenalty::new(
+                Array2::from_shape_vec((2, 2), vec![3.0, 1.0, 1.0, 3.0]).unwrap(),
+                7,
+                p,
+            ),
+        ];
+        for block in sl.iter_mut() {
+            block.setup_initial_repara();
+        }
+
+        // Synthetic XX (symmetric).
+        let mut xx = Array2::<f64>::zeros((p, p));
+        for i in 0..p {
+            for j in 0..p {
+                xx[[i, j]] = 1.0 + ((i * 7 + j * 13) as f64).sin();
+            }
+            xx[[i, i]] += 10.0;
+        }
+        for i in 0..p {
+            for j in (i + 1)..p {
+                let avg = 0.5 * (xx[[i, j]] + xx[[j, i]]);
+                xx[[i, j]] = avg;
+                xx[[j, i]] = avg;
+            }
+        }
+        let xx_orig = xx.clone();
+
+        // Reference: build the full p×p block-diagonal D embedding, compute
+        // D' · XX · D directly.
+        let mut d_full = Array2::<f64>::eye(p);
+        for b in sl.iter() {
+            let repara = b.repara.as_ref().unwrap();
+            let off = b.offset;
+            let k = b.block_size();
+            for i in 0..k {
+                for j in 0..k {
+                    d_full[[off + i, off + j]] = repara.d_mat[[i, j]];
+                }
+            }
+        }
+        let ref_xx = d_full.t().dot(&xx_orig).dot(&d_full);
+
+        // Compose in-place block rotations.
+        for b in sl.iter() {
+            b.rotate_xx_in_place(&mut xx);
+        }
+
+        let mut max_diff = 0.0f64;
+        for i in 0..p {
+            for j in 0..p {
+                max_diff = max_diff.max((xx[[i, j]] - ref_xx[[i, j]]).abs());
+            }
+        }
+        eprintln!(
+            "[repara_round_trip_xx] block vs full-D' XX D max |diff| = {:.2e}",
+            max_diff
+        );
+        assert!(
+            max_diff < 1e-12,
+            "Block-rotation vs full-D mismatch {:.2e} exceeds 1e-12",
+            max_diff
+        );
+
+        // Round-trip XX ↔ XX using the genuine inverse `Di' · · Di`.
+        // This is NOT exposed as a public method (mgcv never round-trips XX
+        // either — only PP, β, db are inverse-rotated back), but verifying
+        // it here pins the algebra.
+        let mut di_full = Array2::<f64>::eye(p);
+        for b in sl.iter() {
+            let repara = b.repara.as_ref().unwrap();
+            let off = b.offset;
+            let k = b.block_size();
+            for i in 0..k {
+                for j in 0..k {
+                    di_full[[off + i, off + j]] = repara.di_mat[[i, j]];
+                }
+            }
+        }
+        let xx_back = di_full.t().dot(&xx).dot(&di_full);
+        let mut rt = 0.0f64;
+        for i in 0..p {
+            for j in 0..p {
+                rt = rt.max((xx_back[[i, j]] - xx_orig[[i, j]]).abs());
+            }
+        }
+        eprintln!("[repara_round_trip_xx] Di'·(D'XX·D)·Di = XX max |diff| = {:.2e}", rt);
+        assert!(
+            rt < 1e-10,
+            "Genuine XX round-trip Di'·rotated·Di failed: {:.2e}",
+            rt
+        );
+    }
+
+    /// Round-trip on a vector (`f` forward + inverse round-trips via `β`-style
+    /// inverse rotation since `Di · (D' v)` = ... wait, that's `Di · D' · v`,
+    /// not the identity. The correct round-trip for `f` uses a separate inverse
+    /// dual to `D'` that we don't currently expose (since the score pipeline
+    /// never needs it — `f` doesn't come back from the solve, only β does).
+    /// Instead we verify the dual round-trips:
+    ///
+    ///   - `β` round-trip:  forward = `Di · β`, inverse = `D · β_rot`, returns β.
+    ///   - `f` forward sandwich consistency:  `f_rot = D' f` then `Di' f_rot = f`.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn repara_round_trip_vectors() {
+        let p = 6;
+        let mut sl = vec![BlockPenalty::new(
+            Array2::from_shape_vec((4, 4), {
+                let mut v = vec![
+                    3.0, -1.0, 0.0, 0.0, -1.0, 3.0, -1.0, 0.0, 0.0, -1.0, 3.0, -1.0, 0.0, 0.0,
+                    -1.0, 3.0,
+                ];
+                for i in 0..4 {
+                    for j in (i + 1)..4 {
+                        v[j * 4 + i] = v[i * 4 + j];
+                    }
+                }
+                v
+            })
+            .unwrap(),
+            1,
+            p,
+        )];
+        sl[0].setup_initial_repara();
+
+        // β-style round-trip: rotate f-style forward, then inverse-as-β.
+        // Mathematically: β = D · (Di · β)  — invert with D⁻¹ first to mimic
+        // the solve, then rotate back with D.
+        let beta_orig = Array1::<f64>::from_vec((0..p).map(|i| (i as f64) * 0.3 - 0.5).collect());
+        // Forward analogue: β_rot = Di · β. We don't have an explicit "forward
+        // β" method (the solve produces β_rot directly from rotated XX/f).
+        // For this test, we emulate it by applying `Di · β` manually via the
+        // public `repara` data.
+        let repara = sl[0].repara.as_ref().unwrap();
+        let mut beta_rot = beta_orig.clone();
+        {
+            let off = 1usize;
+            let end = off + 4;
+            let block = beta_rot.slice(s![off..end]).to_owned();
+            let new = repara.di_mat.dot(&block);
+            beta_rot.slice_mut(s![off..end]).assign(&new);
+        }
+        // Inverse-rotate via public API.
+        sl[0].inverse_rotate_beta_in_place(&mut beta_rot);
+        let mut max_diff = 0.0f64;
+        for i in 0..p {
+            max_diff = max_diff.max((beta_rot[i] - beta_orig[i]).abs());
+        }
+        eprintln!("[repara_round_trip_vectors] β round-trip max |diff| = {:.2e}", max_diff);
+        assert!(
+            max_diff < 1e-12,
+            "β round-trip max diff {:.2e} exceeds 1e-12",
+            max_diff
+        );
+
+        // f forward + matching inverse via Di'  (manual, since f's inverse
+        // counterpart isn't on the public API).
+        let f_orig = Array1::<f64>::from_vec((0..p).map(|i| (i as f64) * 0.2 + 1.0).collect());
+        let mut f_rot = f_orig.clone();
+        sl[0].rotate_f_in_place(&mut f_rot);
+        // Inverse: f = Di' · f_rot   (since f_rot = D' f).
+        let mut f_back = f_rot.clone();
+        {
+            let off = 1usize;
+            let end = off + 4;
+            let block = f_back.slice(s![off..end]).to_owned();
+            let new = repara.di_mat.t().dot(&block);
+            f_back.slice_mut(s![off..end]).assign(&new);
+        }
+        let mut max_diff_f = 0.0f64;
+        for i in 0..p {
+            max_diff_f = max_diff_f.max((f_back[i] - f_orig[i]).abs());
+        }
+        eprintln!("[repara_round_trip_vectors] f round-trip max |diff| = {:.2e}", max_diff_f);
+        assert!(
+            max_diff_f < 1e-12,
+            "f round-trip max diff {:.2e} exceeds 1e-12",
+            max_diff_f
+        );
+    }
+
+    /// Verify that the rotated penalty matrix `D' · S · D` equals a partial
+    /// identity (1's on the leading `rank` entries, 0 elsewhere), which is the
+    /// mgcv invariant from R/fast-REML.r:309-311.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn repara_yields_partial_identity_S() {
+        // Eigen branch: dense block.
+        let block_dense =
+            Array2::from_shape_vec((3, 3), vec![4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0])
+                .unwrap();
+        let mut bp = BlockPenalty::new(block_dense.clone(), 0, 3);
+        bp.setup_initial_repara();
+        let repara = bp.repara.as_ref().unwrap();
+        // S_rot = D' · S · D  (since D was computed s.t. this is partial-I).
+        let s_rot = repara.d_mat.t().dot(&block_dense).dot(&repara.d_mat);
+        let k = 3;
+        for i in 0..k {
+            for j in 0..k {
+                let expected = if i == j && i < repara.rank { 1.0 } else { 0.0 };
+                let diff = (s_rot[[i, j]] - expected).abs();
+                assert!(
+                    diff < 1e-10,
+                    "S_rot[{},{}] = {}, expected {}: |diff| = {:.2e}",
+                    i,
+                    j,
+                    s_rot[[i, j]],
+                    expected,
+                    diff
+                );
+            }
+        }
+
+        // Diagonal branch: 1's and 0's mixed.
+        let mut block_diag = Array2::<f64>::zeros((4, 4));
+        block_diag[[0, 0]] = 9.0;
+        block_diag[[1, 1]] = 0.0; // null
+        block_diag[[2, 2]] = 4.0;
+        block_diag[[3, 3]] = 0.0; // null
+        let mut bp2 = BlockPenalty::new(block_diag.clone(), 0, 4);
+        bp2.setup_initial_repara();
+        let repara2 = bp2.repara.as_ref().unwrap();
+        assert_eq!(repara2.rank, 2);
+        let s_rot2 = repara2.d_mat.t().dot(&block_diag).dot(&repara2.d_mat);
+        // After repara, S_rot has 1's at positions 0 and 2 (the rank-carrying
+        // entries) and 0 elsewhere — the diagonal `D[ind] = 1/sqrt(diag)`
+        // makes `(1/sqrt(d))² · d = 1`.
+        assert!((s_rot2[[0, 0]] - 1.0).abs() < 1e-12);
+        assert!((s_rot2[[2, 2]] - 1.0).abs() < 1e-12);
+        assert!(s_rot2[[1, 1]].abs() < 1e-12);
+        assert!(s_rot2[[3, 3]].abs() < 1e-12);
     }
 
     #[test]

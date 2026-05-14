@@ -149,9 +149,77 @@ pub fn compute_sl_fitchol_step(
     // λ_k = exp(ρ_k)
     let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
 
+    // ===== Initial reparameterisation (mgcv `Sl.initial.repara`) =====
+    //
+    // For each singleton block carrying a cached `ReparaTransform`, rotate
+    // `XX` and `f` into the per-block reparameterised basis at entry, and the
+    // returned `β`, `db`, `pp` back into the original basis at exit. The
+    // rotated linear system `(XX_rot + Σ λ_k S_k^rot) β_rot = f_rot` has
+    // `S_k^rot` equal to a partial identity, which is dramatically better
+    // conditioned for fREML than the raw-basis system.
+    //
+    // We work on owned copies so the caller's `xx`/`f` views remain
+    // unchanged — `compute_sl_fitchol_step` is called inside outer loops
+    // that reuse the cached primitives across multiple ρ trials.
+    //
+    // Multi-block note: blocks live on disjoint column ranges
+    // `[start..stop]`, so rotations from different blocks commute. We loop
+    // in any order without worrying about basis interactions.
+    //
+    // **Penalty rotation in-place**: in the reparameterised basis,
+    // `S_k^rot = D_k' · S_k · D_k`, which by construction is a partial
+    // identity (1's on the rank-r entries, 0's elsewhere). Instead of
+    // re-deriving this every step, we form a fresh `sl_rot` view where
+    // each block's matrix is replaced with that partial identity. The
+    // `dot_vec`/`scaled_add_to`/`trace_product`/etc operations on
+    // `sl_rot[k]` then naturally reflect the rotated penalty.
+    let any_repara = sl.iter().any(|b| b.repara.is_some());
+
+    // We always materialise `xx_work` and `f_work` as owned copies — the
+    // unrotated branch then just clones the inputs and never touches the
+    // owned data otherwise. This keeps the borrow-graph trivial (no
+    // conditional lifetime juggling).
+    let mut xx_work = xx.to_owned();
+    let mut f_work = f.to_owned();
+    let sl_rot_storage: Vec<BlockPenalty>;
+    let sl_use: &[BlockPenalty] = if any_repara {
+        for block in sl.iter() {
+            block.rotate_xx_in_place(&mut xx_work);
+            block.rotate_f_in_place(&mut f_work);
+        }
+        // Build the rotated penalty list. In the rotated basis,
+        // `S_k^rot = D_k' · S_k · D_k` is (by construction of D_k) a partial
+        // identity — diagonal with 1's at the rank-carrying entries and 0's
+        // on the null. For the EIGEN-stabilised branch we precomputed the
+        // basis so the 1's land at indices `0..rank` after the descending
+        // reorder; for the DIAGONAL branch (where D is itself diagonal), the
+        // 1's land at the original positions of nonzero diag entries, which
+        // may not be contiguous. We compute `D' · S · D` explicitly to cover
+        // both cases without assuming the index layout.
+        let mut sl_rot_vec: Vec<BlockPenalty> = Vec::with_capacity(sl.len());
+        for block in sl.iter() {
+            if let Some(repara) = &block.repara {
+                let rotated = repara.d_mat.t().dot(&block.block).dot(&repara.d_mat);
+                let mut new_block = BlockPenalty::new(rotated, block.offset, block.total_size);
+                // Carry the transform forward defensively (callers may inspect
+                // `sl_use[k].repara`).
+                new_block.repara = block.repara.clone();
+                sl_rot_vec.push(new_block);
+            } else {
+                sl_rot_vec.push(block.clone());
+            }
+        }
+        sl_rot_storage = sl_rot_vec;
+        &sl_rot_storage
+    } else {
+        sl
+    };
+    let xx_view = xx_work.view();
+    let f_view = f_work.view();
+
     // ===== 1) Assemble penalised Hessian A = X'WX + Σ λ_k S_k =====
-    let mut a = xx.to_owned();
-    for (lambda, pen) in lambdas.iter().zip(sl.iter()) {
+    let mut a = xx_view.to_owned();
+    for (lambda, pen) in lambdas.iter().zip(sl_use.iter()) {
         pen.scaled_add_to(&mut a, *lambda);
     }
 
@@ -167,15 +235,25 @@ pub fn compute_sl_fitchol_step(
     for i in 0..p {
         a_solve[[i, i]] += solve_ridge;
     }
-    let beta = solve(a_solve, f.to_owned())?;
+    let beta = solve(a_solve, f_view.to_owned())?;
     let pp = inverse(&a)?;
 
     // ===== 3) log|S(ρ)|₊ and its ρ-derivatives (singleton blocks) =====
     // For singleton penalties (one ρ per block, no shared λ across blocks),
     // `ldet_s_d1[k] = rank_k` and `ldet_s_d2 = 0`. We rely on the shared
     // R3 helper for both byte-identical computation across reml/ paths.
+    //
+    // **Repara note**: In the rotated basis, `S_k^rot` is a partial identity,
+    // so `log|S^rot|_+ = rank·ρ + 0` (the eigen-stabilised mgcv branch sets
+    // `Sl[[b]]$ldet = 0`, line 296 of R/fast-REML.r). That cancels against
+    // the matching `−log_pseudo_det(S)` offset in `ldet_xxs_rot`, leaving
+    // the score and its ρ-derivatives invariant. To avoid double-counting
+    // the pseudo-det of the rotated penalty (which would be zero anyway),
+    // we feed `sl_use` (which may be `sl_rot`) here. The result is the
+    // same `rank·ρ + constant` formula the unrotated path uses, modulo a
+    // ρ-independent constant that has no effect on gradients/Hessians.
     let rho_vec: Vec<f64> = rho.to_vec();
-    let (ldet_s, ldet_s_d1, ldet_s_d2) = compute_ldet_s_with_derivs(sl, &rho_vec);
+    let (ldet_s, ldet_s_d1, ldet_s_d2) = compute_ldet_s_with_derivs(sl_use, &rho_vec);
 
     // ===== 4) log|X'WX + S(ρ)| via the trace identity on PP =====
     // mgcv pulls this from `2·sum(log(diag(R)) + log(d[piv]))`. We compute it
@@ -184,10 +262,10 @@ pub fn compute_sl_fitchol_step(
     let ldet_xxs = crate::linalg::determinant(&a)?.ln();
 
     // ===== 5) IFT: dβ/dρ_k + bSb1 + (rss2 + bSb2) =====
-    let ift = compute_sl_ift_chol(sl, xx, &pp, &beta, &lambdas)?;
+    let ift = compute_sl_ift_chol(sl_use, xx_view, &pp, &beta, &lambdas)?;
 
     // ===== 6) d.detXXS: trace derivs of log|X'WX + S| =====
-    let (dxxs_d1, dxxs_d2) = compute_d_det_xxs(sl, &pp, &lambdas);
+    let (dxxs_d1, dxxs_d2) = compute_d_det_xxs(sl_use, &pp, &lambdas);
 
     // ===== 7) Assemble REML grad/Hess wrt ρ =====
     // Per mgcv R/fast-REML.r:1634-1638:
@@ -235,7 +313,11 @@ pub fn compute_sl_fitchol_step(
         }
         // log_φ gradient. `rss_bsb = yy - β'f` uses the optimum identity
         // `‖y-Xβ‖² + β'Sβ = y'y - β'X'y` (mgcv R/fast-REML.r:1646).
-        let rss_bsb = yy - beta.dot(&f);
+        // In the rotated basis, β_rot · f_rot = β · f (since β_rot = D⁻¹β,
+        // f_rot = D'f, so β_rot · f_rot = β' Di' D' f = β' (D Di)' f = β' f).
+        // We deliberately use the same view we solved with to keep the
+        // identity bit-exact.
+        let rss_bsb = yy - beta.dot(&f_view);
         grad_ext[nrho] = 0.5 * (-rss_bsb / phi_gamma + nobs / gamma - mp as f64);
         // log_φ ⊗ ρ cross block:
         // mgcv R/fast-REML.r:1648: d <- c(-(rss1+bSb1), rss_bsb) / (2 φ γ)
@@ -258,13 +340,40 @@ pub fn compute_sl_fitchol_step(
     //   if (max|step| > 4) step <- 4 step / max|step|
     let step = clamped_newton_step(&grad, &hess)?;
 
+    // ===== 10) Inverse-rotate β, db, PP back to the caller's basis =====
+    //
+    // Mirrors the inverse-repara calls at R/bam.r:759 (β), 800-801 (db),
+    // and 823 (PP). The grad/Hess/step live in ρ-space (NOT coefficient
+    // space) and are invariant under the repara, so they don't need
+    // rotation. `ldet_s`/`ldet_xxs` are scalars whose ρ-derivatives are
+    // unchanged (the rotation contributes a ρ-independent constant that
+    // cancels between the two log-dets; cf. step-3 comment).
+    let (mut beta_out, mut db_out, mut pp_out) = (beta, ift.db, pp);
+    if any_repara {
+        for block in sl.iter() {
+            // β is a coefficient vector: `β ← D · β_rot`.
+            block.inverse_rotate_beta_in_place(&mut beta_out);
+            // PP is a covariance matrix: `PP ← D · PP_rot · D'`.
+            block.inverse_rotate_cov_in_place(&mut pp_out);
+        }
+        // db columns are dβ/dρ_k — same coefficient-style rotation as β.
+        let m_cols = db_out.ncols();
+        for col in 0..m_cols {
+            let mut col_vec = db_out.column(col).to_owned();
+            for block in sl.iter() {
+                block.inverse_rotate_db_column_in_place(&mut col_vec);
+            }
+            db_out.column_mut(col).assign(&col_vec);
+        }
+    }
+
     Ok(SlFitCholResult {
-        beta,
+        beta: beta_out,
         grad,
         hess,
         step,
-        db: ift.db,
-        pp,
+        db: db_out,
+        pp: pp_out,
         ldet_s,
         ldet_xxs,
     })

@@ -545,6 +545,164 @@ fn sanity_fastreml_vs_reml_constant_offset() {
 }
 
 // ---------------------------------------------------------------------------
+// Test R5-a: predictions invariance under `Sl.initial.repara`.
+// ---------------------------------------------------------------------------
+//
+// Setup `compute_sl_fitchol_step` once with `repara` disabled (existing path)
+// and once with `repara` enabled (R5 path). The two β vectors live in the SAME
+// basis (we inverse-rotate at exit), so `X · β` should match to ~1e-10 abs
+// regardless of which path computed the solve. Score scalars
+// `(ldet_xxs, ldet_s)` differ by a ρ-independent constant (the
+// `Σ log_pseudo_det(S_k)` offset) — we don't check those, just predictions.
+
+#[test]
+fn repara_predictions_invariance_gaussian_3smooth() {
+    use mgcv_rust::reml::{compute_xtwx, compute_xtwy};
+
+    let n = 200usize;
+    let k = 10usize;
+    let nblocks = 3usize;
+    let p = k * nblocks;
+    let x = synth_design(n, p, 173);
+    let mut beta_true = Array1::<f64>::zeros(p);
+    for i in 0..p {
+        beta_true[i] = ((i as f64) * 0.21).sin() * 0.4;
+    }
+    let y = synth_response(&x, &beta_true, 0.6, 19);
+    let w = synth_weights(n, 29);
+    let nobs: f64 = w.iter().sum();
+
+    // Two parallel penalty lists: one without repara, one with.
+    let mut sl_plain = Vec::with_capacity(nblocks);
+    let mut sl_repara = Vec::with_capacity(nblocks);
+    let mut mp_sum: usize = 0;
+    for b in 0..nblocks {
+        let pen_block = second_diff_penalty(k);
+        let bp_plain = BlockPenalty::new(pen_block.clone(), b * k, p);
+        let mut bp_repara = BlockPenalty::new(pen_block, b * k, p);
+        bp_repara.setup_initial_repara();
+        mp_sum += k - bp_plain.estimate_rank();
+        sl_plain.push(bp_plain);
+        sl_repara.push(bp_repara);
+    }
+    let mp = mp_sum;
+
+    let xx = compute_xtwx(&x, &w);
+    let f = compute_xtwy(&x, &w, &y);
+    let yy: f64 = y.iter().zip(w.iter()).map(|(yi, wi)| yi * yi * wi).sum();
+
+    let rho = vec![0.3f64, 1.0f64, -0.4f64];
+    let log_phi: f64 = 0.0_f64;
+
+    let res_plain = compute_sl_fitchol_step(
+        &sl_plain,
+        xx.view(),
+        f.view(),
+        Array1::from_vec(rho.clone()).view(),
+        yy,
+        log_phi,
+        true,
+        nobs,
+        mp,
+        1.0,
+    )
+    .expect("plain compute_sl_fitchol_step");
+
+    let res_repara = compute_sl_fitchol_step(
+        &sl_repara,
+        xx.view(),
+        f.view(),
+        Array1::from_vec(rho.clone()).view(),
+        yy,
+        log_phi,
+        true,
+        nobs,
+        mp,
+        1.0,
+    )
+    .expect("repara compute_sl_fitchol_step");
+
+    // β invariance: same basis on both sides (we inverse-rotate at exit).
+    let mut beta_diff = 0.0f64;
+    for i in 0..p {
+        beta_diff = beta_diff.max((res_plain.beta[i] - res_repara.beta[i]).abs());
+    }
+    eprintln!(
+        "[repara_predictions_invariance] max |β_plain - β_repara| = {:.2e}",
+        beta_diff
+    );
+    // β tolerance: the rotated path goes through extra sandwich products
+    // (D'·XX·D, then D · β_rot at exit). On a p=30 fixture, the typical
+    // β magnitude is O(1) and we observe ~1e-10 abs differences. 1e-8 is
+    // comfortably tighter than the FD-test tolerance of 1e-5.
+    assert!(
+        beta_diff < 1e-8,
+        "β diverged between plain and repara paths: {:.2e}",
+        beta_diff
+    );
+
+    // Predictions invariance: `X · β` should match.
+    let pred_plain = x.dot(&res_plain.beta);
+    let pred_repara = x.dot(&res_repara.beta);
+    let mut pred_diff = 0.0f64;
+    for i in 0..n {
+        pred_diff = pred_diff.max((pred_plain[i] - pred_repara[i]).abs());
+    }
+    eprintln!(
+        "[repara_predictions_invariance] max |X·β_plain - X·β_repara| = {:.2e}",
+        pred_diff
+    );
+    // Predictions follow β with an additional X-row magnitude factor; on
+    // synth_design with n=200, |X|_∞ ≲ 2, so 1e-8 is the matching tolerance.
+    assert!(
+        pred_diff < 1e-8,
+        "Predictions diverged between plain and repara paths: {:.2e}",
+        pred_diff
+    );
+
+    // Gradient comparison note (R5 known difference):
+    //
+    // The gradient does NOT match byte-identical between plain and repara
+    // paths, because `compute_ldet_s_with_derivs` uses `estimate_rank()` (a
+    // row-norm heuristic). On the unrotated 2nd-diff penalty, the row-norm
+    // rank overestimates as `k = 10` instead of the true `k - 2 = 8` (every
+    // row has nonzero norm — the null vectors are linear functions whose
+    // rank gets lost in row-wise summation). On the rotated `S_rot` (a
+    // partial identity with 1's on the 8 range entries and 0 on the 2 null
+    // entries), the row-norm rank correctly gives 8.
+    //
+    // This is the same R3 rank-heuristic inconsistency that Test 3
+    // (`sanity_fastreml_vs_reml_constant_offset`) documents. The rotated
+    // path's gradient is the CORRECT one (matching mgcv's eigen-based rank);
+    // the plain path's gradient is off by `(rank_row - rank_eigen) / 2 = 1`
+    // per ρ component for this fixture.
+    //
+    // We confirm the off-by-rank structure here as a documentation guard:
+    for kk in 0..nblocks {
+        let diff = (res_plain.grad[kk] - res_repara.grad[kk]).abs();
+        eprintln!(
+            "[repara_predictions_invariance] grad[{}] plain={:.6} repara={:.6} |diff|={:.6}",
+            kk, res_plain.grad[kk], res_repara.grad[kk], diff
+        );
+    }
+    // The difference is exactly `(rank_row - rank_eigen) / 2` per component.
+    // For the 2nd-diff penalty with k=10, this is `(10 - 8) / 2 = 1.0`. We
+    // check that the diff is consistent (not arbitrary) by comparing to
+    // this exact analytical value.
+    let expected_grad_diff_per_block: f64 = 1.0;
+    for kk in 0..nblocks {
+        let diff = (res_plain.grad[kk] - res_repara.grad[kk]).abs();
+        assert!(
+            (diff - expected_grad_diff_per_block).abs() < 1e-10,
+            "grad[{}] diff {:.6} != expected rank correction {:.6}",
+            kk,
+            diff,
+            expected_grad_diff_per_block
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test 4: dβ/dρ from fitChol IFT matches `compute_b1_ift`.
 // ---------------------------------------------------------------------------
 
