@@ -1054,11 +1054,6 @@ pub struct PiRLSResult {
     pub df: Option<f64>,
 }
 
-struct WorkingQuantities {
-    z: Array1<f64>,
-    w: Array1<f64>,
-}
-
 /// Newton IRLS curvature factor `α = 1 + c_resid · (V₁ⁿ + g₂ⁿ)`.
 ///
 /// `c_resid = y - μ`, `v1n = V'(μ)/V(μ)`, `g2n = g''(μ) · g'(μ)⁻¹ = d2link·dmu_deta`.
@@ -1161,26 +1156,6 @@ pub fn compute_newton_score_weights(
             .zip(y.iter())
             .map(|(&e, &yi)| compute_newton_score_weight(e, yi, family)),
     )
-}
-
-fn standard_glm_working_quantities(
-    y: &Array1<f64>,
-    eta: &Array1<f64>,
-    family: Family,
-    fisher_only: bool,
-) -> WorkingQuantities {
-    let n = y.len();
-    let use_fisher = fisher_only || family.is_canonical_link();
-    let mut z = Array1::zeros(n);
-    let mut w = Array1::zeros(n);
-
-    for i in 0..n {
-        let (wi, zi) = compute_irls_wz(eta[i], y[i], family, use_fisher);
-        w[i] = wi;
-        z[i] = zi;
-    }
-
-    WorkingQuantities { z, w }
 }
 
 /// Fit a GAM using PiRLS algorithm
@@ -1296,17 +1271,19 @@ pub fn fit_pirls_cached(
     for iteration in 0..max_iter {
         iter = iteration + 1;
 
-        let working = standard_glm_working_quantities(y, &eta, family, false);
-        let z = working.z;
-        // Combine GLM IRLS working weights with prior weights (mgcv's
-        // `weights=` semantics: prior_w is an exposure / replication
-        // count multiplier on the log-likelihood, so it multiplies the
-        // working weight everywhere). For unweighted fits, prior_w is
-        // None and `w` stays unchanged.
-        let w: Array1<f64> = match prior_weights {
-            Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
-            None => working.w,
-        };
+        // GLM IRLS working pair with prior weights folded in. R4-refactor:
+        // see `exp_family_irls_step`. `use_fisher=false` ⇒ Newton curvature
+        // per row with per-row Fisher fallback when `α ≤ 0` (canonical
+        // links auto-promote to pure Fisher inside `compute_irls_wz`).
+        let step = exp_family_irls_step(
+            y.view(),
+            eta.view(),
+            prior_weights.map(|pw| pw.view()),
+            family,
+            /* use_fisher = */ false,
+        );
+        let z = step.z;
+        let w = step.w;
 
         // X'WX using BLAS (instead of manual triple-nested loop)
         let xtwx = compute_xtwx_dispatch(None, x, &w);
@@ -1361,20 +1338,23 @@ pub fn fit_pirls_cached(
 
     // Preserve the historical final scoring contract: outer REML callbacks
     // consume Fisher working quantities at the converged η, even if the inner
-    // dense PIRLS iterations used Newton alpha correction. Multiply by prior
-    // weights so the outer REML score sees the right XᵀWX.
-    let working = standard_glm_working_quantities(y, &eta, family, true);
-    let final_w: Array1<f64> = match prior_weights {
-        Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
-        None => working.w,
-    };
+    // dense PIRLS iterations used Newton alpha correction. R4-refactor: see
+    // `exp_family_irls_step`. `use_fisher=true` ⇒ pure Fisher working pair
+    // for the REML scoring contract; prior weights are folded into w.
+    let final_step = exp_family_irls_step(
+        y.view(),
+        eta.view(),
+        prior_weights.map(|pw| pw.view()),
+        family,
+        /* use_fisher = */ true,
+    );
 
     Ok(PiRLSResult {
         coefficients: beta,
         fitted_values,
         linear_predictor: eta,
-        weights: final_w,
-        working_response: working.z,
+        weights: final_step.w,
+        working_response: final_step.z,
         deviance,
         iterations: iter,
         converged,
@@ -1928,6 +1908,84 @@ pub(crate) fn tdist_irls_step(
     };
 
     TdistIrlsStep { w, z: z_work }
+}
+
+/// Per-observation IRLS working pair `(w, z)` for one exponential-family
+/// PIRLS step, with caller-supplied prior weights already folded into `w`.
+///
+/// Returned by [`exp_family_irls_step`]. The fields are exactly the vectors a
+/// caller passes to `X'WX` / `X'Wz` assembly — no further per-row arithmetic
+/// is required after the helper returns.
+pub(crate) struct ExpFamilyIrlsStep {
+    /// Working weight `w_i = w_iᶠ · w_iᵖ` (prior weights folded in). `w_iᶠ`
+    /// is the GLM Fisher (or Newton-with-Fisher-fallback) weight from
+    /// [`compute_irls_wz`].
+    pub w: Array1<f64>,
+    /// Working response `z_i = η_i + (y_i − μ_i) / (dμ/dη)_i` (Fisher branch)
+    /// or the Newton-corrected variant when `use_fisher=false` and the
+    /// per-row curvature stays PSD.
+    pub z: Array1<f64>,
+}
+
+/// Compute one exponential-family IRLS working pair `(w, z)` at the supplied
+/// `(y, η)` with the given `Family`, folding `prior_weights` into `w` row-wise.
+///
+/// Implements the per-row arithmetic that was previously inlined into
+/// [`fit_pirls_cached`] and [`fit_pirls_discretized`] (both inner loop and
+/// final-scoring pass). Pure function: allocates only the two returned
+/// vectors. The per-row math itself lives in [`compute_irls_wz`] and is
+/// unchanged — this helper simply wraps the loop and the prior-weights
+/// folding so the dispatch sites read as a single call.
+///
+/// `use_fisher` follows the same semantics as [`compute_irls_wz`]:
+///   - `true` ⇒ Fisher scoring everywhere (used for canonical links and the
+///     final-scoring pass that REML callbacks consume).
+///   - `false` ⇒ Newton curvature correction per row, with per-row Fisher
+///     fallback when `α ≤ 0`. Used only by `fit_pirls_cached`'s inner loop.
+///
+/// Prior weights enter mgcv's `weights=` semantics as a per-row multiplier
+/// on the log-likelihood (exposure / replication count), so they multiply
+/// the working weight everywhere (`X'WX`, `X'Wz`). When `prior_weights` is
+/// `None`, the raw Fisher/Newton weight passes through unchanged.
+///
+/// **Lifted from** `fit_pirls_cached` / `fit_pirls_discretized` inner loop
+/// bodies — byte-identical arithmetic, same as the in-place sequence of
+/// `standard_glm_working_quantities` followed by the prior-weights fold.
+pub(crate) fn exp_family_irls_step(
+    y: ArrayView1<f64>,
+    eta: ArrayView1<f64>,
+    prior_weights: Option<ArrayView1<f64>>,
+    family: Family,
+    use_fisher: bool,
+) -> ExpFamilyIrlsStep {
+    let n = y.len();
+    debug_assert_eq!(eta.len(), n, "eta length must match y");
+    if let Some(pw) = prior_weights.as_ref() {
+        debug_assert_eq!(pw.len(), n, "prior_weights length must match y");
+    }
+
+    // Canonical-link families always use Fisher; non-canonical links pass
+    // `use_fisher` through (mirroring `standard_glm_working_quantities`).
+    let use_fisher_effective = use_fisher || family.is_canonical_link();
+
+    let mut z = Array1::<f64>::zeros(n);
+    let mut w = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let (wi, zi) = compute_irls_wz(eta[i], y[i], family, use_fisher_effective);
+        w[i] = wi;
+        z[i] = zi;
+    }
+
+    // Fold prior weights into `w` row-wise. mgcv semantics: `weights=` is a
+    // multiplier on the log-likelihood, so it multiplies the family's
+    // working weight throughout the linear system.
+    if let Some(pw) = prior_weights.as_ref() {
+        for i in 0..n {
+            w[i] *= pw[i];
+        }
+    }
+
+    ExpFamilyIrlsStep { w, z }
 }
 
 /// Fit a penalized GAM with scaled t-distribution errors.
@@ -3390,15 +3448,20 @@ pub fn fit_pirls_discretized(
     for iteration in 0..max_iter {
         iter = iteration + 1;
 
-        let working = standard_glm_working_quantities(y, &eta, family, true);
-        let z = working.z;
-        // Combine GLM IRLS working weights with prior weights (see same
-        // logic in `fit_pirls_cached`). For unweighted fits, this
-        // collapses to `working.w` unchanged.
-        let w: Array1<f64> = match prior_weights {
-            Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
-            None => working.w,
-        };
+        // GLM IRLS working pair with prior weights folded in. R4-refactor:
+        // see `exp_family_irls_step`. The discretized path historically
+        // uses `fisher_only=true` (canonical-link families dominate the
+        // discrete hot path, and Fisher gives byte-identical results to
+        // the Newton fallback there).
+        let step = exp_family_irls_step(
+            y.view(),
+            eta.view(),
+            prior_weights.map(|pw| pw.view()),
+            family,
+            /* use_fisher = */ true,
+        );
+        let z = step.z;
+        let w = step.w;
 
         // X'WX via scatter-gather: O(n*k + m*k^2) instead of O(n*k^2)
         let xtwx = compute_xtwx_discrete(disc, &w);
@@ -3445,18 +3508,23 @@ pub fn fit_pirls_discretized(
         None => compute_deviance(y, &fitted_values, family),
     };
 
-    let working = standard_glm_working_quantities(y, &eta, family, true);
-    let final_w: Array1<f64> = match prior_weights {
-        Some(pw) => working.w.iter().zip(pw.iter()).map(|(&wi, &pi)| wi * pi).collect(),
-        None => working.w,
-    };
+    // Final-scoring pass: pure Fisher working pair for the REML contract.
+    // R4-refactor: see `exp_family_irls_step`. Mirrors the dense path's
+    // final-scoring assembly.
+    let final_step = exp_family_irls_step(
+        y.view(),
+        eta.view(),
+        prior_weights.map(|pw| pw.view()),
+        family,
+        /* use_fisher = */ true,
+    );
 
     Ok(PiRLSResult {
         coefficients: beta,
         fitted_values,
         linear_predictor: eta,
-        weights: final_w,
-        working_response: working.z,
+        weights: final_step.w,
+        working_response: final_step.z,
         deviance,
         iterations: iter,
         converged,
@@ -3965,5 +4033,80 @@ mod tests {
             hit_fallback,
             "fixture should exercise the expected-info fallback at least once"
         );
+    }
+
+    /// `exp_family_irls_step` per-row math vs hand-computed reference (R4
+    /// refactor guard). Fixture-free synthetic 100-point Poisson check.
+    ///
+    /// Poisson(log) is canonical, so `compute_irls_wz` runs the pure Fisher
+    /// branch in both `use_fisher=true` and `use_fisher=false` calls (the
+    /// helper internally OR's `use_fisher` with `is_canonical_link()`).
+    /// The reference math is:
+    ///   - μ_i = exp(η_i)
+    ///   - dμ/dη_i = exp(η_i) = μ_i
+    ///   - V(μ_i) = μ_i
+    ///   - w_iᶠ = (dμ/dη)² / V = μ_i
+    ///   - z_i  = η_i + (y_i − μ_i) / (dμ/dη) = η_i + (y_i − μ_i)/μ_i
+    /// Prior weights multiply w but never z.
+    /// Tolerance is 1e-12 absolute (pure scalar arithmetic, no BLAS).
+    #[test]
+    fn test_exp_family_irls_step_hand_computed_poisson() {
+        let n = 100usize;
+        let family = Family::Poisson;
+
+        // Deterministic y/η. y must be ≥ 0 integers in spirit (Poisson counts);
+        // we still pass floats because the IRLS step only sees y as a float.
+        // η spans a moderate range so μ = exp(η) covers ~0.1 .. ~20.
+        let y: Array1<f64> = (0..n).map(|i| (i % 7) as f64).collect();
+        let eta: Array1<f64> = (0..n)
+            .map(|i| -2.0 + 0.05 * (i as f64) + 0.3 * ((i as f64) * 0.1).sin())
+            .collect();
+        let pw: Array1<f64> = (0..n).map(|i| 0.4 + 0.02 * (i as f64)).collect();
+
+        // ── With prior weights ────────────────────────────────────────────
+        for &use_fisher in &[true, false] {
+            let step = exp_family_irls_step(
+                y.view(),
+                eta.view(),
+                Some(pw.view()),
+                family,
+                use_fisher,
+            );
+            for i in 0..n {
+                let mu = eta[i].exp();
+                // Fisher (canonical link): w = μ, z = η + (y − μ)/μ
+                let w_expected = mu * pw[i];
+                let z_expected = eta[i] + (y[i] - mu) / mu;
+                assert!(
+                    (step.w[i] - w_expected).abs() < 1e-12,
+                    "Poisson w[{}] (use_fisher={}): got {}, want {} (mu={})",
+                    i, use_fisher, step.w[i], w_expected, mu
+                );
+                assert!(
+                    (step.z[i] - z_expected).abs() < 1e-12,
+                    "Poisson z[{}] (use_fisher={}): got {}, want {} (mu={})",
+                    i, use_fisher, step.z[i], z_expected, mu
+                );
+            }
+        }
+
+        // ── Without prior weights ─────────────────────────────────────────
+        let step_nopw =
+            exp_family_irls_step(y.view(), eta.view(), None, family, /* use_fisher */ true);
+        for i in 0..n {
+            let mu = eta[i].exp();
+            let w_expected = mu;
+            let z_expected = eta[i] + (y[i] - mu) / mu;
+            assert!(
+                (step_nopw.w[i] - w_expected).abs() < 1e-12,
+                "Poisson(no pw) w[{}]: got {}, want {}",
+                i, step_nopw.w[i], w_expected
+            );
+            assert!(
+                (step_nopw.z[i] - z_expected).abs() < 1e-12,
+                "Poisson(no pw) z[{}]: got {}, want {}",
+                i, step_nopw.z[i], z_expected
+            );
+        }
     }
 }
