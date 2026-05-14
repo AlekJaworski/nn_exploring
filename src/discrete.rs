@@ -35,11 +35,35 @@ pub struct DiscreteConfig {
     /// Per-marginal cap on the compressed-row count. Pure-dedup is
     /// used when `nunique ≤ max_bins_1d`; quantile-grid otherwise.
     pub max_bins_1d: usize,
+    /// Per-marginal **m-cap heuristic**: if a marginal's natural unique
+    /// count `m_natural` satisfies `m_natural > n / skip_compression_ratio`,
+    /// SKIP compression for that marginal and store the full `n × p`
+    /// basis with identity per-row indices (`0..n`).
+    ///
+    /// Rationale: the off-diagonal `X'WX` block between two marginals
+    /// `a` and `b` costs `O(m_a · m_b · p_a)` in the gather plus `O(n)`
+    /// in the scatter. When `m_a` is close to `n`, this scatter-gather
+    /// is *slower* than the un-binned BLAS GEMM (which is `O(n · p²)`).
+    /// mgcv hides this with `compress.df`'s global K matrix (one shared
+    /// bin axis across all marginals), but our per-marginal compression
+    /// doesn't — so we fall back to the un-binned path on high-unique
+    /// marginals. The kernels (`compute_xtwx_discrete` &c.) are
+    /// index-driven and handle `nr == n` correctly: they degenerate to
+    /// near-equivalent of the full GEMM.
+    ///
+    /// Default `8` (so on `n=6400`, marginals with `m_natural > 800`
+    /// skip compression). Set to `1` to disable the heuristic
+    /// (threshold = `n`, never exceeded since `m ≤ n`); `0` is also
+    /// treated as "never skip" (defensive against div-by-zero).
+    pub skip_compression_ratio: usize,
 }
 
 impl Default for DiscreteConfig {
     fn default() -> Self {
-        DiscreteConfig { max_bins_1d: 1000 }
+        DiscreteConfig {
+            max_bins_1d: 1000,
+            skip_compression_ratio: 8,
+        }
     }
 }
 
@@ -188,6 +212,20 @@ pub fn compress_1d(x_col: &Array1<f64>, max_bins: usize) -> (Vec<u32>, Vec<f64>)
     (snap_indices, snap_centres)
 }
 
+/// Cheap unique-count pass on an f64 column. Same key scheme as
+/// `compress_1d` (bit-pattern hash with NaN/±0.0 normalisation), used by
+/// `DiscreteDesign::new` to decide whether to skip compression for a
+/// marginal (m-cap heuristic). O(n) time, O(m_natural) memory.
+#[inline]
+fn count_unique_f64(x_col: &Array1<f64>) -> usize {
+    use std::collections::HashSet;
+    let mut seen: HashSet<u64> = HashSet::with_capacity(x_col.len().min(4096));
+    for &v in x_col.iter() {
+        seen.insert(f64_bit_key(v));
+    }
+    seen.len()
+}
+
 /// Stable bit-pattern key for hashing f64s. NaN keys are mapped to the
 /// canonical quiet-NaN bit pattern so all NaNs collide; -0.0 and +0.0
 /// map to the same key.
@@ -245,8 +283,47 @@ impl DiscreteDesign {
             total_basis += 1;
         }
 
+        // Per-marginal m-cap heuristic threshold. A marginal whose natural
+        // unique count exceeds this skips compression and stores the full
+        // n × p basis with identity indices.
+        let skip_threshold = if config.skip_compression_ratio == 0 {
+            // Defensive: avoid div-by-zero. ratio=0 means "never skip"
+            // (equivalent to usize::MAX).
+            usize::MAX
+        } else {
+            n / config.skip_compression_ratio
+        };
+
         for (i, smooth) in smooth_terms.iter().enumerate() {
             let x_col = x.column(i).to_owned();
+            let m_natural = count_unique_f64(&x_col);
+
+            if m_natural > skip_threshold {
+                // SKIP-mode marginal: store the full n × p basis (evaluated
+                // on the original observations, not bin centres) and an
+                // identity index map. The scatter-gather kernels degenerate
+                // to nearly the un-binned path on `nr == n` — which is the
+                // point: per-marginal compression is unhelpful when the
+                // off-diagonal `m_a · m_b · p_a` cost exceeds the un-binned
+                // `n · p_a · p_b` BLAS GEMM.
+                let x_d = smooth.evaluate(&x_col).expect(
+                    "DiscreteDesign::new: basis evaluation on full column failed (skip mode)",
+                );
+                let num_basis = x_d.ncols();
+                let nr = x_d.nrows();
+                debug_assert_eq!(nr, n, "skip-mode marginal must have nr == n");
+                let indices: Vec<u32> = (0..n as u32).collect();
+                marginals.push(DiscreteMarginal {
+                    x_d,
+                    indices,
+                    nr,
+                    col_offset: total_basis,
+                    num_basis,
+                });
+                total_basis += num_basis;
+                continue;
+            }
+
             let (indices, centres) = compress_1d(&x_col, config.max_bins_1d);
             let centres_arr = Array1::from(centres);
 
@@ -370,17 +447,73 @@ pub fn compute_xtwx_discrete(disc: &DiscreteDesign, w: &Array1<f64>) -> Array2<f
             let p_b = m_b.num_basis;
             let nr_b = m_b.nr;
 
-            // Build T[μ, ν] = Σ_i w_i · 1[k_a[i]=μ ∧ k_b[i]=ν].
-            let mut t_mat = Array2::<f64>::zeros((nr_a, nr_b));
-            for i in 0..n {
-                let mu = m_a.indices[i] as usize;
-                let nu = m_b.indices[i] as usize;
-                t_mat[[mu, nu]] += w[i];
-            }
-            // block_ab = X̃_a' · T · X̃_b
-            // Compute as (X̃_a' · T) first (p_a × nr_b), then · X̃_b.
-            let xa_t_dot_t = m_a.x_d.t().dot(&t_mat);
-            let block_ab = xa_t_dot_t.dot(&m_b.x_d);
+            // Skip-mode fast path: when either marginal has nr == n,
+            // the dense scatter cube `T` would be at least n × m_other,
+            // which defeats the whole point of binning. Drop straight
+            // to a BLAS GEMM on the equivalent assembled basis slabs.
+            //
+            // Three cases:
+            //   (i)  both nr == n  →  block = X̃_a' · diag(w) · X̃_b
+            //   (ii) nr_a == n, nr_b < n  →  expand b via b.indices
+            //                                block = X̃_a' · diag(w) · X̃_b_expanded
+            //                                       (equivalently, scatter-gather
+            //                                        T is `n × m_b`, dense — but
+            //                                        we go via GEMM directly to
+            //                                        avoid the allocation)
+            //   (iii) nr_a < n, nr_b == n  →  expand a via a.indices, symmetric
+            let block_ab = if nr_a == n || nr_b == n {
+                // Build expanded `n × p_a` slab `Xa_full`. If a is skip-mode
+                // this is just `m_a.x_d` (a view). Otherwise gather from
+                // bin centres.
+                let xa_full: Array2<f64> = if nr_a == n {
+                    m_a.x_d.clone()
+                } else {
+                    let mut out = Array2::<f64>::zeros((n, p_a));
+                    for i in 0..n {
+                        let mu = m_a.indices[i] as usize;
+                        for c in 0..p_a {
+                            out[[i, c]] = m_a.x_d[[mu, c]];
+                        }
+                    }
+                    out
+                };
+                // Build weighted-expanded `n × p_b` slab and multiply.
+                // `(X̃_a' · diag(w)) · X̃_b_expanded` — we apply √w to both
+                // sides to use the same recipe as `compute_xtwx`.
+                let xb_full: Array2<f64> = if nr_b == n {
+                    m_b.x_d.clone()
+                } else {
+                    let mut out = Array2::<f64>::zeros((n, p_b));
+                    for i in 0..n {
+                        let nu = m_b.indices[i] as usize;
+                        for c in 0..p_b {
+                            out[[i, c]] = m_b.x_d[[nu, c]];
+                        }
+                    }
+                    out
+                };
+                // Apply w to one side (full weight, not sqrt, since this
+                // is the asymmetric X_a' · diag(w) · X_b product).
+                let mut xb_weighted = xb_full;
+                for i in 0..n {
+                    let wi = w[i];
+                    for c in 0..p_b {
+                        xb_weighted[[i, c]] *= wi;
+                    }
+                }
+                xa_full.t().dot(&xb_weighted)
+            } else {
+                // Original scatter-gather path: build T[μ, ν] = Σ_i w_i ·
+                // 1[k_a[i]=μ ∧ k_b[i]=ν], then X̃_a' · T · X̃_b.
+                let mut t_mat = Array2::<f64>::zeros((nr_a, nr_b));
+                for i in 0..n {
+                    let mu = m_a.indices[i] as usize;
+                    let nu = m_b.indices[i] as usize;
+                    t_mat[[mu, nu]] += w[i];
+                }
+                let xa_t_dot_t = m_a.x_d.t().dot(&t_mat);
+                xa_t_dot_t.dot(&m_b.x_d)
+            };
 
             // Write upper block and mirror to lower.
             for r in 0..p_a {
@@ -494,6 +627,7 @@ impl DiscreteConfig {
     pub fn _from_legacy_fields(max_unique_1d: usize, _min_n_for_discretize: usize) -> Self {
         DiscreteConfig {
             max_bins_1d: max_unique_1d,
+            skip_compression_ratio: 8,
         }
     }
 }
@@ -993,7 +1127,14 @@ mod tests {
             }
             m
         };
-        let config = DiscreteConfig::default();
+        // Disable the m-cap heuristic so we exercise the dedup path
+        // even with the tiny n=10 fixture (default ratio=8 would push
+        // m=5 > n/8=1 into skip-mode and `nr` would equal `n=10`).
+        // `ratio=1` → threshold = n; m ≤ n always, so never skip.
+        let config = DiscreteConfig {
+            skip_compression_ratio: 1,
+            ..DiscreteConfig::default()
+        };
         let num_basis_pre = smooth.num_basis();
         let smooth_list = vec![smooth];
         let disc = DiscreteDesign::new(&smooth_list, &x_mat, false, &config);
@@ -1056,6 +1197,231 @@ mod tests {
         assert!(
             err < 1e-12,
             "end-to-end X'WX mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+    }
+
+    // ------------------ m-cap heuristic: skip-mode marginals ------------------
+
+    /// When `m_natural > n / skip_compression_ratio`, the marginal should
+    /// be stored uncompressed: `nr == n`, `indices == 0..n`, and `x_d` is
+    /// the full design slab.
+    #[test]
+    fn compress_1d_skip_mode_returns_identity() {
+        use crate::gam::SmoothTerm;
+        // n = 100, ratio = 8 → skip threshold = 12. Build a column with
+        // 50 unique values (every row distinct), forcing skip mode.
+        let n = 100usize;
+        let x_col: Array1<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
+        let mut smooth =
+            SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
+        smooth.apply_sum_to_zero_centering(&x_col).unwrap();
+
+        let mut x_mat = Array2::<f64>::zeros((n, 1));
+        for i in 0..n {
+            x_mat[[i, 0]] = x_col[i];
+        }
+        let cfg = DiscreteConfig {
+            max_bins_1d: 1000,
+            skip_compression_ratio: 8,
+        };
+        let smooth_list = vec![smooth];
+        let disc = DiscreteDesign::new(&smooth_list, &x_mat, false, &cfg);
+
+        assert_eq!(disc.marginals.len(), 1);
+        let marg = &disc.marginals[0];
+        assert_eq!(
+            marg.nr, n,
+            "skip-mode marginal must have nr == n (got nr={})",
+            marg.nr
+        );
+        // Identity index map.
+        for i in 0..n {
+            assert_eq!(marg.indices[i] as usize, i, "row {} index mismatch", i);
+        }
+        // And `to_full_matrix()` row i must equal `x_d` row i directly
+        // (no scatter needed because indices are identity).
+        let full = disc.to_full_matrix();
+        for i in 0..n {
+            for c in 0..marg.num_basis {
+                assert_abs_diff_eq!(full[[i, c]], marg.x_d[[i, c]], epsilon = 0.0);
+            }
+        }
+    }
+
+    /// With `skip_compression_ratio = 1`, the threshold is `n / 1 = n` and
+    /// no marginal (m ≤ n) can exceed it — the skip path is disabled. The
+    /// marginal must go through the dedup path and `nr` equals the
+    /// natural unique count.
+    #[test]
+    fn compress_1d_skip_mode_disabled_via_ratio_one() {
+        use crate::gam::SmoothTerm;
+        let n = 100usize;
+        let x_col: Array1<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
+        let mut smooth =
+            SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
+        smooth.apply_sum_to_zero_centering(&x_col).unwrap();
+
+        let mut x_mat = Array2::<f64>::zeros((n, 1));
+        for i in 0..n {
+            x_mat[[i, 0]] = x_col[i];
+        }
+        let cfg = DiscreteConfig {
+            max_bins_1d: 1000,
+            skip_compression_ratio: 1, // threshold = n, never exceeded
+        };
+        let smooth_list = vec![smooth];
+        let disc = DiscreteDesign::new(&smooth_list, &x_mat, false, &cfg);
+        // 100 unique values, max_bins_1d=1000 → pure-dedup, nr=100.
+        // Same as skip-mode for `nr`, but we exercised the dedup code
+        // path — externally indistinguishable, so we just check nr.
+        assert_eq!(disc.marginals[0].nr, n);
+    }
+
+    /// Mixed-mode `DiscreteDesign`: one marginal compressed, one skipped.
+    /// `compute_xtwx_discrete` must agree to 1e-12 with the un-binned
+    /// BLAS `compute_xtwx` (skipped marginals introduce zero bias because
+    /// the basis is evaluated on the original observations exactly).
+    #[test]
+    fn compute_xtwx_discrete_mixed_skip_and_compressed() {
+        use crate::gam::SmoothTerm;
+        let n = 240usize;
+        // Column A: 6 unique values, will go through pure-dedup.
+        let unique_a = [0.0_f64, 0.2, 0.4, 0.6, 0.8, 1.0];
+        let x_a: Array1<f64> = (0..n).map(|i| unique_a[i % unique_a.len()]).collect();
+        // Column B: all distinct values → will hit skip mode at ratio=8 (m=n=240 > 30).
+        let x_b: Array1<f64> = (0..n).map(|i| (i as f64) * 0.013 - 1.0).collect();
+
+        let mut smooth_a =
+            SmoothTerm::cr_spline_quantile("a".to_string(), 6, &x_a).unwrap();
+        smooth_a.apply_sum_to_zero_centering(&x_a).unwrap();
+        let mut smooth_b =
+            SmoothTerm::cr_spline_quantile("b".to_string(), 8, &x_b).unwrap();
+        smooth_b.apply_sum_to_zero_centering(&x_b).unwrap();
+
+        // Pre-compute the full design (intercept + a + b columns).
+        let basis_a = smooth_a.evaluate(&x_a).unwrap();
+        let basis_b = smooth_b.evaluate(&x_b).unwrap();
+        let p_a = basis_a.ncols();
+        let p_b = basis_b.ncols();
+        let total = 1 + p_a + p_b;
+        let mut full = Array2::<f64>::zeros((n, total));
+        for i in 0..n {
+            full[[i, 0]] = 1.0;
+            for c in 0..p_a {
+                full[[i, 1 + c]] = basis_a[[i, c]];
+            }
+            for c in 0..p_b {
+                full[[i, 1 + p_a + c]] = basis_b[[i, c]];
+            }
+        }
+
+        // Build the discrete design.
+        let mut x_mat = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            x_mat[[i, 0]] = x_a[i];
+            x_mat[[i, 1]] = x_b[i];
+        }
+        let cfg = DiscreteConfig {
+            max_bins_1d: 1000,
+            skip_compression_ratio: 8,
+        };
+        let smooth_list = vec![smooth_a, smooth_b];
+        let disc = DiscreteDesign::new(&smooth_list, &x_mat, true, &cfg);
+
+        // Structural assertion: A compressed (nr=6), B skipped (nr=n).
+        // Marginals are: [intercept, a, b].
+        assert_eq!(disc.marginals.len(), 3);
+        assert_eq!(disc.marginals[0].nr, 1, "intercept marginal");
+        assert_eq!(disc.marginals[1].nr, 6, "compressed marginal A");
+        assert_eq!(disc.marginals[2].nr, n, "skip-mode marginal B");
+        // B's indices must be identity.
+        for i in 0..n {
+            assert_eq!(disc.marginals[2].indices[i] as usize, i);
+        }
+
+        // X'WX from the discrete kernel must match the un-binned BLAS path.
+        let w: Array1<f64> = (0..n)
+            .map(|i| 0.7 + 0.3 * ((i as f64) * 0.017).sin().abs())
+            .collect();
+        let xtwx_full = crate::reml::compute_xtwx(&full, &w);
+        let xtwx_disc = compute_xtwx_discrete(&disc, &w);
+        let err = approx_max_abs(&xtwx_full, &xtwx_disc);
+        assert!(
+            err < 1e-12,
+            "mixed skip+compress X'WX mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+
+        // X'Wy too.
+        let y: Array1<f64> = (0..n).map(|i| ((i as f64) * 0.041).cos()).collect();
+        let xtwy_full = crate::reml::compute_xtwy(&full, &w, &y);
+        let xtwy_disc = compute_xtwy_discrete(&disc, &w, &y);
+        let err_y = approx_max_abs_1d(&xtwy_full, &xtwy_disc);
+        assert!(
+            err_y < 1e-12,
+            "mixed skip+compress X'Wy mismatch: max abs err = {} (expected < 1e-12)",
+            err_y
+        );
+
+        // η via compressed gather must match full · β.
+        let beta: Array1<f64> = (0..total).map(|j| 0.1 + 0.05 * j as f64).collect();
+        let eta_full = full.dot(&beta);
+        let eta_disc = compute_eta_discrete(&disc, &beta);
+        let err_eta = approx_max_abs_1d(&eta_full, &eta_disc);
+        assert!(
+            err_eta < 1e-12,
+            "mixed skip+compress η mismatch: max abs err = {} (expected < 1e-12)",
+            err_eta
+        );
+    }
+
+    /// Degenerate case: ALL marginals in skip-mode → the discrete kernel
+    /// should match the full GEMM byte-for-byte (within floating-point
+    /// rounding). Sanity-check that the skip path doesn't introduce any
+    /// bias.
+    #[test]
+    fn compute_xtwx_discrete_skip_marginal_matches_full_gemm() {
+        use crate::gam::SmoothTerm;
+        let n = 180usize;
+        let x_col: Array1<f64> = (0..n).map(|i| (i as f64) * 0.011 - 0.5).collect();
+        let mut smooth =
+            SmoothTerm::cr_spline_quantile("x".to_string(), 7, &x_col).unwrap();
+        smooth.apply_sum_to_zero_centering(&x_col).unwrap();
+        let basis = smooth.evaluate(&x_col).unwrap();
+        let p = basis.ncols();
+        let total = 1 + p;
+        let mut full = Array2::<f64>::zeros((n, total));
+        for i in 0..n {
+            full[[i, 0]] = 1.0;
+            for c in 0..p {
+                full[[i, 1 + c]] = basis[[i, c]];
+            }
+        }
+
+        let mut x_mat = Array2::<f64>::zeros((n, 1));
+        for i in 0..n {
+            x_mat[[i, 0]] = x_col[i];
+        }
+        // Force skip-mode via a small ratio: n=180, ratio=2 → threshold = 90.
+        // With 180 unique values (every row distinct), m_natural=180 > 90,
+        // so skip.
+        let cfg = DiscreteConfig {
+            max_bins_1d: 1000,
+            skip_compression_ratio: 2,
+        };
+        let smooth_list = vec![smooth];
+        let disc = DiscreteDesign::new(&smooth_list, &x_mat, true, &cfg);
+        // Confirm we are in skip mode for the smooth.
+        assert_eq!(disc.marginals[1].nr, n, "smooth marginal must be skipped");
+
+        let w: Array1<f64> = (0..n).map(|i| 1.0 + 0.5 * ((i as f64) * 0.07).sin()).collect();
+        let xtwx_full = crate::reml::compute_xtwx(&full, &w);
+        let xtwx_disc = compute_xtwx_discrete(&disc, &w);
+        let err = approx_max_abs(&xtwx_full, &xtwx_disc);
+        assert!(
+            err < 1e-12,
+            "all-skip X'WX mismatch: max abs err = {} (expected < 1e-12)",
             err
         );
     }
