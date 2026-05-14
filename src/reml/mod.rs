@@ -497,14 +497,18 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
 }
 
 
-/// Frozen pieces of the Tweedie REML score that DO NOT depend on the working
-/// parameter θ (and therefore on the Tweedie index p). Used by the analytical
-/// θ-derivative path to avoid recomputing the linear system across the three
-/// FD trials (center / +h / -h).
+/// Frozen pieces of the REML score that DO NOT depend on the family's
+/// working parameter θ. Used by the analytical θ-derivative path (and by
+/// the planned fastreml outer driver) to avoid recomputing the linear
+/// system across multiple θ probes.
 ///
-/// Invariants — the caller pinky-promises that `(y_local, w_local, xtwx_local,
-/// lambdas, penalties)` are held FIXED across the trial evaluations. When this
-/// is true, mgcv's REML formula
+/// **Naming history**: this was `TweedieThetaCache` until R1 (Path B fREML
+/// prep). The struct is now family-agnostic — Tweedie is the first user,
+/// TDist / NegBin / Gaussian will reuse it via `score_at_theta`.
+///
+/// Invariants — the caller pinky-promises that `(y_local, w_local,
+/// xtwx_local, lambdas, penalties)` are held FIXED across the trial
+/// evaluations. When this is true, mgcv's REML formula
 ///
 /// ```text
 ///   REML = Dp/(2σ²) + log|H|/2 - log|λS|+/2 - ls + Mp/2·log(2π·σ²)
@@ -515,36 +519,53 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
 ///   - `bsb = β̂'(Σ λ_j S_j) β̂`
 ///   - `log_det_h = log|X'WX + ΣλS|`
 ///   - `log_det_s = log|λS|+` (depends only on λ, not on family)
+///   - `ldet_s_d1`, `ldet_s_d2` — first/second derivatives of log|λS|+
+///     wrt log λ (singleton penalties: `d1[k] = rank_k`, `d2 = 0`).
 ///   - `mp` and `y_for_ls.len()`
 ///
-/// What still varies with p (small fast pieces):
-///   - `D(y_orig, μ̂; p)` — Tweedie deviance at frozen μ̂ (O(n) closed form)
-///   - `σ²̂(p)` — Newton on `dlr/dφ = 0` with Wright series
-///   - `ls(y, σ²̂, p)` — Wright series
+/// What still varies with θ (small fast pieces, family-dispatched):
+///   - `D(y_orig, μ̂; θ)` — deviance at frozen μ̂
+///   - `σ²̂(θ)` — profile dispersion (closed-form or Newton)
+///   - `ls(y, σ²̂, θ)` — saturated log-likelihood
 ///
-/// Together these are ~5% of the cost of a full `dispatch_reml_score_with_family`
-/// call, so caching the linear algebra and looping only over the small p-pieces
-/// gives a 3× speedup on the θ-FD step (3 evaluations: center, +h, -h).
+/// Together these are ~5% of the cost of a full
+/// `dispatch_reml_score_with_family` call, giving a 3× speedup on the
+/// θ-FD step (3 evaluations: center, +h, -h).
 #[cfg(feature = "blas")]
-pub struct TweedieThetaCache<'a> {
+pub struct OuterLinearCache<'a> {
     pub y_for_ls: &'a Array1<f64>,
     pub fitted: Array1<f64>,
     pub bsb: f64,
     pub log_det_h: f64,
     pub log_det_s: f64,
+    /// First derivatives of log|λS|+ wrt log λ_k. For singleton penalties
+    /// this is just `rank_k` (independent of λ). Pre-computed in `build()`
+    /// so fastreml's outer Newton can reuse without re-eigendecomposing.
+    pub ldet_s_d1: Array1<f64>,
+    /// Second derivatives of log|λS|+ wrt (log λ_i, log λ_j). For
+    /// singleton penalties this is identically zero. Stored as a full
+    /// `(m, m)` matrix to keep the call shape uniform with the multi-S
+    /// case (deferred).
+    pub ldet_s_d2: Array2<f64>,
     pub mp: usize,
     /// `tr(A⁻¹ X'WX)` — effective degrees of freedom. Stored so that
-    /// `score_at_p` uses the same `phi_init = dev_numerator / (n - tr_a)`
+    /// `score_at_theta` uses the same `phi_init = dev_numerator / (n - tr_a)`
     /// as `reml_criterion_multi_cached_mgcv_exact` (for byte-identical
     /// numerics across cached and direct paths).
     pub tr_a: f64,
 }
 
+/// Backwards-compatible alias for `OuterLinearCache`. New code should use
+/// `OuterLinearCache` directly; this alias keeps existing 0.14.x / 0.15.x
+/// downstream code compiling.
 #[cfg(feature = "blas")]
-impl<'a> TweedieThetaCache<'a> {
+pub type TweedieThetaCache<'a> = OuterLinearCache<'a>;
+
+#[cfg(feature = "blas")]
+impl<'a> OuterLinearCache<'a> {
     /// Build the cache for a fixed (y_local, w_local, xtwx_local, lambdas)
     /// state. Performs ONE linear system assembly + factorisation; reused
-    /// across all trial p values during the θ-Newton FD step.
+    /// across all trial θ values during the outer θ-Newton FD step.
     pub fn build(
         y_local: &Array1<f64>,
         x: &Array2<f64>,
@@ -562,43 +583,56 @@ impl<'a> TweedieThetaCache<'a> {
             bsb += lambda * penalty.quadratic_form(&system.beta);
         }
         let log_det_h = determinant(&system.a)?.ln();
+        let m = lambdas.len();
         let mut log_lambda_sum = 0.0;
         let mut log_pseudo_det_sum = 0.0;
-        for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
-            if *lambda > 1e-10 {
-                let rank_s = estimate_rank_eigen(penalty);
-                if rank_s > 0 {
-                    log_lambda_sum += (rank_s as f64) * lambda.ln();
-                }
+        let mut ldet_s_d1 = Array1::<f64>::zeros(m);
+        for (k, (lambda, penalty)) in lambdas.iter().zip(penalties.iter()).enumerate() {
+            let rank_s = estimate_rank_eigen(penalty);
+            // d/d(log λ_k) [ rank_k · log λ_k + log|S_k|+ ] = rank_k.
+            // log|S_k|+ does not depend on λ; only the prefactor does.
+            ldet_s_d1[k] = rank_s as f64;
+            if *lambda > 1e-10 && rank_s > 0 {
+                log_lambda_sum += (rank_s as f64) * lambda.ln();
             }
             log_pseudo_det_sum += pseudo_determinant(penalty)?;
         }
+        // log|λS|+ is linear in log λ for singleton penalties, so the
+        // Hessian is identically zero. Multi-S blocks would populate
+        // off-diagonals — deferred until B1.
+        let ldet_s_d2 = Array2::<f64>::zeros((m, m));
         let log_det_s = log_lambda_sum + log_pseudo_det_sum;
-        Ok(TweedieThetaCache {
+        Ok(OuterLinearCache {
             y_for_ls,
             fitted: system.fitted(x).clone(),
             bsb,
             log_det_h,
             log_det_s,
+            ldet_s_d1,
+            ldet_s_d2,
             mp,
             tr_a: system.tr_a,
         })
     }
 
-    /// Evaluate the REML score for a Tweedie family with index `p`, reusing
-    /// the frozen linear-system pieces. Cost: O(n) for the deviance + Wright
-    /// series for σ²̂ + ls. Roughly 3× cheaper than a fresh
-    /// `reml_criterion_multi_cached_mgcv_exact` call when the linear system
-    /// is the dominant cost (small to moderate p, n ≥ 500).
-    pub fn score_at_p(&self, p: f64) -> Result<f64> {
-        let family = crate::pirls::Family::Tweedie { p };
-        // μ̂ = g⁻¹(η̂) with η̂ = Xβ̂ (frozen across p)
-        let mu: Array1<f64> = self.fitted.iter().map(|&eta| family.inverse_link(eta)).collect();
+    /// Family-dispatched score evaluation. The frozen pieces
+    /// (`fitted`, `bsb`, `log_det_h`, `log_det_s`, `mp`, `tr_a`) are
+    /// independent of the family's working parameter, so we re-evaluate
+    /// only:
+    ///   - `μ̂ = g⁻¹(η̂)` — the new family carries the link
+    ///   - deviance, profile σ²̂, saturated log-likelihood
+    ///
+    /// The family argument carries the trial θ (Tweedie: `p`; TDist:
+    /// `(df, sigma2)`; NegBin: `theta`). For Gaussian the score is
+    /// θ-independent — callers should not loop, but the path still works.
+    pub fn score_at_theta(&self, family: crate::pirls::Family) -> Result<f64> {
+        let mu: Array1<f64> = self
+            .fitted
+            .iter()
+            .map(|&eta| family.inverse_link(eta))
+            .collect();
         let dev_numerator = glm_deviance(self.y_for_ls, &mu, family);
         let dp = dev_numerator + self.bsb;
-        // Profile σ̂² for this trial p — `phi_init` matches the direct path
-        // (`reml_criterion_multi_cached_mgcv_exact`) so the Newton iteration
-        // starts from the same point and converges bit-identically.
         let n_minus_tra = (self.y_for_ls.len() as f64) - self.tr_a;
         let phi_init = dev_numerator / n_minus_tra.max(1e-10);
         let scale_est = family.estimate_phi_mgcv(self.y_for_ls, dp, self.mp, 1.0, phi_init);
@@ -612,6 +646,13 @@ impl<'a> TweedieThetaCache<'a> {
             scale_est,
             self.mp,
         ))
+    }
+
+    /// Tweedie-specific convenience wrapper around `score_at_theta`.
+    /// Kept for byte-identical behavior with the pre-R1 call sites
+    /// (Tweedie profile-p θ Newton in `smooth.rs`).
+    pub fn score_at_p(&self, p: f64) -> Result<f64> {
+        self.score_at_theta(crate::pirls::Family::Tweedie { p })
     }
 }
 
@@ -628,7 +669,7 @@ impl<'a> TweedieThetaCache<'a> {
 /// passed in for clarity since the mapping is family- but not call-specific).
 #[cfg(feature = "blas")]
 pub fn tweedie_theta_derivatives_cached(
-    cache: &TweedieThetaCache<'_>,
+    cache: &OuterLinearCache<'_>,
     theta: f64,
     h: f64,
     theta_to_p: impl Fn(f64) -> f64,
@@ -6041,7 +6082,7 @@ mod tests {
         .expect("reference REML failed");
 
         // Cached path.
-        let cache = TweedieThetaCache::build(
+        let cache = OuterLinearCache::build(
             &y_orig,
             &x,
             &w,
@@ -6204,7 +6245,7 @@ mod tests {
         let grad_fd = (rp_fd - rm_fd) / (2.0 * h);
         let hess_fd = (rp_fd - 2.0 * rc_fd + rm_fd) / (h * h);
 
-        let cache = TweedieThetaCache::build(
+        let cache = OuterLinearCache::build(
             &y_orig,
             &x,
             &w,
@@ -6251,6 +6292,145 @@ mod tests {
         println!(
             "Tweedie θ-derivatives: grad rel diff {:.3e}, hess rel diff {:.3e}",
             rel_grad, rel_hess
+        );
+    }
+
+    /// R1 — Validate that `OuterLinearCache.ldet_s_d1` / `ldet_s_d2` match
+    /// finite-difference derivatives of log|λS|+ wrt log λ at 1e-6 abs tol
+    /// on a 3-smooth Gaussian fixture.
+    ///
+    /// For singleton penalties:
+    ///   ∂ log|λS|+ / ∂(log λ_k) = rank_k   (constant in λ)
+    ///   ∂² log|λS|+ / ∂(log λ_i ∂log λ_j) = 0
+    ///
+    /// We rebuild the cache at λ-perturbed states and finite-difference the
+    /// `log_det_s` scalar (which is the value being differentiated).
+    #[test]
+    fn test_outer_linear_cache_ldet_s_derivs_fd() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        let n = 200;
+        let d = 3;
+        let k_basis = 8;
+        let p_dim = d * k_basis;
+
+        // Random Gaussian design + response.
+        let mut x = Array2::<f64>::zeros((n, p_dim));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let mut eta = 0.0;
+            for j in 0..d {
+                let xij: f64 = rng.gen();
+                for kk in 0..k_basis {
+                    x[[i, j * k_basis + kk]] =
+                        ((kk as f64 + 1.0) * std::f64::consts::PI * xij).sin();
+                }
+                eta += (2.0 * std::f64::consts::PI * xij).sin();
+            }
+            y[i] = eta + 0.1 * (rng.gen::<f64>() - 0.5);
+        }
+        let w = Array1::<f64>::ones(n);
+
+        // 3 banded penalties (simple difference-style), one per dimension.
+        let mut penalties = Vec::with_capacity(d);
+        for j in 0..d {
+            let mut s = Array2::<f64>::zeros((p_dim, p_dim));
+            let start = j * k_basis;
+            for i in start..(start + k_basis) {
+                s[[i, i]] = 2.0;
+                if i > start {
+                    s[[i, i - 1]] = -1.0;
+                    s[[i - 1, i]] = -1.0;
+                }
+            }
+            penalties.push(BlockPenalty::new(s, 0, p_dim));
+        }
+
+        let lambdas_base = vec![0.5_f64, 0.7, 1.3];
+        let mp = 1 + d;
+        let xtwx = compute_xtwx_dispatch(None, &x, &w);
+
+        let build_cache = |lams: &[f64]| -> OuterLinearCache<'_> {
+            OuterLinearCache::build(&y, &x, &w, &xtwx, lams, &penalties, mp, &y)
+                .expect("cache build failed")
+        };
+
+        let cache0 = build_cache(&lambdas_base);
+        let m = lambdas_base.len();
+        // h for d1: 1e-5 gives ~1e-10 truncation + ~1e-10 round-off ≈ 1e-7
+        // h for d2: larger h (1e-3) needed because 4h² amplifies round-off;
+        // optimal h_d2 ≈ ε^(1/4) ≈ 1e-4 for f~O(1).
+        let h_d1 = 1e-5_f64;
+        let h_d2 = 1e-3_f64;
+
+        // FD d1: central difference on log_det_s in log λ_k.
+        for k in 0..m {
+            let mut lams_p = lambdas_base.clone();
+            let mut lams_m = lambdas_base.clone();
+            // δ(log λ) = h  ⇒  λ' = λ · exp(±h)
+            lams_p[k] *= h_d1.exp();
+            lams_m[k] *= (-h_d1).exp();
+            let cp = build_cache(&lams_p);
+            let cm = build_cache(&lams_m);
+            let fd_d1 = (cp.log_det_s - cm.log_det_s) / (2.0 * h_d1);
+            let analytical = cache0.ldet_s_d1[k];
+            let err = (fd_d1 - analytical).abs();
+            assert!(
+                err < 1e-6,
+                "ldet_s_d1[{}]: fd={} analytical={} abs err={:.3e}",
+                k,
+                fd_d1,
+                analytical,
+                err
+            );
+        }
+
+        // FD d2: second-order central difference on log_det_s.
+        // For singleton penalties this is identically zero (log|λS|+ is
+        // linear in log λ). At h=1e-3 the residual round-off floor is
+        // around 1e-9 (eps · |log_det_s| / h² ≈ 1e-15·10/1e-6 = 1e-8).
+        for i in 0..m {
+            for j in 0..m {
+                // Mixed partial: (f(+h,+h) - f(+h,-h) - f(-h,+h) + f(-h,-h)) / (4h²)
+                let mut lams_pp = lambdas_base.clone();
+                let mut lams_pm = lambdas_base.clone();
+                let mut lams_mp = lambdas_base.clone();
+                let mut lams_mm = lambdas_base.clone();
+                lams_pp[i] *= h_d2.exp();
+                lams_pp[j] *= h_d2.exp();
+                lams_pm[i] *= h_d2.exp();
+                lams_pm[j] *= (-h_d2).exp();
+                lams_mp[i] *= (-h_d2).exp();
+                lams_mp[j] *= h_d2.exp();
+                lams_mm[i] *= (-h_d2).exp();
+                lams_mm[j] *= (-h_d2).exp();
+                let cpp = build_cache(&lams_pp);
+                let cpm = build_cache(&lams_pm);
+                let cmp = build_cache(&lams_mp);
+                let cmm = build_cache(&lams_mm);
+                let fd_d2 = (cpp.log_det_s - cpm.log_det_s - cmp.log_det_s + cmm.log_det_s)
+                    / (4.0 * h_d2 * h_d2);
+                let analytical = cache0.ldet_s_d2[[i, j]];
+                let err = (fd_d2 - analytical).abs();
+                assert!(
+                    err < 1e-6,
+                    "ldet_s_d2[{},{}]: fd={} analytical={} abs err={:.3e}",
+                    i,
+                    j,
+                    fd_d2,
+                    analytical,
+                    err
+                );
+            }
+        }
+
+        println!(
+            "OuterLinearCache ldet_s derivs FD-validated on 3-smooth Gaussian fixture (h_d1={}, h_d2={})",
+            h_d1, h_d2
         );
     }
 }

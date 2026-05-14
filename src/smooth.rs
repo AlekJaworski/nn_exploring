@@ -14,7 +14,7 @@ use crate::reml::{
     reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
     reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
     reml_joint_gh_gamfit4_tdist_analytic, tweedie_theta_derivatives_cached, ExtraKind, ExtraParam,
-    OuterSearchVector, TweedieThetaCache,
+    OuterLinearCache, OuterSearchVector,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -2326,7 +2326,7 @@ impl SmoothingParameter {
             //   θ ≤ 0: p = (b·exp(θ)+a)/(exp(θ)+1)
             //
             // Gradient dlr/dθ via FD on REML score at θ ± h. The fast path
-            // (default) caches the linear system once via `TweedieThetaCache`
+            // (default) caches the linear system once via `OuterLinearCache`
             // since (y_local, w_local, xtwx_local, lambdas) are frozen for
             // this step — β̂, μ̂, log|H|, log|S|+ are identical across the 3
             // probes, so we only redo the cheap (p, σ²̂(p))-pieces. Roughly
@@ -2376,7 +2376,7 @@ impl SmoothingParameter {
                 // Build derivative pieces. The cached path returns
                 // (rc, dlr/dθ, d²lr/dθ²) sharing one linear-system assembly.
                 let derivs = if !use_fd_legacy && self.mgcv_exact_score {
-                    match TweedieThetaCache::build(
+                    match OuterLinearCache::build(
                         &y_local,
                         x,
                         &w_local,
@@ -2407,7 +2407,7 @@ impl SmoothingParameter {
                         (Ok(rc), Ok(rp), Ok(rm)) => {
                             let dlr = (rp - rm) / (2.0 * h_th);
                             let d2lr = (rp - 2.0 * rc + rm) / (h_th * h_th);
-                            Ok((rc, dlr, d2lr, None::<TweedieThetaCache>))
+                            Ok((rc, dlr, d2lr, None::<OuterLinearCache>))
                         }
                         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
                     }
