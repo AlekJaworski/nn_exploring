@@ -204,6 +204,58 @@ def test_parametric_fitted_values_close_to_mgcv(parity_ref):
     assert max_diff < 1e-2, f"max diff vs mgcv = {max_diff:.6g} (bar 1e-2)"
 
 
+def test_parametric_linear_alias(parity_ref):
+    """`"linear"` should be a transparent alias for `"parametric"`.
+
+    Customer feedback (0.16 integration note): users coming from mgcv reach
+    for `"linear"` to mark unsmoothed columns and don't discover the
+    `"parametric"` keyword. We accept `"linear"` everywhere `"parametric"`
+    is accepted, and the two paths must produce byte-identical coefficients
+    (same Rust arm, same basis, same penalty).
+    """
+    data = parity_ref["data"]
+    x = np.asarray(data["x"], dtype=float)
+    dummy = np.asarray(data["dummy"], dtype=float)
+    y = np.asarray(data["y"], dtype=float)
+
+    X = np.column_stack([x, dummy])
+
+    gam_parametric = Gam(
+        predictors=["x", "dummy"],
+        predictor_basis_map={"dummy": "parametric"},
+        k_default=10,
+        family="gaussian",
+    )
+    gam_parametric.fit(X, y)
+
+    gam_linear = Gam(
+        predictors=["x", "dummy"],
+        predictor_basis_map={"dummy": "linear"},
+        k_default=10,
+        family="gaussian",
+    )
+    gam_linear.fit(X, y)
+
+    coef_p = gam_parametric.get_coefficients()
+    coef_l = gam_linear.get_coefficients()
+
+    # Byte-identical: same code path, same numerics.
+    np.testing.assert_array_equal(
+        coef_p,
+        coef_l,
+        err_msg="`linear` alias must produce identical coefficients to `parametric`",
+    )
+
+    # And predictions follow suit.
+    yhat_p = gam_parametric.predict(X)
+    yhat_l = gam_linear.predict(X)
+    np.testing.assert_array_equal(
+        yhat_p,
+        yhat_l,
+        err_msg="`linear` alias must produce identical predictions to `parametric`",
+    )
+
+
 def test_parametric_lpmatrix_predict_path(parity_ref):
     """`evaluate_lpmatrix` on new data should preserve the parametric column.
 

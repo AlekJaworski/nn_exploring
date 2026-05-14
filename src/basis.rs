@@ -1002,7 +1002,7 @@ impl BasisFunction for RandomEffectBasis {
     }
 }
 
-/// Parametric (linear, unsmoothed) term — `bs="parametric"` in our API.
+/// Parametric (linear, unsmoothed) term — `bs="parametric"` (alias: `"linear"`) in our API.
 ///
 /// Represents a single covariate that enters the linear predictor as a raw
 /// column with no spline expansion and no smoothing penalty. The "basis" is

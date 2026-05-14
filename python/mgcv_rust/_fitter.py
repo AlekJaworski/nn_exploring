@@ -242,9 +242,21 @@ class Gam:
         term_k_mapping: per-predictor `k` overrides, e.g.
             `{"days_ago": 25, "quality": 12}`.
         predictor_basis_map: per-predictor basis-type overrides, e.g.
-            ``{"cluster": "re", "days": "cr"}``. Supported values: ``"cr"``,
-            ``"bs"``, ``"re"`` (random effects). Overrides the global
-            ``bs="cr"`` default for the listed predictors.
+            ``{"cluster": "re", "days": "cr", "is_promo": "parametric"}``.
+            Supported values:
+
+            - ``"cr"`` — cubic regression spline (knots at quantiles)
+            - ``"bs"`` — B-spline (knots at quantiles)
+            - ``"re"`` — random effect (one-hot design, identity penalty)
+            - ``"parametric"`` (alias ``"linear"``) — unsmoothed linear term:
+              a single raw column with no spline expansion and no penalty.
+              Use for 0/1 indicators or other covariates that should enter
+              the linear predictor as plain fixed-effect coefficients
+              (mgcv's parametric "pterms" block). Example::
+
+                  predictor_basis_map={"at_least_1_price_drop": "linear"}
+
+            Overrides the global ``bs="cr"`` default for the listed predictors.
         term_pc_mapping: per-predictor placeholder constant `pc` — for
             each `(predictor, value)` the smooth is shifted so that
             `f(value) = 0`. Used for missing-value sentinels and for
@@ -253,8 +265,9 @@ class Gam:
             apply pc; tracked as Ergo followup.
         family: GLM family. One of
             `"gaussian"`, `"binomial"`, `"poisson"`, `"gamma"`, `"t-dist"`.
-            ``"t-dist"`` is the scaled t-distribution (mgcv's ``scat`` family)
-            with identity link and heavier-tailed residuals.
+            ``"t-dist"`` is the scaled t-distribution with identity link and
+            heavier-tailed residuals — the SAME family as mgcv's ``scat``;
+            ``"scat"`` is accepted as an alias and routes identically.
         link: link function. Defaults to the canonical link per family.
             For gamma we additionally support `"log"`.
         df: degrees of freedom for ``family="t-dist"``. If given (must be in
@@ -450,7 +463,7 @@ class Gam:
         # Parametric terms also have no k to grow, so they're "covered" too.
         no_k_terms = {
             name for name in (self._effective_predictors or [])
-            if self.predictor_basis_map.get(name) in ("re", "parametric")
+            if self.predictor_basis_map.get(name) in ("re", "parametric", "linear")
         }
         all_covered = all(
             name in self.term_k_mapping or name in no_k_terms
@@ -542,10 +555,11 @@ class Gam:
                 # k is ignored for random effects; pass placeholder 1.
                 ks.append(1)
                 continue
-            if bs == "parametric":
+            if bs in ("parametric", "linear"):
                 # Parametric (linear, unsmoothed) term: single raw column,
                 # k is irrelevant. Pass placeholder 1; the Rust side ignores
-                # it. See docs/PARAMETRIC_TERMS_DESIGN.md.
+                # it. ``"linear"`` is an alias for ``"parametric"`` — both
+                # land on the same Rust arm. See docs/PARAMETRIC_TERMS_DESIGN.md.
                 ks.append(1)
                 continue
             requested = k_mapping.get(name, self.k_default)
@@ -741,7 +755,7 @@ class Gam:
                 # re). Treat them as already "capped" and skip the k-index
                 # computation (the residual structure along a binary or
                 # categorical axis isn't meaningful for these bases).
-                if self.predictor_basis_map.get(name) in ("re", "parametric"):
+                if self.predictor_basis_map.get(name) in ("re", "parametric", "linear"):
                     continue
                 k_idx = self._k_index(X_arr[:, j], resid)
                 k_before = current_k[name]

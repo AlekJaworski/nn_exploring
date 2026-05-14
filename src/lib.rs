@@ -535,10 +535,12 @@ impl PyGAM {
                     SmoothTerm::random_effect(format!("x{}", i), &col_owned)
                         .map_err(|e| PyValueError::new_err(format!("{}", e)))?
                 }
-                "parametric" => {
+                "parametric" | "linear" => {
                     // Parametric (linear, unsmoothed) term: one raw column, zero
                     // penalty. The basis ignores k (always 1 column). See
-                    // docs/PARAMETRIC_TERMS_DESIGN.md.
+                    // docs/PARAMETRIC_TERMS_DESIGN.md. ``"linear"`` is an alias
+                    // for ``"parametric"`` matching mgcv-user mental model
+                    // (closes 0.16 customer-feedback discoverability gap).
                     SmoothTerm::parametric(format!("x{}", i), &col_owned)
                         .map_err(|e| PyValueError::new_err(format!("{}", e)))?
                 }
@@ -554,7 +556,8 @@ impl PyGAM {
                     .map_err(|e| PyValueError::new_err(format!("{}", e)))?,
                 _ => {
                     return Err(PyValueError::new_err(format!(
-                        "Unknown basis type '{}'. Use 'bs', 'cr', 're', or 'parametric'.",
+                        "Unknown basis type '{}'. Use 'bs', 'cr', 're', or \
+                         'parametric' (alias: 'linear').",
                         term_bs
                     )));
                 }
