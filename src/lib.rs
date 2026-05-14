@@ -368,7 +368,8 @@ impl PyGAM {
         let opt_method = match method {
             "GCV" => OptimizationMethod::GCV,
             "REML" => OptimizationMethod::REML,
-            _ => return Err(PyValueError::new_err("method must be 'GCV' or 'REML'")),
+            "fREML" => OptimizationMethod::FastREML,
+            _ => return Err(PyValueError::new_err("method must be 'GCV', 'REML', or 'fREML'")),
         };
 
         let max_outer = max_iter.unwrap_or(10);
@@ -578,7 +579,8 @@ impl PyGAM {
         let opt_method = match method {
             "GCV" => OptimizationMethod::GCV,
             "REML" => OptimizationMethod::REML,
-            _ => return Err(PyValueError::new_err("method must be 'GCV' or 'REML'")),
+            "fREML" => OptimizationMethod::FastREML,
+            _ => return Err(PyValueError::new_err("method must be 'GCV', 'REML', or 'fREML'")),
         };
 
         let max_outer = max_iter.unwrap_or(10);

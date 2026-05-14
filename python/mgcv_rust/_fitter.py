@@ -260,9 +260,15 @@ class Gam:
         df: degrees of freedom for ``family="t-dist"``. If given (must be in
             [2, 100]), df is held fixed during fitting. If omitted or ``None``,
             df is profiled jointly with σ² each iteration.
-        method: smoothing-parameter selection method. Accepted values
-            `"REML"`, `"fREML"`. Both currently route to mgcv-exact
-            REML; the byte-for-byte fREML path is a followup.
+        method: smoothing-parameter selection method.
+            - ``"REML"`` (default) — mgcv-exact inner-Newton REML (Wood &
+              Fasiolo's ``gam.fit3``-style outer Newton on log-λ).
+            - ``"fREML"`` — closed-form fast-REML driver (``bgam.fitd``,
+              ``Sl.fitChol`` Newton on (log-λ ⊕ log-φ)). Faster on
+              Gaussian / scat than full REML; predictions agree to ~1e-3
+              vs ``REML`` modulo an orthogonal-basis transform.
+            - ``"GCV"`` — generalized cross-validation. Available for
+              Gaussian fits only.
         consider_categorical: if True, columns with two or fewer unique
             values are dropped from the smooth specification. 📋 Not
             yet implemented; pass-through for API compatibility.
@@ -619,12 +625,15 @@ class Gam:
         return bs_vals if any(b is not None for b in bs_vals) else None
 
     def _single_fit(self, X_arr: np.ndarray, y_arr: np.ndarray, ks: list[int]) -> None:
-        """Run one native fit with the given k vector (mgcv bs='cr', REML)."""
+        """Run one native fit with the given k vector (mgcv bs='cr')."""
         self._native = self._make_native()
         pc_values = self._build_pc_values(self._effective_predictors or [])
         bs_list = self._build_bs_list(self._effective_predictors or [])
+        # method ∈ {"REML", "fREML", "GCV"}: REML = inner-Newton REML
+        # optimizer (mgcv `gam.fit3`); fREML = closed-form B3+B4 driver
+        # (mgcv `bgam.fitd`); GCV = generalized cross-validation criterion.
         self._native.fit(
-            X_arr, y_arr, k=ks, method="REML", bs="cr",
+            X_arr, y_arr, k=ks, method=self.method, bs="cr",
             pc_values=pc_values, bs_list=bs_list,
             weights=self.sample_weight,
             discrete=self.discrete,

@@ -395,7 +395,7 @@ impl FitCache {
 }
 
 /// Initialize lambda with smart heuristic based on data
-fn initialize_lambda_smart(y: &Array1<f64>, x: &Array2<f64>, penalty: &BlockPenalty) -> f64 {
+pub(crate) fn initialize_lambda_smart(y: &Array1<f64>, x: &Array2<f64>, penalty: &BlockPenalty) -> f64 {
     // Use a heuristic based on the ratio of signal variance to penalty norm
     let y_var = {
         let y_mean = y.sum() / y.len() as f64;
@@ -706,6 +706,140 @@ impl GAM {
 
         let mut total_pirls_time = 0.0;
         let mut total_reml_time = 0.0;
+
+        // ─── FastREML dispatch (B4): bypass the Newton/FS optimizer entirely
+        // and run mgcv's `bgam.fitd` driver directly. The driver returns
+        // (β, λ, log_phi, fitted, EDF, PP) ready for `store_results`.
+        if matches!(opt_method, OptimizationMethod::FastREML) {
+            let _ = (max_inner_iter, &weights, &total_pirls_time, &total_reml_time);
+            let phi_fixed = matches!(
+                self.family,
+                crate::pirls::Family::Binomial
+                    | crate::pirls::Family::Poisson
+                    | crate::pirls::Family::NegBin { .. }
+                    | crate::pirls::Family::Quantile { .. }
+            );
+
+            // For scat: wire the B5 outer Newton on (log σ², log(df-2)) as
+            // the family-shape callback. The callback returns a refreshed
+            // `Family::TDist` with updated `(df, sigma2)`.
+            let tdist_profile = self.tdist_profile;
+            let fixed_df_for_scat = if let crate::pirls::Family::TDist { df, .. } = self.family {
+                Some(df)
+            } else {
+                None
+            };
+            let mut scat_cb_state: Option<(f64, f64)> = match self.family {
+                crate::pirls::Family::TDist { df, sigma2 } => Some((sigma2.ln(), (df - 2.0).max(1e-6).ln())),
+                _ => None,
+            };
+            let mut scat_callback = |y_in: &Array1<f64>,
+                                     mu_in: &Array1<f64>,
+                                     pw_in: Option<&Array1<f64>>,
+                                     fam_in: crate::pirls::Family,
+                                     _log_phi: f64|
+             -> Result<crate::pirls::Family> {
+                if let crate::pirls::Family::TDist { .. } = fam_in {
+                    let (log_s2_cur, log_d_cur) = scat_cb_state.expect("scat state initialised");
+                    let step = if tdist_profile && fixed_df_for_scat.is_none() {
+                        crate::family_theta::estimate_scat_theta_outer(
+                            y_in,
+                            mu_in,
+                            pw_in,
+                            log_s2_cur,
+                            log_d_cur,
+                            /*max_iters*/ 25,
+                            /*tol*/ 1e-7,
+                        )
+                    } else {
+                        // 1-D Newton on log σ² only (df fixed by user).
+                        crate::family_theta::estimate_scat_log_sigma2_outer(
+                            y_in,
+                            mu_in,
+                            pw_in,
+                            log_s2_cur,
+                            log_d_cur,
+                            /*max_iters*/ 25,
+                            /*tol*/ 1e-7,
+                        )
+                    };
+                    scat_cb_state = Some((step.log_sigma2, step.log_df_minus2));
+                    let df_new = step.log_df_minus2.exp() + 2.0;
+                    let sigma2_new = step.log_sigma2.exp();
+                    Ok(crate::pirls::Family::TDist {
+                        df: df_new,
+                        sigma2: sigma2_new,
+                    })
+                } else {
+                    // Non-scat: callback is a no-op (Gaussian, exponential families).
+                    Ok(fam_in)
+                }
+            };
+            let theta_callback: Option<crate::pirls::FastRemlThetaCallback> =
+                if matches!(self.family, crate::pirls::Family::TDist { .. }) {
+                    Some(&mut scat_callback)
+                } else {
+                    None
+                };
+
+            let mut fr_config = crate::pirls::FastRemlConfig {
+                max_outer_iter: max_outer_iter.max(200),
+                tol: tolerance,
+                gamma: 1.0,
+                phi_fixed,
+                log_phi_init: None,
+                theta_callback,
+            };
+
+            let pirls_start = Instant::now();
+            let fr_result = crate::pirls::fit_pirls_fastreml(
+                y,
+                &cache.design_matrix,
+                prior_weights_ref,
+                &cache.penalties,
+                self.family,
+                cache.discrete.as_ref(),
+                &mut fr_config,
+            )?;
+            total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
+
+            // Propagate converged family-shape params back to self.family.
+            self.family = fr_result.family_out;
+            smoothing_params.family = fr_result.family_out;
+
+            // Translate fastreml result → PiRLSResult so we reuse store_results.
+            let pirls_result = crate::pirls::PiRLSResult {
+                coefficients: fr_result.beta.clone(),
+                fitted_values: fr_result.fitted_values.clone(),
+                linear_predictor: fr_result.linear_predictor.clone(),
+                weights: fr_result.final_weights.clone(),
+                working_response: fr_result.working_response.clone(),
+                deviance: fr_result.deviance,
+                iterations: fr_result.iterations,
+                converged: fr_result.converged,
+                sigma2: Some(fr_result.sigma2),
+                df: if let crate::pirls::Family::TDist { df, .. } = fr_result.family_out {
+                    Some(df)
+                } else {
+                    None
+                },
+            };
+
+            // Sync lambdas + record the fREML score for downstream wrappers.
+            smoothing_params.lambda = fr_result.lambda.clone();
+            smoothing_params.last_score = Some(fr_result.gcv_ubre);
+
+            if std::env::var("MGCV_PROFILE").is_ok() {
+                eprintln!(
+                    "[PROFILE] fREML driver: {} outer iters, {:.2}ms",
+                    fr_result.iterations, total_pirls_time
+                );
+                eprintln!("[PROFILE] fREML score: {:?}", smoothing_params.last_score);
+            }
+
+            self.store_results(pirls_result, smoothing_params, y, &cache.design_matrix);
+            return Ok(());
+        }
 
         // Newton iteration cap. mgcv defaults to 200 with proper
         // score-scaled convergence; in our parity battery mgcv typically

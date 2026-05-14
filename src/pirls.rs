@@ -3631,6 +3631,433 @@ fn fit_pirls_gaussian_discretized(
     })
 }
 
+// ---------------------------------------------------------------------------
+// B4 — fREML outer driver (port of mgcv's `bgam.fitd`).
+// ---------------------------------------------------------------------------
+
+/// Callback hook used by [`fit_pirls_fastreml`] to refresh extended-family
+/// shape parameters (e.g. scat's `(σ², df)`) between outer iterations.
+///
+/// Given the current iterate (`y`, `μ̂`, optional prior weights, the latest
+/// family, and the latest `log_phi`), the callback returns an updated
+/// [`Family`] with refreshed shape params. For Gaussian / canonical-link
+/// exponential families the callback is `None` and the family is held fixed
+/// across iterations.
+///
+/// Mirrors mgcv's `estimate.theta` callback inside `bgam.fitd`
+/// (R/bam.r:614-630). See `docs/B4_DESIGN.md` §2.
+#[cfg(feature = "blas")]
+pub type FastRemlThetaCallback<'a> = &'a mut dyn FnMut(
+    &Array1<f64>,
+    &Array1<f64>,
+    Option<&Array1<f64>>,
+    Family,
+    f64,
+) -> Result<Family>;
+
+/// Configuration for the fREML outer driver. See [`fit_pirls_fastreml`].
+#[cfg(feature = "blas")]
+pub struct FastRemlConfig<'a> {
+    /// Outer-iteration cap (mgcv `control$maxit`, default 200).
+    pub max_outer_iter: usize,
+    /// Outer-loop convergence tolerance (mgcv `control$epsilon`, default 1e-7).
+    pub tol: f64,
+    /// γ correction factor (default 1.0).
+    pub gamma: f64,
+    /// True for known-scale families (Binomial, Poisson, NegBin); false for
+    /// Gaussian, Gamma, scat, Tweedie, InvGauss.
+    pub phi_fixed: bool,
+    /// Initial `log φ`. `None` ⇒ seed from `log(var(y) * 0.05)`.
+    pub log_phi_init: Option<f64>,
+    /// Optional shape-parameter callback (e.g. scat θ Newton). `None` ⇒ no-op.
+    pub theta_callback: Option<FastRemlThetaCallback<'a>>,
+}
+
+#[cfg(feature = "blas")]
+impl<'a> FastRemlConfig<'a> {
+    /// Defaults matching mgcv's `bgam.fitd` control args for `method='fREML'`.
+    pub fn default_for(phi_fixed: bool) -> Self {
+        FastRemlConfig {
+            max_outer_iter: 200,
+            tol: 1e-7,
+            gamma: 1.0,
+            phi_fixed,
+            log_phi_init: None,
+            theta_callback: None,
+        }
+    }
+}
+
+/// Returned by [`fit_pirls_fastreml`].
+#[cfg(feature = "blas")]
+#[derive(Debug, Clone)]
+pub struct FastRemlResult {
+    pub beta: Array1<f64>,
+    pub lambda: Vec<f64>,
+    pub log_phi: f64,
+    pub sigma2: f64,
+    pub pp: Array2<f64>,
+    pub edf: Array1<f64>,
+    pub fitted_values: Array1<f64>,
+    pub linear_predictor: Array1<f64>,
+    pub final_weights: Array1<f64>,
+    pub working_response: Array1<f64>,
+    pub deviance: f64,
+    pub gcv_ubre: f64,
+    pub iterations: usize,
+    pub converged: bool,
+    pub family_out: Family,
+    pub db_drho: Array2<f64>,
+    pub grad: Array1<f64>,
+    pub hess: Array2<f64>,
+}
+
+/// Compute η = X·β, dispatching to the discrete compressed-basis path when
+/// a `DiscreteDesign` is supplied.
+#[cfg(feature = "blas")]
+#[inline]
+fn fastreml_compute_eta(
+    x: &Array2<f64>,
+    discrete: Option<&crate::discrete::DiscreteDesign>,
+    beta: &Array1<f64>,
+) -> Array1<f64> {
+    match discrete {
+        Some(d) => crate::discrete::compute_eta_discrete(d, beta),
+        None => x.dot(beta),
+    }
+}
+
+/// Compute one IRLS working pair `(w, z)` for the fREML loop.
+///
+/// Dispatches on `family`:
+///   - `Gaussian`: `w = 1` (folded with prior weights when supplied), `z = y`.
+///   - `TDist`: scat IRLS via [`tdist_irls_step`].
+///   - all other exponential families: [`exp_family_irls_step`] with Fisher
+///     scoring (matches mgcv's `bgam.fitd` working-pair contract).
+#[cfg(feature = "blas")]
+fn fastreml_irls_step(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
+    family: Family,
+) -> (Array1<f64>, Array1<f64>) {
+    let n = y.len();
+    match family {
+        Family::Gaussian => {
+            let w = match prior_weights {
+                Some(pw) => pw.clone(),
+                None => Array1::<f64>::ones(n),
+            };
+            (w, y.clone())
+        }
+        Family::TDist { df, sigma2 } => {
+            let step = tdist_irls_step(
+                y.view(),
+                eta.view(),
+                prior_weights.map(|pw| pw.view()),
+                sigma2,
+                df,
+                /*use_newton_working*/ false,
+            );
+            (step.w, step.z)
+        }
+        _ => {
+            let step = exp_family_irls_step(
+                y.view(),
+                eta.view(),
+                prior_weights.map(|pw| pw.view()),
+                family,
+                /*use_fisher*/ true,
+            );
+            (step.w, step.z)
+        }
+    }
+}
+
+/// Outer-driver port of mgcv's `bgam.fitd` (`method='fREML'`).
+///
+/// **Algorithmic mapping** (per `docs/B4_DESIGN.md` §3):
+///
+///   1. Initialise β = 0, η from family, `log φ` from sample variance.
+///   2. Initialise smoothing params via [`crate::gam_optimized::initialize_lambda_smart`]
+///      (mgcv's `initial.sp` analog at bam.r:687).
+///   3. **Outer loop** (`bgam.fitd` line 563):
+///      a. Take one IRLS step → `(w, z)` (`fastreml_irls_step`).
+///      b. Form `X'WX`, `X'Wz`, `y'Wy` (or `z'Wz` — see note below) via the
+///         discrete/dense dispatch helpers.
+///      c. Call [`crate::reml::compute_sl_fitchol_step`] to get the
+///         closed-form `(β̂, grad, Hess, step)` on `(ρ, log φ)`.
+///      d. Apply mgcv's step-blending (bam.r:749-756): if the proposed
+///         Newton step is uphill on REML (`g·step > dev·1e-7`), halve and
+///         re-evaluate `Sl.fitChol`.
+///      e. Refresh family θ via the callback (scat: 2-D Newton on
+///         `(log σ², log(df-2))`).
+///      f. Test convergence on `(dev change, log φ step)`.
+///   4. Return `FastRemlResult` with β, λ, PP, EDF, fitted values, etc.
+///
+/// **Skipped vs mgcv** (per design §1 gaps, documented at callsite):
+///   - `Sl.initial.repara` rotation — predictions/EDF are basis-invariant.
+///   - AR1 `rho!=0` — out of scope (driver doesn't take a `rho` arg).
+///   - Joint θ–φ mini-loop in iters 1–4 (bam.r:617-628) — `phi_fixed`
+///     stays constant per fit.
+///   - `coef`/`in.out`/`nei` warm-start args.
+///
+/// **Note on `z'Wz` vs `y'Wy`**: the closed-form Gaussian-equivalent
+/// `D_p = z'Wz − β'X'Wz` substitutes `z = working response` in place of `y`.
+/// For Gaussian (`z = y`) the two coincide. For non-Gaussian, mgcv's bam
+/// path uses the working response throughout (bam.r:653).
+#[cfg(feature = "blas")]
+pub fn fit_pirls_fastreml(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    prior_weights: Option<&Array1<f64>>,
+    sl: &[BlockPenalty],
+    initial_family: Family,
+    discrete: Option<&crate::discrete::DiscreteDesign>,
+    config: &mut FastRemlConfig,
+) -> Result<FastRemlResult> {
+    use crate::reml::{compute_sl_fitchol_step, compute_xtwx_dispatch, compute_xtwy_dispatch};
+
+    let n = y.len();
+    let p = x.ncols();
+    let m = sl.len();
+
+    if x.nrows() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "X has {} rows but y has {}",
+            x.nrows(),
+            n
+        )));
+    }
+    if let Some(pw) = prior_weights {
+        if pw.len() != n {
+            return Err(GAMError::DimensionMismatch(format!(
+                "prior_weights length {} must match y length {}",
+                pw.len(),
+                n
+            )));
+        }
+    }
+    if m == 0 {
+        return Err(GAMError::InvalidParameter(
+            "fit_pirls_fastreml requires at least one penalty block".to_string(),
+        ));
+    }
+
+    // ───── C1: Mp = p − Σ rank_k (mgcv `Sl.setup` Mp output, bam.r:544) ─────
+    let mut mp_signed: i64 = p as i64;
+    for s in sl {
+        mp_signed -= s.estimate_rank() as i64;
+    }
+    let mp = mp_signed.max(0) as usize;
+
+    // ───── C2/C3: β = 0, η from family, log φ seeded from sample variance ────
+    let mut family = initial_family;
+    let mut beta = Array1::<f64>::zeros(p);
+    let y_mean: f64 = y.iter().sum::<f64>() / (n as f64).max(1.0);
+    let y_var: f64 =
+        y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
+    let mut log_phi = config
+        .log_phi_init
+        .unwrap_or_else(|| (y_var * 0.05).max(1e-8).ln());
+
+    // ───── C4: initial smoothing params via mgcv's `initial.sp` analog ───────
+    // (bam.r:687). Per-smooth heuristic on the current y / X.
+    let mut rho: Vec<f64> = sl
+        .iter()
+        .map(|s| crate::gam_optimized::initialize_lambda_smart(y, x, s).ln())
+        .collect();
+
+    // ───── State carried across the outer loop ───────────────────────────────
+    let mut prev_dev = f64::INFINITY;
+    let mut prev_crit = f64::INFINITY;
+    let mut iter_used = 0usize;
+    let mut converged = false;
+    let mut last_prop: Option<crate::reml::SlFitCholResult> = None;
+    let mut last_log_phi_step: f64 = 0.0;
+    // Track the most recent accepted Newton step on (ρ, log φ) for the
+    // log-φ convergence test (bam.r:678 second clause).
+
+    // ───── C6: main outer loop (bam.r:563) ────────────────────────────────────
+    for outer in 0..config.max_outer_iter {
+        iter_used = outer + 1;
+
+        // ─── C7: one IRLS step at current β. For Gaussian this is just
+        // (w=prior, z=y). For scat we use tdist_irls_step. For exponential
+        // families we use exp_family_irls_step.
+        let eta = fastreml_compute_eta(x, discrete, &beta);
+        let (w, z) = fastreml_irls_step(y, &eta, prior_weights, family);
+
+        // ─── C9: form X'WX, X'Wz, y_w_y (here z'Wz) (bam.r:657-659). ────────
+        let xx = compute_xtwx_dispatch(discrete, x, &w);
+        let f = compute_xtwy_dispatch(discrete, x, &w, &z);
+        let yy: f64 = w
+            .iter()
+            .zip(z.iter())
+            .map(|(&wi, &zi)| wi * zi * zi)
+            .sum();
+
+        // ─── C12: B3 closed-form step on (ρ, log φ). ───────────────────────
+        let rho_arr = Array1::from_vec(rho.clone());
+        let proposal = compute_sl_fitchol_step(
+            sl,
+            xx.view(),
+            f.view(),
+            rho_arr.view(),
+            yy,
+            log_phi,
+            config.phi_fixed,
+            n as f64,
+            mp,
+            config.gamma,
+        )?;
+
+        // ─── C13: mgcv-style step-blending. On the first iter we accept the
+        // proposal as-is (`Nstep == 0` at start). Subsequently, the bam.r
+        // uphill check at line 749-756 is: if grad·step > dev·1e-7, halve
+        // the step and re-evaluate Sl.fitChol at the halved point. We keep
+        // it simple and use the just-computed `prev_dev` as the scale.
+        //
+        // Note: the `proposal.step` is already capped at |∞|≤4 by B3, so
+        // we don't need a magnitude clamp here.
+        let mut accepted_step = proposal.step.clone();
+        let mut accepted_prop = proposal;
+        if outer > 0 {
+            // Uphill test on the proposed Newton step.
+            let dev_scale = prev_dev.abs().max(1.0);
+            let dot = accepted_prop.grad.dot(&accepted_step);
+            if dot > dev_scale * 1e-7 {
+                // Halve and re-evaluate. One halving suffices per
+                // bam.r:749-756 (mgcv does not iterate; takes one trial).
+                accepted_step.mapv_inplace(|x| 0.5 * x);
+                let mut trial_rho: Vec<f64> = rho.clone();
+                for (k, sk) in accepted_step.iter().take(m).enumerate() {
+                    trial_rho[k] += sk;
+                }
+                let trial_log_phi = if config.phi_fixed {
+                    log_phi
+                } else {
+                    log_phi + accepted_step[m]
+                };
+                let trial_rho_arr = Array1::from_vec(trial_rho.clone());
+                let prop2 = compute_sl_fitchol_step(
+                    sl,
+                    xx.view(),
+                    f.view(),
+                    trial_rho_arr.view(),
+                    yy,
+                    trial_log_phi,
+                    config.phi_fixed,
+                    n as f64,
+                    mp,
+                    config.gamma,
+                )?;
+                accepted_prop = prop2;
+            }
+        }
+
+        // Apply the (possibly halved) step to (ρ, log φ).
+        for (k, sk) in accepted_step.iter().take(m).enumerate() {
+            rho[k] += sk;
+        }
+        if !config.phi_fixed {
+            last_log_phi_step = accepted_step[m];
+            log_phi += accepted_step[m];
+        } else {
+            last_log_phi_step = 0.0;
+        }
+
+        // ─── C14: update β from the (possibly refreshed) proposal. ──────────
+        beta = accepted_prop.beta.clone();
+        let _ = (w, z); // IRLS pair consumed via xx/f; final pass recomputes.
+
+        // ─── C15: refresh family-shape params via callback (scat θ Newton). ─
+        if let Some(cb) = config.theta_callback.as_mut() {
+            let mu_hat = fastreml_compute_eta(x, discrete, &beta);
+            family = cb(y, &mu_hat, prior_weights, family, log_phi)?;
+        }
+
+        // ─── C17: non-finite β guard (bam.r:761-765). ───────────────────────
+        if beta.iter().any(|b| !b.is_finite()) {
+            return Err(GAMError::OptimizationFailed(
+                "fit_pirls_fastreml: non-finite β in outer Newton step".to_string(),
+            ));
+        }
+
+        // ─── C16: compute the fREML score at the new (ρ, log φ, β).
+        // Per bam.r:767:
+        //   crit = (dev/(φ·γ) − ldet_s + ldet_xxs) / 2
+        // where dev for Gaussian-like is `yy − β'f` (residual + penalty)
+        // and for general families is the working penalised RSS.
+        //
+        // We use the closed-form Dp = yy − β'f (matches mgcv's `dev`
+        // assembly when `z` substitutes for `y`).
+        let dev_now = (yy - beta.dot(&f)).max(0.0);
+        let phi_now = log_phi.exp().max(1e-300);
+        let crit_now =
+            (dev_now / (phi_now * config.gamma) - accepted_prop.ldet_s + accepted_prop.ldet_xxs)
+                * 0.5;
+
+        // ─── C11: convergence test (bam.r:678). ─────────────────────────────
+        if outer >= 2 {
+            let rel = (prev_crit - crit_now).abs() / (0.1 + crit_now.abs());
+            let log_phi_step_ok =
+                config.phi_fixed || last_log_phi_step.abs() < config.tol * (log_phi.abs() + 1.0);
+            if rel < config.tol && log_phi_step_ok {
+                converged = true;
+                last_prop = Some(accepted_prop);
+                break;
+            }
+        }
+
+        prev_dev = dev_now;
+        prev_crit = crit_now;
+        last_prop = Some(accepted_prop);
+    }
+
+    let prop = last_prop.expect("at least one outer iter ran");
+
+    // ───── Post-processing (bam.r:782-895). ─────────────────────────────────
+    // Final IRLS step to lock in (w, z) at the converged β so that the
+    // returned X'WX (used for EDF) reflects the final state.
+    let final_eta = fastreml_compute_eta(x, discrete, &beta);
+    let (final_w, final_z) = fastreml_irls_step(y, &final_eta, prior_weights, family);
+    let final_xtwx = compute_xtwx_dispatch(discrete, x, &final_w);
+
+    // EDF = diag(PP · X'WX). For singleton blocks this matches mgcv's
+    // `object$edf` (bam.r:870-880).
+    let f_mat = prop.pp.dot(&final_xtwx);
+    let mut edf = Array1::<f64>::zeros(p);
+    for i in 0..p {
+        edf[i] = f_mat[[i, i]];
+    }
+
+    // Fitted values: μ = inv_link(η) (identity for Gaussian / scat).
+    let fitted_values: Array1<f64> = final_eta.iter().map(|&e| family.inverse_link(e)).collect();
+    let deviance = compute_deviance(y, &fitted_values, family);
+
+    Ok(FastRemlResult {
+        beta,
+        lambda: rho.iter().map(|r| r.exp()).collect(),
+        log_phi,
+        sigma2: log_phi.exp(),
+        pp: prop.pp,
+        edf,
+        fitted_values,
+        linear_predictor: final_eta,
+        final_weights: final_w,
+        working_response: final_z,
+        deviance,
+        gcv_ubre: prev_crit,
+        iterations: iter_used,
+        converged,
+        family_out: family,
+        db_drho: prop.db,
+        grad: prop.grad,
+        hess: prop.hess,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

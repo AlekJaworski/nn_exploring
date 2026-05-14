@@ -496,6 +496,11 @@ pub fn fellner_schall_step(
 pub enum OptimizationMethod {
     REML,
     GCV,
+    /// Fast-REML using mgcv's `bgam.fitd` driver (`Sl.fitChol` Newton on
+    /// log-λ ⊕ log-φ with cached `X'WX`/`X'Wy`). Dispatched directly into
+    /// `pirls::fit_pirls_fastreml`; bypasses the standard inner-Newton
+    /// REML optimiser path. See `docs/B4_DESIGN.md`.
+    FastREML,
 }
 
 /// REML optimization algorithm
@@ -888,6 +893,11 @@ impl SmoothingParameter {
                 self.optimize_reml(y, x, w, penalties, max_iter, tolerance, beta)
             }
             OptimizationMethod::GCV => self.optimize_gcv(y, x, w, penalties, max_iter, tolerance),
+            OptimizationMethod::FastREML => Err(GAMError::InvalidParameter(
+                "FastREML is dispatched directly via fit_pirls_fastreml; \
+                 SmoothingParameter::optimize_with_beta should not be reached"
+                    .to_string(),
+            )),
         }
     }
 
@@ -966,6 +976,11 @@ impl SmoothingParameter {
                 pirls_callback,
             ),
             OptimizationMethod::GCV => self.optimize_gcv(y, x, w, penalties, max_iter, tolerance),
+            OptimizationMethod::FastREML => Err(GAMError::InvalidParameter(
+                "FastREML is dispatched directly via fit_pirls_fastreml; \
+                 SmoothingParameter::optimize_with_beta_xtwx_and_pirls_callback should not be reached"
+                    .to_string(),
+            )),
         }
     }
 
@@ -3000,6 +3015,7 @@ impl SmoothingParameter {
             let score = match method {
                 OptimizationMethod::REML => reml_criterion(y, x, w, lambda, penalty, None)?,
                 OptimizationMethod::GCV => gcv_criterion(y, x, w, lambda, penalty)?,
+                OptimizationMethod::FastREML => reml_criterion(y, x, w, lambda, penalty, None)?,
             };
 
             if score < best_score {
