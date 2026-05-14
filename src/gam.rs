@@ -567,6 +567,12 @@ pub struct GAM {
     /// (mgcv's `scat()` family with no fixed df). Default false means fixed-df
     /// / legacy inner σ² profiling.
     pub tdist_profile: bool,
+    /// When true, build a `DiscreteDesign` (mgcv's `discrete=TRUE` covariate
+    /// binning) on the fit cache and use the scatter-gather X'WX/X'Wy kernels.
+    /// Currently a Rust-only knob (no Python API yet — D11 wires it up). The
+    /// fit cache only actually materialises the design when `n >= 2000`. Default
+    /// false preserves byte-identical behaviour vs the un-binned path.
+    pub discrete_enabled: bool,
     /// REML / LAML score at the converged fit. Populated by store_results
     /// using the same dispatch_reml_score path that the outer optimizer
     /// uses, so it's a consistent objective value across families.
@@ -592,6 +598,7 @@ impl GAM {
             tweedie_profile: false,
             negbin_profile: false,
             tdist_profile: false,
+            discrete_enabled: false,
             reml_score: None,
         }
     }

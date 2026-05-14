@@ -972,7 +972,7 @@ impl PyGAM {
         }
 
         // A = X'WX + Σλ_j S_j   (no ridge — consistent with mgcv-exact)
-        let xtwx = crate::reml::compute_xtwx(design, weights);
+        let xtwx = crate::reml::compute_xtwx_dispatch(None, design, weights);
         let mut a = xtwx.clone();
         for (lam, pen) in lambdas.iter().zip(penalties.iter()) {
             pen.scaled_add_to(&mut a, *lam);
@@ -1002,7 +1002,7 @@ impl PyGAM {
                     .deviance
                     .ok_or_else(|| PyValueError::new_err("Deviance not stored"))?;
                 let n = design.nrows() as f64;
-                let tr_a = crate::reml::compute_xtwx(design, weights)
+                let tr_a = crate::reml::compute_xtwx_dispatch(None, design, weights)
                     .dot(&a_inv)
                     .diag()
                     .sum();
@@ -1174,7 +1174,7 @@ impl PyGAM {
     /// Hessian verification.
     #[cfg(feature = "blas")]
     fn evaluate_scale_at_lambdas(&self, y: PyReadonlyArray1<f64>, lambdas: Vec<f64>) -> PyResult<f64> {
-        use crate::reml::{compute_xtwx, compute_xtwy};
+        use crate::reml::{compute_xtwx_dispatch, compute_xtwy_dispatch};
         use crate::linalg::{solve, inverse};
         let design_matrix = self
             .inner
@@ -1203,12 +1203,12 @@ impl PyGAM {
         }
         let y_array = y.as_array().to_owned();
         let n = y_array.len();
-        let xtwx = compute_xtwx(design_matrix, weights);
+        let xtwx = compute_xtwx_dispatch(None, design_matrix, weights);
         let mut a = xtwx.clone();
         for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
             penalty.scaled_add_to(&mut a, *lambda);
         }
-        let xtwy = compute_xtwy(design_matrix, weights, &y_array);
+        let xtwy = compute_xtwy_dispatch(None, design_matrix, weights, &y_array);
         let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
         let mut a_solve = a.clone();
         a_solve.diag_mut().iter_mut().for_each(|d| *d += 1e-12 * max_diag);
@@ -1720,7 +1720,7 @@ impl PyGAM {
             col_offset += nb;
         }
 
-        let xtwx = crate::reml::compute_xtwx(design, weights);
+        let xtwx = crate::reml::compute_xtwx_dispatch(None, design, weights);
         let mut a = xtwx.clone();
         for (lam, pen) in lambdas.iter().zip(penalties.iter()) {
             pen.scaled_add_to(&mut a, *lam);

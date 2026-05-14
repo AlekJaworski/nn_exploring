@@ -1,9 +1,11 @@
 //! PiRLS (Penalized Iteratively Reweighted Least Squares) algorithm for GAM fitting
 
 use crate::block_penalty::BlockPenalty;
-use crate::discrete::DiscretizedDesign;
+use crate::discrete::{
+    compute_eta_discrete, compute_xtwx_discrete, compute_xtwy_discrete, DiscreteDesign,
+};
 use crate::linalg::solve;
-use crate::reml::compute_xtwx;
+use crate::reml::compute_xtwx_dispatch;
 use crate::{GAMError, Result};
 use ndarray::{Array1, Array2};
 
@@ -1307,7 +1309,7 @@ pub fn fit_pirls_cached(
         };
 
         // X'WX using BLAS (instead of manual triple-nested loop)
-        let xtwx = compute_xtwx(x, &w);
+        let xtwx = compute_xtwx_dispatch(None, x, &w);
 
         // Compute max diagonal for ridge scaling
         let mut max_diag: f64 = 1.0;
@@ -1411,7 +1413,7 @@ fn fit_pirls_gaussian_fast(
                 x.t().dot(x)
             }
         }
-        Some(w) => compute_xtwx(x, w),
+        Some(w) => compute_xtwx_dispatch(None, x, w),
     };
 
     // Compute max diagonal for ridge scaling
@@ -1962,7 +1964,7 @@ pub fn fit_pirls_tdist(
         };
 
         // X'WX via dense triple product
-        let xtwx = crate::reml::compute_xtwx(x, &w);
+        let xtwx = crate::reml::compute_xtwx_dispatch(None, x, &w);
 
         let mut max_diag: f64 = 1.0;
         for i in 0..p {
@@ -2203,7 +2205,7 @@ pub fn fit_pirls_quantile(
     };
 
     // Step 1: Gaussian GAM fit at the supplied λ. Solves (X'X + Σ λᵢSᵢ + ridge·I) β = X'y.
-    let xtx = crate::reml::compute_xtwx(x, &Array1::ones(n));
+    let xtx = crate::reml::compute_xtwx_dispatch(None, x, &Array1::ones(n));
     let mut a_gauss = &xtx + &penalty_total;
     let mut max_diag_g = 1.0_f64;
     for i in 0..p {
@@ -2296,7 +2298,7 @@ pub fn fit_pirls_quantile(
             g[i] = (s - (1.0 - tau)) * inv_sigma;
         }
 
-        let xtwx = crate::reml::compute_xtwx(x, &w);
+        let xtwx = crate::reml::compute_xtwx_dispatch(None, x, &w);
 
         let mut max_diag: f64 = 1.0;
         for i in 0..p {
@@ -2481,7 +2483,7 @@ fn fit_pirls_quantile_perobs_sigma(
             g[i] = (s - (1.0 - tau)) * inv_si;
         }
 
-        let xtwx = compute_xtwx(x, &w);
+        let xtwx = compute_xtwx_dispatch(None, x, &w);
         let mut a = &xtwx + s_total;
         let mut md: f64 = 1.0;
         for i in 0..p {
@@ -2675,7 +2677,7 @@ pub fn fit_pirls_quantile_lss(
     // ── β_loc warm-start: β_init = β_gauss + δ where δ is the
     // per-obs τ-quantile shift in coefficient space (the σ-aware analogue
     // of fit_pirls_quantile's q_r·1 shift). ──
-    let xtx = compute_xtwx(x_loc, &Array1::ones(n));
+    let xtx = compute_xtwx_dispatch(None, x_loc, &Array1::ones(n));
     let mut a_init = &xtx + s_loc_total;
     let mut md: f64 = 1.0;
     for i in 0..p_loc {
@@ -2847,7 +2849,7 @@ pub fn fit_pirls_quantile_lss_fs_tune(
         pen.scaled_add_to(&mut s_total, *lam);
     }
 
-    let xtx = compute_xtwx(x_loc, &Array1::ones(n));
+    let xtx = compute_xtwx_dispatch(None, x_loc, &Array1::ones(n));
     let mut a_init = &xtx + &s_total;
     let mut md: f64 = 1.0;
     for i in 0..p_loc {
@@ -2913,7 +2915,7 @@ pub fn fit_pirls_quantile_lss_fs_tune(
             };
             w[i] = s * (1.0 - s) * inv_si * inv_si;
         }
-        let xtwx = compute_xtwx(x_loc, &w);
+        let xtwx = compute_xtwx_dispatch(None, x_loc, &w);
 
         // A = X'WX + Σ λ_j S_j + ridge ⇒ Cholesky ⇒ A⁻¹.
         let mut a = &xtwx + &s_cur;
@@ -3016,7 +3018,7 @@ pub fn fit_pirls_discretized(
     family: Family,
     max_iter: usize,
     tolerance: f64,
-    disc: &DiscretizedDesign,
+    disc: &DiscreteDesign,
     cached_xtx: Option<&Array2<f64>>,
     prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
@@ -3046,7 +3048,7 @@ pub fn fit_pirls_discretized(
 
     // General IRLS path for non-Gaussian families with discretized X'WX
     let mut beta = Array1::zeros(p);
-    let mut eta = disc.compute_eta(&beta);
+    let mut eta = compute_eta_discrete(disc, &beta);
 
     // Initialize eta based on family
     for i in 0..n {
@@ -3094,7 +3096,7 @@ pub fn fit_pirls_discretized(
         };
 
         // X'WX via scatter-gather: O(n*k + m*k^2) instead of O(n*k^2)
-        let xtwx = disc.compute_xtwx(&w);
+        let xtwx = compute_xtwx_discrete(disc, &w);
 
         let mut max_diag: f64 = 1.0;
         for i in 0..p {
@@ -3107,15 +3109,18 @@ pub fn fit_pirls_discretized(
             a[[i, i]] += ridge;
         }
 
-        // X'Wz via scatter-gather
-        let wz: Array1<f64> = w.iter().zip(z.iter()).map(|(&wi, &zi)| wi * zi).collect();
-        let xtwz = disc.compute_xtwz(&wz);
+        // X'Wz via scatter-gather. compute_xtwy_discrete computes
+        // X̃'·(Σ_i w_i·z_i·1[k=μ]) which is exactly X'Wz when its `w`
+        // arg is the working weights and `y` is z — i.e. the scatter
+        // forms `Σ_i w_i · z_i` per bin, then gathers via X̃'. This is
+        // equivalent to the un-binned X'·diag(w)·z.
+        let xtwz = compute_xtwy_discrete(disc, &w, &z);
 
         let beta_old = beta.clone();
         beta = solve(a, xtwz)?;
 
         // eta via compressed gather
-        eta = disc.compute_eta(&beta);
+        eta = compute_eta_discrete(disc, &beta);
 
         let max_change = beta
             .iter()
@@ -3160,11 +3165,11 @@ pub fn fit_pirls_discretized(
 /// Combines the Gaussian 1-step solve with scatter-gather X'X computation.
 fn fit_pirls_gaussian_discretized(
     y: &Array1<f64>,
-    x: &Array2<f64>,
+    _x: &Array2<f64>,
     lambda: &[f64],
     penalties: &[BlockPenalty],
     p: usize,
-    disc: &DiscretizedDesign,
+    disc: &DiscreteDesign,
     cached_xtx: Option<&Array2<f64>>,
     prior_weights: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
@@ -3177,10 +3182,11 @@ fn fit_pirls_gaussian_discretized(
             if let Some(cached) = cached_xtx {
                 cached.clone()
             } else {
-                disc.compute_xtx()
+                let ones = Array1::ones(n);
+                compute_xtwx_discrete(disc, &ones)
             }
         }
-        Some(w) => disc.compute_xtwx(w),
+        Some(w) => compute_xtwx_discrete(disc, w),
     };
 
     let mut max_diag: f64 = 1.0;
@@ -3208,15 +3214,15 @@ fn fit_pirls_gaussian_discretized(
     let xtwy = match prior_weights {
         None => {
             let ones = Array1::ones(n);
-            disc.compute_xtwy(&ones, y)
+            compute_xtwy_discrete(disc, &ones, y)
         }
-        Some(w) => disc.compute_xtwy(w, y),
+        Some(w) => compute_xtwy_discrete(disc, w, y),
     };
 
     let beta = solve(a, xtwy)?;
 
     // eta via compressed gather
-    let eta = disc.compute_eta(&beta);
+    let eta = compute_eta_discrete(disc, &beta);
     let fitted_values = eta.clone();
 
     let deviance: f64 = match prior_weights {

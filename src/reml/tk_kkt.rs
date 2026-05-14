@@ -7,7 +7,9 @@
 //!   `∂log|H|/∂ρ_k = tr(Tk·KK') + λ_k · tr(A⁻¹·S_k)`
 //! and its derivative.
 
-use super::{assemble_reml_system, compute_b1_ift, compute_xtwx, compute_xtwy};
+use super::{
+    assemble_reml_system, compute_b1_ift, compute_xtwx_dispatch, compute_xtwy_dispatch,
+};
 use crate::block_penalty::BlockPenalty;
 use crate::linalg::{inverse, solve};
 use crate::Result;
@@ -38,7 +40,7 @@ fn compute_tk_kkt_vec(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -222,14 +224,14 @@ pub fn tk_kkt_hessian_analytical(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
         penalty.scaled_add_to(&mut a, *lambda);
     }
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwy = compute_xtwy_dispatch(None, x, w, y);
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;

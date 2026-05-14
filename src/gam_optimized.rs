@@ -4,22 +4,33 @@
 use crate::reml::ScaleParameterMethod;
 use crate::{
     block_penalty::BlockPenalty,
-    // TODO(d4): switch to the new DiscreteDesign / kernel free functions.
-    discrete::DiscretizedDesign,
+    discrete::{compute_xtwx_discrete, DiscreteConfig, DiscreteDesign},
     gam::{SmoothTerm, GAM},
     pirls::{fit_pirls_cached, fit_pirls_discretized, fit_pirls_tdist},
+    reml::compute_xtwx_dispatch,
     smooth::{OptimizationMethod, SmoothingParameter},
     GAMError, Result,
 };
 use ndarray::{s, Array1, Array2};
 use std::time::Instant;
 
+/// Threshold on n above which discretization is built when the caller
+/// has opted in via `discrete_enabled=true`. Matches mgcv's discussion
+/// in `?bam`: discrete=TRUE shines on "very large data sets". Smaller
+/// n: the un-binned GEMM is already fast enough that scatter-gather
+/// overhead doesn't pay off.
+const DISCRETE_MIN_N: usize = 2000;
+
 /// Helper struct to cache computations during GAM fitting
 struct FitCache {
     /// Full design matrix (n x p) — kept for REML gradient/Hessian which need per-row access
     design_matrix: Array2<f64>,
-    /// Discretized design for fast X'WX, X'Wy, eta computation
-    discretized: Option<DiscretizedDesign>,
+    /// Discretized design for fast X'WX, X'Wy, eta computation.
+    /// Built only when the caller opted into the discrete fast path
+    /// AND `n >= DISCRETE_MIN_N`. Otherwise `None`, which makes every
+    /// `compute_xtwx_dispatch(disc.as_ref(), ...)` fall through to the
+    /// un-binned BLAS path (byte-identical to the pre-D4 master).
+    discrete: Option<DiscreteDesign>,
     /// Penalty matrices (one per smooth, block-diagonal representation)
     penalties: Vec<BlockPenalty>,
     /// Penalty scale factors (one per smooth)
@@ -45,7 +56,12 @@ impl FitCache {
     /// step so our reported λ sits in raw-Z'SZ coordinates (closer to
     /// mgcv's but still not identical because mgcv additionally
     /// diagonalises the penalty via nat.param — that's a follow-up).
-    fn new(x: &Array2<f64>, smooth_terms: &mut [SmoothTerm], mgcv_exact: bool) -> Result<Self> {
+    fn new(
+        x: &Array2<f64>,
+        smooth_terms: &mut [SmoothTerm],
+        mgcv_exact: bool,
+        discrete_enabled: bool,
+    ) -> Result<Self> {
         let cache_start = Instant::now();
         let n = x.nrows();
 
@@ -88,21 +104,50 @@ impl FitCache {
             );
         }
 
-        // TODO(d4): rewire to the new DiscreteDesign / compute_xtwx_discrete
-        // kernels (src/discrete.rs after the D1-D3 rewrite). The previous
-        // path used a deprecated uniform-grid binner that diverged from
-        // mgcv's compress.df; D1-D3 ships the correct kernel but the
-        // REML/PIRLS rewire is D4. Until D4 lands, force the un-binned
-        // BLAS path so behaviour is unchanged.
+        // D4: build the discretized design when the caller opted in.
+        // Gate threshold lives at this call site (not on `DiscreteConfig`),
+        // per the design note: `DiscreteConfig` only carries `max_bins_1d`;
+        // the "discretize only when n is big enough" decision belongs here.
+        //
+        // The centring mut-borrow on `smooth_terms` ended above (line 82).
+        // We can now take an immutable borrow safely. `SmoothTerm` is
+        // *not* Clone (boxed dyn), so we don't move it — we pass a
+        // borrowed slice into `DiscreteDesign::new` which evaluates each
+        // smooth's basis on its compressed bin centres internally.
         let disc_start = Instant::now();
         let _ = &covariates;
-        let discretized: Option<DiscretizedDesign> = None;
+        let discrete: Option<DiscreteDesign> = if discrete_enabled && n >= DISCRETE_MIN_N {
+            let cfg = DiscreteConfig::default();
+            Some(DiscreteDesign::new(
+                smooth_terms,
+                x,
+                /* has_intercept = */ true,
+                &cfg,
+            ))
+        } else {
+            None
+        };
         let disc_time = disc_start.elapsed();
 
         if std::env::var("MGCV_PROFILE").is_ok() {
+            let status = match (discrete_enabled, discrete.is_some()) {
+                (false, _) => "disabled".to_string(),
+                (true, false) => format!("skipped (n={} < {})", n, DISCRETE_MIN_N),
+                (true, true) => {
+                    let nrs: Vec<usize> = discrete
+                        .as_ref()
+                        .unwrap()
+                        .marginals
+                        .iter()
+                        .map(|m| m.nr)
+                        .collect();
+                    format!("built (nr={:?}, n={})", nrs, n)
+                }
+            };
             eprintln!(
-                "[PROFILE] Discretization: skipped (D1-D3 landed, awaiting D4 rewire; {:.2}ms)",
-                disc_time.as_secs_f64() * 1000.0
+                "[PROFILE] Discretization: {} ({:.2}ms)",
+                status,
+                disc_time.as_secs_f64() * 1000.0,
             );
         }
 
@@ -189,7 +234,7 @@ impl FitCache {
 
         Ok(FitCache {
             design_matrix: full_design,
-            discretized,
+            discrete,
             penalties,
             penalty_scales,
             xtx: None,
@@ -197,21 +242,24 @@ impl FitCache {
     }
 
     /// Get or compute X'X (cached for efficiency).
-    /// Uses scatter-gather via discretized design when available (much faster for large n).
+    /// Uses scatter-gather via discrete design when available (much faster for large n).
     fn get_xtx(&mut self) -> &Array2<f64> {
         if self.xtx.is_none() {
             let xtx_start = Instant::now();
-            let xtx = if let Some(ref disc) = self.discretized {
-                disc.compute_xtx()
+            let xtx = if let Some(ref disc) = self.discrete {
+                // X'X is the W=I (all-ones weight) case of X'WX. The
+                // scatter-gather kernel handles this branch naturally.
+                let ones = Array1::ones(self.design_matrix.nrows());
+                compute_xtwx_discrete(disc, &ones)
             } else {
                 let xt = self.design_matrix.t().to_owned();
                 xt.dot(&self.design_matrix)
             };
             if std::env::var("MGCV_PROFILE").is_ok() {
                 eprintln!(
-                    "[PROFILE] X'X computation: {:.2}ms (discretized={})",
+                    "[PROFILE] X'X computation: {:.2}ms (discrete={})",
                     xtx_start.elapsed().as_secs_f64() * 1000.0,
-                    self.discretized.is_some(),
+                    self.discrete.is_some(),
                 );
             }
             self.xtx = Some(xtx);
@@ -300,7 +348,7 @@ impl FitCache {
             );
         }
 
-        if let Some(ref disc) = self.discretized {
+        if let Some(ref disc) = self.discrete {
             fit_pirls_discretized(
                 y,
                 &self.design_matrix,
@@ -475,7 +523,12 @@ impl GAM {
         };
 
         // Build cache (design matrix, penalties, normalizations)
-        let mut cache = FitCache::new(x, &mut self.smooth_terms, self.mgcv_exact)?;
+        let mut cache = FitCache::new(
+            x,
+            &mut self.smooth_terms,
+            self.mgcv_exact,
+            self.discrete_enabled,
+        )?;
 
         // Initialize smoothing parameters with chosen algorithm.
         //
@@ -696,8 +749,8 @@ impl GAM {
             let reml_start = Instant::now();
             let reml_xtwx = if is_gaussian {
                 cached_xtx.clone()
-            } else if let Some(ref disc) = cache.discretized {
-                Some(disc.compute_xtwx(&weights))
+            } else if let Some(ref disc) = cache.discrete {
+                Some(compute_xtwx_discrete(disc, &weights))
             } else {
                 None
             };
@@ -771,11 +824,11 @@ impl GAM {
                         prior_weights_ref,
                     )?;
                     callback_pirls_iters += res.iterations;
-                    let xtwx = if let Some(ref disc) = cache_ref.discretized {
-                        disc.compute_xtwx(&res.weights)
-                    } else {
-                        crate::reml::compute_xtwx(&cache_ref.design_matrix, &res.weights)
-                    };
+                    let xtwx = compute_xtwx_dispatch(
+                        cache_ref.discrete.as_ref(),
+                        &cache_ref.design_matrix,
+                        &res.weights,
+                    );
                     let sigma2 = res.sigma2;
                     let df = res.df;
                     Ok(crate::smooth::PirlsRefresh {
@@ -843,11 +896,11 @@ impl GAM {
             // Compute REML/LAML score at converged Newton state — used by
             // wrapper-level θ-profilers / parity probes for true-likelihood
             // extended families (scat, Tweedie, NegBin).
-            let final_xtwx = if let Some(ref disc) = cache.discretized {
-                disc.compute_xtwx(&final_result.weights)
-            } else {
-                crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
-            };
+            let final_xtwx = compute_xtwx_dispatch(
+                cache.discrete.as_ref(),
+                &cache.design_matrix,
+                &final_result.weights,
+            );
             // Working response for the final REML score evaluation:
             //   - Gaussian: z = y (exact).
             //   - TDist gam.fit5 profile path: z = η − dmu/dmu2 (Newton working
@@ -932,8 +985,8 @@ impl GAM {
 
                 let fs_xtwx = if is_gaussian {
                     cached_xtx.clone()
-                } else if let Some(ref disc) = cache.discretized {
-                    Some(disc.compute_xtwx(&weights))
+                } else if let Some(ref disc) = cache.discrete {
+                    Some(compute_xtwx_discrete(disc, &weights))
                 } else {
                     None
                 };
@@ -978,11 +1031,11 @@ impl GAM {
 
                     // Compute REML/LAML score at converged state — read by
                     // wrapper-level σ profilers to drive Brent on σ.
-                    let final_xtwx = if let Some(ref disc) = cache.discretized {
-                        disc.compute_xtwx(&final_result.weights)
-                    } else {
-                        crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
-                    };
+                    let final_xtwx = compute_xtwx_dispatch(
+                        cache.discrete.as_ref(),
+                        &cache.design_matrix,
+                        &final_result.weights,
+                    );
                     smoothing_params.last_score =
                         crate::reml::reml_criterion_multi_cached_mgcv_exact(
                             y,
@@ -1024,11 +1077,11 @@ impl GAM {
 
             // Score even on the no-converge fall-through so wrapper-level
             // σ profilers (Brent on σ) always have a number to compare.
-            let final_xtwx = if let Some(ref disc) = cache.discretized {
-                disc.compute_xtwx(&final_result.weights)
-            } else {
-                crate::reml::compute_xtwx(&cache.design_matrix, &final_result.weights)
-            };
+            let final_xtwx = compute_xtwx_dispatch(
+                cache.discrete.as_ref(),
+                &cache.design_matrix,
+                &final_result.weights,
+            );
             smoothing_params.last_score = crate::reml::reml_criterion_multi_cached_mgcv_exact(
                 y,
                 &cache.design_matrix,

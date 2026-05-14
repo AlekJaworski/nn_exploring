@@ -1179,7 +1179,7 @@ impl SmoothingParameter {
         // supplied for non-Gaussian families — see "PIRLS refresh" below).
         // When a pre-computed X'WX is available (from scatter-gather on
         // discretized design), use it directly to skip the O(n*p²) computation.
-        use crate::reml::compute_xtwx;
+        use crate::reml::compute_xtwx_dispatch;
         let xtwx_start = Instant::now();
 
         // Owned locals — refreshed each Newton iter when `pirls_callback`
@@ -1194,7 +1194,7 @@ impl SmoothingParameter {
         let mut xtwx_local: Array2<f64> = if let Some(cached) = cached_xtwx {
             cached.clone()
         } else {
-            compute_xtwx(x, &w_local)
+            compute_xtwx_dispatch(None, x, &w_local)
         };
 
         // Compute X'Wy (refreshed when w/z change).
@@ -2591,7 +2591,7 @@ impl SmoothingParameter {
         beta: Option<&Array1<f64>>,
         cached_xtwx: Option<&Array2<f64>>,
     ) -> Result<()> {
-        use crate::reml::compute_xtwx;
+        use crate::reml::compute_xtwx_dispatch;
         use ndarray_linalg::{Cholesky, InverseInto, UPLO};
 
         let m = penalties.len();
@@ -2616,7 +2616,7 @@ impl SmoothingParameter {
         let xtwx = if let Some(cached) = cached_xtwx {
             cached.clone()
         } else {
-            compute_xtwx(x, w)
+            compute_xtwx_dispatch(None, x, w)
         };
 
         let lambdas = self.lambda.clone();

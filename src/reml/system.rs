@@ -8,6 +8,7 @@
 //! port) can adapt to operate on rotated `X / β / rS`.
 
 use crate::block_penalty::BlockPenalty;
+use crate::discrete::{compute_xtwx_discrete, compute_xtwy_discrete, DiscreteDesign};
 use crate::linalg::{inverse, solve};
 use crate::GAMError;
 use crate::Result;
@@ -234,6 +235,48 @@ pub fn compute_xtwy(x: &Array2<f64>, w: &Array1<f64>, y: &Array1<f64>) -> Array1
 
     // Use BLAS matrix-vector product: X'Wy = X_w' * y_w
     x_weighted.t().dot(&y_weighted)
+}
+
+/// Dispatch helper for X'WX assembly — discrete (scatter-gather) when a
+/// `DiscreteDesign` is available, else the full-matrix BLAS path.
+///
+/// This is the single integration point for the `discrete=TRUE` fast
+/// path (mgcv's `XWXd`). When `disc.is_none()` the dispatch is
+/// byte-identical to calling `compute_xtwx(x, w)` directly; the helper
+/// exists so that every REML/PIRLS call site can opt into the fast
+/// path with a single argument change.
+///
+/// Callers without natural access to a `FitCache` (test helpers, some
+/// internal `lib.rs` utilities) should simply pass `None` — they're
+/// off the fit hot path so dispatch fall-through is fine.
+#[inline]
+pub fn compute_xtwx_dispatch(
+    disc: Option<&DiscreteDesign>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+) -> Array2<f64> {
+    match disc {
+        Some(d) => compute_xtwx_discrete(d, w),
+        None => compute_xtwx(x, w),
+    }
+}
+
+/// Dispatch helper for X'Wy assembly — discrete (scatter-gather) when a
+/// `DiscreteDesign` is available, else the full-matrix BLAS path.
+///
+/// Same contract as [`compute_xtwx_dispatch`]: `None` is byte-identical
+/// to `compute_xtwy(x, w, y)`.
+#[inline]
+pub fn compute_xtwy_dispatch(
+    disc: Option<&DiscreteDesign>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    y: &Array1<f64>,
+) -> Array1<f64> {
+    match disc {
+        Some(d) => compute_xtwy_discrete(d, w, y),
+        None => compute_xtwy(x, w, y),
+    }
 }
 
 pub(crate) struct RemlSystem {

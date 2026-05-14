@@ -2,7 +2,8 @@
 
 pub mod system;
 pub use system::{
-    compute_xtwy, compute_xtwx, glm_deviance, ScaleParameterMethod,
+    compute_xtwx, compute_xtwx_dispatch, compute_xtwy, compute_xtwy_dispatch, glm_deviance,
+    ScaleParameterMethod,
 };
 #[cfg(feature = "blas")]
 pub use system::{compute_edf_from_cholesky, compute_xtwx_cholesky};
@@ -97,7 +98,7 @@ pub fn reml_criterion(
     let _p = x.ncols();
 
     // OPTIMIZED: Compute X'WX once and reuse it
-    let xtwx = compute_xtwx(x, w);
+    let xtwx = compute_xtwx_dispatch(None, x, w);
 
     // Compute coefficients if not provided
     let beta_computed;
@@ -105,7 +106,7 @@ pub fn reml_criterion(
         b
     } else {
         // Compute X'Wy directly without forming weighted vectors
-        let xtwy = compute_xtwy(x, w, y);
+        let xtwy = compute_xtwy_dispatch(None, x, w, y);
 
         // Solve: (X'WX + λS)β = X'Wy
         let mut a = xtwx.clone();
@@ -336,12 +337,12 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // in the un-rotated basis and not reusable here.
     let xtwx_owned;
     let xtwx = if reparam_active {
-        xtwx_owned = compute_xtwx(x_use, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x_use, w);
         &xtwx_owned
     } else if let Some(cached) = cached_xtwx {
         cached
     } else {
-        xtwx_owned = compute_xtwx(x_use, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x_use, w);
         &xtwx_owned
     };
     // A = X'WX + ΣλS — NO ridge in score terms. The shared assembly keeps
@@ -418,7 +419,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         if w_score.iter().any(|w| !w.is_finite()) {
             determinant(&system.a)?.ln()
         } else {
-            let xtwx_score = compute_xtwx(x_use, &w_score);
+            let xtwx_score = compute_xtwx_dispatch(None, x_use, &w_score);
             let mut a_score = xtwx_score;
             for (lambda, penalty) in lambdas.iter().zip(pens_use.iter()) {
                 penalty.scaled_add_to(&mut a_score, *lambda);
@@ -732,7 +733,7 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -809,7 +810,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -1175,14 +1176,14 @@ fn tdist_gdi2_native(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
     let mut amat = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         penalty.scaled_add_to(&mut amat, *lambda);
     }
-    let beta = solve(amat.clone(), compute_xtwy(x, w, y_work))?;
+    let beta = solve(amat.clone(), compute_xtwy_dispatch(None, x, w, y_work))?;
     let a_inv = inverse(&amat)?;
     let eta = x.dot(&beta);
     let (det, det2, det3, det4, dth, det_th, det2_th, det3_th, dth2, det_th2, det2_th2) =
@@ -1673,14 +1674,14 @@ fn compute_sigma2_at(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties.iter()) {
         penalty.scaled_add_to(&mut a, *lambda);
     }
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwy = compute_xtwy_dispatch(None, x, w, y);
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;
@@ -1782,7 +1783,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -1799,7 +1800,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
     let beta: Array1<f64> = if let Some(b) = beta_provided {
         b.clone()
     } else {
-        let xtwy = compute_xtwy(x, w, y);
+        let xtwy = compute_xtwy_dispatch(None, x, w, y);
         let mut a_solve = a.clone();
         let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
         let solve_ridge = 1e-12 * max_diag;
@@ -2326,7 +2327,7 @@ pub fn reml_hessian_mgcv_exact_ift(
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -2335,7 +2336,7 @@ pub fn reml_hessian_mgcv_exact_ift(
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
         penalty.scaled_add_to(&mut a, *lambda);
     }
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwy = compute_xtwy_dispatch(None, x, w, y);
     let mut a_solve = a.clone();
     let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
     let solve_ridge = 1e-12 * max_diag;
@@ -2630,7 +2631,7 @@ pub fn reml_criterion_multi_cached(
     let xtwx = if let Some(cached) = cached_xtwx {
         cached
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -2647,7 +2648,7 @@ pub fn reml_criterion_multi_cached(
         b
     } else {
         // OPTIMIZED: Compute X'Wy directly
-        let b = compute_xtwy(x, w, y);
+        let b = compute_xtwy_dispatch(None, x, w, y);
 
         // Add ridge for numerical stability when solving
         let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
@@ -3124,7 +3125,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     // DEBUG: Verify R'R = X'WX + λS
     if std::env::var("MGCV_GRAD_DEBUG").is_ok() {
         let rtr = r_upper.t().dot(&r_upper);
-        let xtwx = compute_xtwx(x, w);
+        let xtwx = compute_xtwx_dispatch(None, x, w);
         let mut expected = xtwx.clone();
         for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
             penalty.scaled_add_to(&mut expected, *lambda);
@@ -3158,7 +3159,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     let xtwx = if let Some(cached) = cached_xtwx {
         cached
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -3166,7 +3167,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached(
     let xtwy = if let Some(cached) = cached_xtwy {
         cached
     } else {
-        xtwy_owned = compute_xtwy(x, w, y);
+        xtwy_owned = compute_xtwy_dispatch(None, x, w, y);
         &xtwy_owned
     };
 
@@ -3358,7 +3359,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached_edf(
     let xtwx = if let Some(cached) = cached_xtwx {
         cached
     } else {
-        xtwx_owned = compute_xtwx(x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
         &xtwx_owned
     };
 
@@ -3391,7 +3392,7 @@ pub fn reml_gradient_multi_qr_blockwise_cached_edf(
     let xtwy = if let Some(cached) = cached_xtwy {
         cached
     } else {
-        xtwy_owned = compute_xtwy(x, w, y);
+        xtwy_owned = compute_xtwy_dispatch(None, x, w, y);
         &xtwy_owned
     };
 
@@ -3621,7 +3622,7 @@ pub fn reml_gradient_multi_cholesky_cached(
     let m = lambdas.len();
 
     // Form A = X'WX + Σλᵢ·Sᵢ directly
-    let mut a = compute_xtwx(x, w);
+    let mut a = compute_xtwx_dispatch(None, x, w);
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
         penalty.scaled_add_to(&mut a, *lambda);
     }
@@ -3643,7 +3644,7 @@ pub fn reml_gradient_multi_cholesky_cached(
     })?;
 
     // Compute beta = A^{-1}·X'Wy using cached factorization
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwy = compute_xtwy_dispatch(None, x, w, y);
     let r_t = r_upper.t().to_owned();
 
     // Solve R'·y = X'Wy, then R·beta = y
@@ -3911,8 +3912,8 @@ pub fn reml_gradient_multi_qr_cached(
     // Instead use solve() calls directly
 
     // Compute coefficients for penalty term
-    let xtwx = compute_xtwx(x, w);
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwx = compute_xtwx_dispatch(None, x, w);
+    let xtwy = compute_xtwy_dispatch(None, x, w, y);
 
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
@@ -4175,8 +4176,8 @@ pub fn reml_gradient_multi_qr_cached_edf(
     let r_t = r_upper.t().to_owned();
 
     // Compute coefficients
-    let xtwx = compute_xtwx(x, w);
-    let xtwy = compute_xtwy(x, w, y);
+    let xtwx = compute_xtwx_dispatch(None, x, w);
+    let xtwy = compute_xtwy_dispatch(None, x, w, y);
 
     let mut a = xtwx.clone();
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
@@ -5756,13 +5757,13 @@ mod tests {
         // reml_criterion_multi uses EDF-based phi with BLAS, so we need a
         // consistent rank-based version for finite differences.
         let reml_rank_based = |lam: &[f64]| -> f64 {
-            let xtwx = compute_xtwx(&x, &w);
+            let xtwx = compute_xtwx_dispatch(None, &x, &w);
             let mut a = xtwx.clone();
             for (lambda, pen) in lam.iter().zip(penalties_blocks.iter()) {
                 pen.scaled_add_to(&mut a, *lambda);
             }
 
-            let b = compute_xtwy(&x, &w, &y);
+            let b = compute_xtwy_dispatch(None, &x, &w, &y);
             let max_diag = a.diag().iter().map(|v| v.abs()).fold(1.0f64, f64::max);
             let ridge_scale = 1e-5 * (1.0 + (lam.len() as f64).sqrt());
             let ridge = ridge_scale * max_diag;
@@ -6024,7 +6025,7 @@ mod tests {
         let family = crate::pirls::Family::Tweedie { p: p_tweedie };
 
         // Reference: full dispatch path (rebuilds linear system each call).
-        let xtwx = compute_xtwx(&x, &w);
+        let xtwx = compute_xtwx_dispatch(None, &x, &w);
         let ref_center = reml_criterion_multi_cached_mgcv_exact(
             &y_orig,
             &x,
@@ -6159,7 +6160,7 @@ mod tests {
         }
         let lambdas = vec![0.5, 0.7];
         let mp = 1 + 2 * d;
-        let xtwx = compute_xtwx(&x, &w);
+        let xtwx = compute_xtwx_dispatch(None, &x, &w);
 
         let theta_to_p = |th: f64| -> f64 {
             let a = 1.001_f64;
