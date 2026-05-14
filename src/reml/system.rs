@@ -485,3 +485,144 @@ impl RemlScoreParts {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// D4 dispatch-helper unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::discrete::{compute_xtwx_discrete, compute_xtwy_discrete, DiscreteDesign,
+        DiscreteMarginal};
+    use ndarray::Array2;
+
+    fn approx_max_abs(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+        let mut m = 0.0f64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            m = m.max((x - y).abs());
+        }
+        m
+    }
+
+    fn approx_max_abs_1d(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
+        let mut m = 0.0f64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            m = m.max((x - y).abs());
+        }
+        m
+    }
+
+    /// `compute_xtwx_dispatch(None, x, w)` must be byte-identical to
+    /// `compute_xtwx(x, w)` — the no-op fall-through that preserves
+    /// existing parity behaviour.
+    #[test]
+    fn dispatch_none_matches_compute_xtwx_byte_identical() {
+        let n = 40usize;
+        let p = 5usize;
+        let mut x = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = ((i as f64) * 0.13 + (j as f64) * 0.71).sin();
+            }
+        }
+        let w: Array1<f64> = (0..n).map(|i| 0.5 + (i as f64).cos().abs()).collect();
+        let xtwx_direct = compute_xtwx(&x, &w);
+        let xtwx_dispatched = compute_xtwx_dispatch(None, &x, &w);
+        // Byte identity: same code path, so bit-for-bit equal.
+        for (a, b) in xtwx_direct.iter().zip(xtwx_dispatched.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(),
+                "dispatch(None) must be byte-identical to compute_xtwx: {} vs {}",
+                a, b);
+        }
+    }
+
+    /// Same for X'Wy.
+    #[test]
+    fn dispatch_none_matches_compute_xtwy_byte_identical() {
+        let n = 40usize;
+        let p = 5usize;
+        let mut x = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[[i, j]] = ((i as f64) * 0.13 + (j as f64) * 0.71).sin();
+            }
+        }
+        let w: Array1<f64> = (0..n).map(|i| 0.5 + (i as f64).cos().abs()).collect();
+        let y: Array1<f64> = (0..n).map(|i| (i as f64) * 0.17).collect();
+        let xtwy_direct = compute_xtwy(&x, &w, &y);
+        let xtwy_dispatched = compute_xtwy_dispatch(None, &x, &w, &y);
+        for (a, b) in xtwy_direct.iter().zip(xtwy_dispatched.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(),
+                "dispatch(None) must be byte-identical to compute_xtwy: {} vs {}",
+                a, b);
+        }
+    }
+
+    /// `compute_xtwx_dispatch(Some(disc), x, w)` must equal
+    /// `compute_xtwx_discrete(disc, w)`. The `x` argument is ignored
+    /// when discrete is enabled (it doesn't appear in the scatter-gather
+    /// kernel) but must be accepted for signature compatibility.
+    #[test]
+    fn dispatch_some_matches_compute_xtwx_discrete() {
+        let n = 60usize;
+        let nr = 5usize;
+        let p = 3usize;
+        let x_d = Array2::from_shape_fn((nr, p), |(mu, c)| {
+            ((mu as f64 + 1.0) * (c as f64 + 1.0) * 0.1).sin()
+        });
+        let indices: Vec<u32> = (0..n).map(|i| (i % nr) as u32).collect();
+        let disc = DiscreteDesign {
+            marginals: vec![DiscreteMarginal {
+                x_d,
+                indices,
+                nr,
+                col_offset: 0,
+                num_basis: p,
+            }],
+            total_basis: p,
+            n,
+        };
+        // Build a dummy full x — the dispatch path with Some(disc) ignores it.
+        let dummy_x = Array2::<f64>::zeros((n, p));
+        let w: Array1<f64> = (0..n).map(|i| 1.0 + 0.5 * (i as f64).cos().abs()).collect();
+
+        let xtwx_direct = compute_xtwx_discrete(&disc, &w);
+        let xtwx_dispatched = compute_xtwx_dispatch(Some(&disc), &dummy_x, &w);
+        let err = approx_max_abs(&xtwx_direct, &xtwx_dispatched);
+        assert!(err < 1e-12,
+            "dispatch(Some) must match compute_xtwx_discrete: max abs err = {}", err);
+    }
+
+    /// Same for X'Wy.
+    #[test]
+    fn dispatch_some_matches_compute_xtwy_discrete() {
+        let n = 60usize;
+        let nr = 5usize;
+        let p = 3usize;
+        let x_d = Array2::from_shape_fn((nr, p), |(mu, c)| {
+            ((mu as f64 + 1.0) * (c as f64 + 1.0) * 0.1).cos()
+        });
+        let indices: Vec<u32> = (0..n).map(|i| (i % nr) as u32).collect();
+        let disc = DiscreteDesign {
+            marginals: vec![DiscreteMarginal {
+                x_d,
+                indices,
+                nr,
+                col_offset: 0,
+                num_basis: p,
+            }],
+            total_basis: p,
+            n,
+        };
+        let dummy_x = Array2::<f64>::zeros((n, p));
+        let w: Array1<f64> = (0..n).map(|i| 1.0 + 0.5 * (i as f64).cos().abs()).collect();
+        let y: Array1<f64> = (0..n).map(|i| (i as f64) * 0.11 - 2.0).collect();
+
+        let xtwy_direct = compute_xtwy_discrete(&disc, &w, &y);
+        let xtwy_dispatched = compute_xtwy_dispatch(Some(&disc), &dummy_x, &w, &y);
+        let err = approx_max_abs_1d(&xtwy_direct, &xtwy_dispatched);
+        assert!(err < 1e-12,
+            "dispatch(Some) must match compute_xtwy_discrete: max abs err = {}", err);
+    }
+}
