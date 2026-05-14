@@ -15,6 +15,11 @@ pub mod tk_kkt;
 #[cfg(feature = "blas")]
 pub use tk_kkt::{tk_kkt_hessian_analytical, tk_kkt_hessian_fd};
 
+#[cfg(feature = "blas")]
+pub mod fastreml;
+#[cfg(feature = "blas")]
+pub use fastreml::{compute_sl_fitchol_step, SlFitCholResult};
+
 pub mod search_vector;
 pub use search_vector::{ExtraKind, ExtraParam, OuterSearchVector};
 #[cfg(feature = "blas")]
