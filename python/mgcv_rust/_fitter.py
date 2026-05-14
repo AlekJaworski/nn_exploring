@@ -314,6 +314,7 @@ class Gam:
         predictor_basis_map: Optional[dict[str, str]] = None,
         consider_categorical: bool = False,
         auto_k: bool = False,
+        discrete: bool = False,
         **kwargs: Any,
     ) -> None:
         self.predictors: Optional[list[str]] = list(predictors) if predictors else None
@@ -351,6 +352,9 @@ class Gam:
         self.predictor_basis_map: dict[str, str] = dict(predictor_basis_map or {})
         self.consider_categorical = consider_categorical
         self.auto_k = auto_k
+        # Opt-in covariate-binning fast path (mgcv's `discrete=TRUE`).
+        # Only takes effect when n >= 2000 — the Rust gate is in FitCache::new.
+        self.discrete = bool(discrete)
 
         # Filled at fit time:
         self._native: Optional[_NativeGAM] = None
@@ -623,6 +627,7 @@ class Gam:
             X_arr, y_arr, k=ks, method="REML", bs="cr",
             pc_values=pc_values, bs_list=bs_list,
             weights=self.sample_weight,
+            discrete=self.discrete,
         )
 
     @staticmethod

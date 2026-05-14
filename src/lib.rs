@@ -329,7 +329,7 @@ impl PyGAM {
     ///     gam = GAM()
     ///     result = gam.fit(X, y, k=[10, 15, 20])
     ///     result = gam.fit(X, y, k=[10, 15, 20], use_edf=True)  # For extreme cases
-    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None, bs_list=None, weights=None))]
+    #[pyo3(signature = (x, y, k, method="REML", bs=None, max_iter=None, use_edf=None, pc_values=None, bs_list=None, weights=None, discrete=None))]
     fn fit<'py>(
         &mut self,
         py: Python<'py>,
@@ -343,9 +343,10 @@ impl PyGAM {
         pc_values: Option<Vec<Option<f64>>>,
         bs_list: Option<Vec<Option<String>>>,
         weights: Option<PyReadonlyArray1<f64>>,
+        discrete: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         // Route to the optimized implementation
-        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list, weights)
+        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list, weights, discrete)
     }
 
     /// Low-level fit method for users who manually configure smooths
@@ -477,7 +478,7 @@ impl PyGAM {
     /// Args:
     ///     algorithm: "newton" (default) or "fellner-schall" (faster, matches bam)
     #[cfg(feature = "blas")]
-    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None, bs_list=None, weights=None))]
+    #[pyo3(signature = (x, y, k, method, bs=None, max_iter=None, use_edf=None, algorithm=None, pc_values=None, bs_list=None, weights=None, discrete=None))]
     fn fit_auto_optimized<'py>(
         &mut self,
         py: Python<'py>,
@@ -492,6 +493,7 @@ impl PyGAM {
         pc_values: Option<Vec<Option<f64>>>,
         bs_list: Option<Vec<Option<String>>>,
         weights: Option<PyReadonlyArray1<f64>>,
+        discrete: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         use crate::gam_optimized::*;
 
@@ -607,6 +609,10 @@ impl PyGAM {
         } else {
             self.inner.prior_weights = None;
         }
+
+        // Opt-in covariate-binning fast path (mgcv's `discrete=TRUE`). Reset
+        // every call so a previous fit can't leak across constructions.
+        self.inner.discrete_enabled = discrete.unwrap_or(false);
 
         // Choose scale method based on use_edf parameter
         let scale_method = if use_edf.unwrap_or(false) {

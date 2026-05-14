@@ -70,8 +70,8 @@ def bench_one(parquet_path: Path, binning: str | None) -> dict:
         "k_default": 10,
         "predictor_basis_map": {c: "parametric" for c in PARAM_COLS},
     }
-    if binning is not None:
-        kwargs["binning"] = binning
+    if binning == "auto":
+        kwargs["discrete"] = True
 
     def fit():
         return Gam(**kwargs).fit(X, y)
