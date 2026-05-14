@@ -302,6 +302,53 @@ def test_tdist_invalid_df():
 
 
 # ------------------------------------------------------------------ #
+# Test 5b: `family="scat"` alias honours df= (regression for #17)     #
+# ------------------------------------------------------------------ #
+
+
+def test_scat_alias_honours_df():
+    """`family="scat"` must behave identically to `family="t-dist"` w.r.t. df.
+
+    Bug history: the wrapper's df-validation and native-construction branches
+    only fired for the exact string ``"t-dist"``. Users passing the mgcv-style
+    alias ``family="scat"`` had their ``df=`` silently dropped (Rust profiled
+    df from the seed of 5.0). This test pins the fix.
+    """
+    X, y, _ = _make_tdist_data(n=300, df=4.0, noise_scale=0.4, seed=6)
+    k_map = {"x0": 10}
+
+    gam_scat = GAMFitter(predictors=["x0"], family="scat", df=4.0, term_k_mapping=k_map)
+    gam_tdist = GAMFitter(predictors=["x0"], family="t-dist", df=4.0, term_k_mapping=k_map)
+    gam_scat.fit(X, y)
+    gam_tdist.fit(X, y)
+
+    pred_scat = gam_scat.predict(X)
+    pred_tdist = gam_tdist.predict(X)
+    np.testing.assert_allclose(pred_scat, pred_tdist, rtol=0.0, atol=1e-10)
+
+
+def test_scat_alias_validates_df():
+    """Construction-time df validation also fires for `family="scat"`."""
+    with pytest.raises(ValueError, match=r"df must be >= 2"):
+        GAMFitter(family="scat", df=1.0)
+    with pytest.raises(ValueError, match=r"df must be <= 100"):
+        GAMFitter(family="scat", df=200.0)
+
+
+def test_df_rejected_for_non_tdist_family():
+    """Passing df= to a family that doesn't profile it is a hard error.
+
+    Previously silently ignored. The wrapper now raises so the user sees the
+    misuse instead of getting a Gaussian/Poisson fit they thought was a
+    df-fixed t-dist fit.
+    """
+    with pytest.raises(ValueError, match=r"df= is only meaningful"):
+        GAMFitter(family="gaussian", df=4.0)
+    with pytest.raises(ValueError, match=r"df= is only meaningful"):
+        GAMFitter(family="poisson", df=4.0)
+
+
+# ------------------------------------------------------------------ #
 # Test 6: Predict (smoke test via native GAM interface)               #
 # ------------------------------------------------------------------ #
 

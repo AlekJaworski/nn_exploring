@@ -334,12 +334,18 @@ class Gam:
         # link=None resolves to the canonical link per family at fit time.
         # Existing callers passing link="identity" / "logit" / etc. keep working.
         self.link = link if link is not None else _CANONICAL_LINK.get(family, "identity")
-        # Validate df for t-dist family at construction time (not just at fit)
-        if df is not None and family == "t-dist":
+        # Validate df for t-dist family at construction time (not just at fit).
+        # `"scat"` is an mgcv-compatible alias for `"t-dist"` — accept both.
+        if df is not None and family in ("t-dist", "scat"):
             if df < 2.0:
                 raise ValueError(f"t-dist df must be >= 2.0, got {df}")
             if df > 100.0:
                 raise ValueError(f"t-dist df must be <= 100.0, got {df}. Use df ∈ [2, 100].")
+        elif df is not None and family not in ("t-dist", "scat"):
+            raise ValueError(
+                f"df= is only meaningful for family='t-dist' (or its mgcv alias 'scat'); "
+                f"got family={family!r}"
+            )
         self.term_k_mapping: dict[str, int] = dict(term_k_mapping or {})
         self.term_pc_mapping: dict[str, float] = dict(term_pc_mapping or {})
         self.predictor_basis_map: dict[str, str] = dict(predictor_basis_map or {})
@@ -569,9 +575,10 @@ class Gam:
             return _NativeGAM(family="gamma", link="log")
         if self.link in (None, "", "identity") and self.family == "gaussian":
             return _NativeGAM()
-        if self.family == "t-dist":
-            # Pass optional df kwarg — Rust side accepts df=None for profiling
-            return _NativeGAM(family="t-dist", df=self.df)
+        if self.family in ("t-dist", "scat"):
+            # Pass optional df kwarg — Rust side accepts df=None for profiling.
+            # `"scat"` is an mgcv-compatible alias; Rust accepts either string.
+            return _NativeGAM(family=self.family, df=self.df)
         if self.family == "tweedie":
             # Pass optional p kwarg — Rust side defaults to 1.5 for fixed-p mode
             return _NativeGAM(family="tweedie", link="log", p=self.tweedie_p)
