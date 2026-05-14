@@ -21,12 +21,18 @@ scat-weighted / Poisson / Binomial / Gamma(log). Tolerances per spec:
     df (scat):   5% rel
     predictions: 1e-3 abs (response scale)
 
-**Known regression scope (B5 follow-up, NOT in B7)**: exponential
-families (Poisson / Binomial / Gamma with non-canonical links) loop
-their score formula's φ-extension through the IRLS-once
-`exp_family_irls_step` helper. B4 noted "score formula's φ-extension
-contract needs validation"; B7 confirms this still holds. Affected
-fixtures are xfail-marked with `b5_followup`.
+**Closed in R6**: Poisson(log) and Binomial(logit) (known-φ families)
+were xfail under B7 because `fit_pirls_fastreml` seeded `log_phi` from
+the sample-variance heuristic for *all* families, then never updated
+it for known-φ families (the log_phi Newton coordinate is gated off
+when `phi_fixed = true`). For Poisson/Binomial mgcv hard-pins
+`log.phi = log(scale)` with `scale = 1` (bam.r:696), so the implied
+φ is 1.0; the 1/φ-weighted score and gradient terms `dev/(φ·γ)` /
+`(rss1+bSb1)/(φ·γ)` were shifted by ~y_var·0.05 relative to mgcv,
+moving the λ optimum the same amount. R6 pins `log_phi = 0` in the
+`phi_fixed = true` branch and both fixtures now hit byte-level β/λ.
+Only the scat-weighted xfail remains, with the pivoted-Cholesky
+follow-up tracked separately.
 """
 
 from __future__ import annotations
@@ -76,14 +82,19 @@ _B7_FIXTURES = [
 # Per-fixture tolerance overrides for cases where exp-family fREML is
 # known to regress vs mgcv (B5 follow-up; see module docstring). We
 # still RUN these as xfail, recording the gap in parity_results.
-_B5_FOLLOWUP_REASON = (
-    "B5 follow-up: exp-family fREML score's φ-extension contract needs "
-    "validation (B4 noted TODO). Poisson/Binomial under fREML hit "
-    "exp_family_irls_step but converge to a different (β, λ) than mgcv's "
-    "bam(method='fREML', discrete=TRUE). Gamma(log) closes byte-for-byte "
-    "so the gap is link-dependent, not family-dependent. Track as R-task."
-)
-
+#
+# **R6 (commit on `worktree-agent-…`) closed the Poisson/Binomial gap**:
+# the bug was in `fit_pirls_fastreml`'s log_phi seed. Known-φ families
+# (Poisson, Binomial, NegBin) have `phi.fixed=TRUE` in mgcv's bam(), and
+# bam.r:696 hard-pins `log.phi = log(scale)`. With `scale = 1` (the
+# user-facing default for these families) the implied φ is 1.0. Our code
+# was seeding `log_phi = log(y_var · 0.05)` unconditionally, then never
+# updating it (because phi_fixed=true gates the log_phi gradient out of
+# the outer Newton step). The score `dev/(φ·γ)` and gradient
+# `(rss1+bSb1)/(φ·γ)` are both 1/φ-scaled, so a bogus φ_seed shifts the
+# λ optimum by the same factor. Pre-fix on the B7 fixtures: Poisson(log)
+# rust λ=95 vs mgcv 160 (41% rel gap); Binomial(logit) ~100× rel gap.
+# Post-fix: β max_abs ≤ 5e-3 on both. xfail mark dropped — see commit log.
 _SCAT_WEIGHTED_REASON = (
     "scat-weighted under fREML: R7 closed the (df, σ²) gap to <0.2% rel by "
     "(a) bumping family_theta min_df 2→3 to match mgcv's scat(min.df=3) "
@@ -104,8 +115,6 @@ _SCAT_WEIGHTED_REASON = (
     "`fastreml-pivoted-chol-for-indefinite-xtwx`."
 )
 _KNOWN_FREML_GAPS = {
-    "1d_poisson_log_n500_k10_cr": _B5_FOLLOWUP_REASON,
-    "2d_binomial_logit_n1000_k10_cr": _B5_FOLLOWUP_REASON,
     "1d_scat_weighted_n300_k10_cr": _SCAT_WEIGHTED_REASON,
 }
 

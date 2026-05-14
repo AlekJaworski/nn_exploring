@@ -3908,14 +3908,31 @@ pub fn fit_pirls_fastreml(
     let mp = mp_signed.max(0) as usize;
 
     // ───── C2/C3: β = 0, η from family, log φ seeded from sample variance ────
+    //
+    // **Known-φ families (Poisson, Binomial, NegBin with fixed θ)**: mgcv's
+    // `bgam.fitd` (bam.r:696) sets `log.phi = log(scale)` when `scale > 0`. The
+    // user-facing `scale=1` default for these families means `log.phi = 0`,
+    // i.e. `φ ≡ 1`. The score formula `crit = (dev/(φ·γ) − ldetS + ldetXXS)/2`
+    // and the gradient term `(rss1+bSb1)/(φ·γ)` are both proportional to `1/φ`,
+    // so seeding `log_phi` from the sample-variance heuristic (which is the
+    // right initial guess for *Gaussian/Gamma* where φ is estimated) shifts the
+    // λ optimum by a `1/φ_seed` factor. Pre-fix on this branch: rust Poisson(log)
+    // λ landed at 95 vs mgcv's 160 (41% rel gap); Binomial(logit) at ~100× rel.
     let mut family = initial_family;
     let mut beta = Array1::<f64>::zeros(p);
     let y_mean: f64 = y.iter().sum::<f64>() / (n as f64).max(1.0);
     let y_var: f64 =
         y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
-    let mut log_phi = config
-        .log_phi_init
-        .unwrap_or_else(|| (y_var * 0.05).max(1e-8).ln());
+    let mut log_phi = config.log_phi_init.unwrap_or_else(|| {
+        if config.phi_fixed {
+            // Known-φ families: φ ≡ 1 per bam.r:696 (`log.phi = log(scale)` with
+            // `scale = 1` for Poisson/Binomial/NegBin). Hard-pin to avoid the
+            // sample-variance heuristic mis-scaling the score.
+            0.0
+        } else {
+            (y_var * 0.05).max(1e-8).ln()
+        }
+    });
 
     // ───── C4: initial smoothing params via mgcv's `initial.sp` analog ───────
     // (bam.r:687). Per-smooth heuristic on the current y / X.
