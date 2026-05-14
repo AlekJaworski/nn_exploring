@@ -1,753 +1,1062 @@
-//! Discretized (compressed) basis representation for efficient GAM fitting.
+//! Covariate-binning (a.k.a. `discrete=TRUE`) fast path — kernel layer.
 //!
-//! This module implements the key optimization from Wood, Li, Shaddick & Augustin (2017):
-//! instead of storing the full n x k basis matrix for each smooth term, we bin
-//! covariate values into a smaller grid and store only the unique (or binned) rows.
+//! This is the port of mgcv's `discrete=TRUE` machinery (`compress.df`,
+//! `discrete.mf`, `XWXd`, `XWyd`, `Xbd`). See
+//! `docs/DISCRETE_BINNING_DESIGN.md` for the math and the rationale for
+//! replacing the previous (buggy uniform-grid) implementation.
 //!
-//! For a smooth term with n observations and k basis functions:
-//! - Full storage: n x k matrix, O(n*k) memory
-//! - Compressed: m x k matrix + n-length index array, O(m*k + n) memory
-//!   where m << n (typically m ~ 200-1000)
+//! Scope (D1-D3 of the design doc):
+//!   1. `compress_1d` — mirrors `mgcv:::compress.df`: exact unique-row
+//!      dedup when `nunique ≤ max_bins`, quantile (equal-width-grid) binning
+//!      otherwise. The 1-D `max_bins` default is `1000`.
+//!   2. `DiscreteMarginal` + `DiscreteDesign::new` — per-smooth / per-
+//!      parametric-column compressed marginals plus an intercept marginal.
+//!      Mirrors mgcv's `(Xd, kd, ks, nr)` quadruple.
+//!   3. `compute_xtwx_discrete`, `compute_xtwy_discrete`,
+//!      `compute_eta_discrete` — the scatter-gather kernels. They match
+//!      the un-binned BLAS path (`reml::compute_xtwx`, `compute_xtwy`,
+//!      `X · β`) to 1e-12 on pure-dedup fixtures.
 //!
-//! The compressed representation enables:
-//! 1. Scatter-gather X'WX computation: O(n*k + m*k^2) instead of O(n*k^2)
-//! 2. Efficient eta = X*beta: O(m*k + n) instead of O(n*k)
-//! 3. Reduced memory footprint for large n
+//! Out of scope here (handled by D4+): REML rewire, PIRLS integration.
+//! The downstream callers in `gam_optimized.rs` and `pirls.rs` are
+//! stubbed with `todo!()` and a `TODO(d4)` marker — they'll be properly
+//! re-wired when D4 lands.
 
-use ndarray::{s, Array1, Array2, Axis};
+use crate::gam::SmoothTerm;
+use ndarray::{s, Array1, Array2};
 use std::collections::HashMap;
 
-/// A single smooth term's basis stored in compressed (discretized) form.
+/// Configuration for the covariate-binning fast path.
 ///
-/// Instead of an n x k matrix, stores:
-/// - `values`: m x k matrix of unique/binned basis rows (m << n)
-/// - `indices`: n-length array mapping each observation to its compressed row
+/// Mirrors mgcv's per-dim defaults: `m = 1000` for 1-D smooths, `100`
+/// per dim for 2-D, `25` per dim for 3+. Only 1-D is in scope today.
+#[derive(Debug, Clone, Copy)]
+pub struct DiscreteConfig {
+    /// Per-marginal cap on the compressed-row count. Pure-dedup is
+    /// used when `nunique ≤ max_bins_1d`; quantile-grid otherwise.
+    pub max_bins_1d: usize,
+}
+
+impl Default for DiscreteConfig {
+    fn default() -> Self {
+        DiscreteConfig { max_bins_1d: 1000 }
+    }
+}
+
+/// A single smooth's (or parametric column's, or intercept's) compressed
+/// marginal.
+///
+/// Mirrors one column-slab of mgcv's `(Xd, kd, ks, nr)`. The compressed
+/// basis `x_d` lives on the bin centres, *not* on the full n observations
+/// — that's the key memory and assembly-cost saving.
 #[derive(Debug, Clone)]
-pub struct CompressedBasis {
-    /// Unique (or binned) basis rows: m x k matrix
-    pub values: Array2<f64>,
-    /// Mapping from observation index to compressed row: indices[i] gives the row
-    /// in `values` corresponding to observation i
+pub struct DiscreteMarginal {
+    /// Compressed basis values: `m × p` (m = number of unique bins,
+    /// p = basis size of this term).
+    pub x_d: Array2<f64>,
+    /// Per-row bin index, 0-based: `indices[i] ∈ {0, ..., m-1}` for
+    /// every original observation `i`. Length `n`.
     pub indices: Vec<u32>,
-    /// Column offset in the full p-column design matrix
+    /// Number of unique bins (= `x_d.nrows()`).
+    pub nr: usize,
+    /// Column range in the global `β`: `[col_offset, col_offset + num_basis)`.
     pub col_offset: usize,
-    /// Number of basis functions (k) for this term
+    /// Number of basis columns `p` (= `x_d.ncols()`).
     pub num_basis: usize,
 }
 
-/// Configuration for discretization
-#[derive(Debug, Clone, Copy)]
-pub struct DiscretizeConfig {
-    /// Maximum number of unique rows to keep per dimension
-    /// For 1D: ~1000, 2D: ~100 per dim, 3D+: ~25 per dim
-    pub max_unique_1d: usize,
-    /// Minimum number of observations to trigger discretization
-    /// Below this, full storage is used (no benefit to compression)
-    pub min_n_for_discretize: usize,
-}
-
-impl Default for DiscretizeConfig {
-    fn default() -> Self {
-        DiscretizeConfig {
-            max_unique_1d: 1000,
-            min_n_for_discretize: 500,
-        }
-    }
-}
-
-impl CompressedBasis {
-    /// Create a compressed basis from a full n x k basis matrix.
-    ///
-    /// Bins observations by rounding covariate values to a grid, then identifies
-    /// unique rows in the basis matrix. Observations mapping to the same grid point
-    /// share a single compressed row.
-    ///
-    /// # Arguments
-    /// * `full_basis` - The n x k basis matrix evaluated at all observations
-    /// * `covariate` - The raw covariate values (used for binning)
-    /// * `col_offset` - Column offset in the full design matrix
-    /// * `max_bins` - Maximum number of bins (compressed rows)
-    pub fn from_basis_1d(
-        full_basis: &Array2<f64>,
-        covariate: &Array1<f64>,
-        col_offset: usize,
-        max_bins: usize,
-    ) -> Self {
-        let n = full_basis.nrows();
-        let k = full_basis.ncols();
-
-        // Determine bin edges based on covariate range
-        let x_min = covariate.iter().cloned().fold(f64::INFINITY, f64::min);
-        let x_max = covariate.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let range = x_max - x_min;
-
-        if range < 1e-15 || n <= max_bins {
-            // All values are the same or n is small enough - no binning needed
-            // But we still deduplicate identical rows
-            return Self::from_basis_dedup(full_basis, col_offset);
-        }
-
-        // Number of bins = min(max_bins, number of unique values)
-        let n_bins = max_bins.min(n);
-        let bin_width = range / n_bins as f64;
-
-        // Assign each observation to a bin
-        let mut bin_indices: Vec<usize> = Vec::with_capacity(n);
-        for i in 0..n {
-            let bin = ((covariate[i] - x_min) / bin_width).floor() as usize;
-            bin_indices.push(bin.min(n_bins - 1)); // clamp to valid range
-        }
-
-        // For each bin, compute the average basis row (or just use the first observation's row)
-        // Using first observation per bin is simpler and what bam() does
-        let mut bin_to_compressed: HashMap<usize, u32> = HashMap::new();
-        let mut compressed_rows: Vec<Vec<f64>> = Vec::new();
-        let mut indices: Vec<u32> = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let bin = bin_indices[i];
-            if let Some(&compressed_idx) = bin_to_compressed.get(&bin) {
-                indices.push(compressed_idx);
-            } else {
-                let compressed_idx = compressed_rows.len() as u32;
-                bin_to_compressed.insert(bin, compressed_idx);
-                compressed_rows.push(full_basis.row(i).to_vec());
-                indices.push(compressed_idx);
-            }
-        }
-
-        let m = compressed_rows.len();
-        let mut values = Array2::zeros((m, k));
-        for (row_idx, row) in compressed_rows.iter().enumerate() {
-            for (col_idx, &val) in row.iter().enumerate() {
-                values[[row_idx, col_idx]] = val;
-            }
-        }
-
-        CompressedBasis {
-            values,
-            indices,
-            col_offset,
-            num_basis: k,
-        }
-    }
-
-    /// Create a compressed basis by deduplicating identical rows.
-    /// Used when n is small or all observations are unique.
-    fn from_basis_dedup(full_basis: &Array2<f64>, col_offset: usize) -> Self {
-        let n = full_basis.nrows();
-        let k = full_basis.ncols();
-
-        // Hash rows by quantizing to find duplicates
-        let mut row_map: HashMap<Vec<i64>, u32> = HashMap::new();
-        let mut compressed_rows: Vec<Vec<f64>> = Vec::new();
-        let mut indices: Vec<u32> = Vec::with_capacity(n);
-
-        for i in 0..n {
-            // Quantize row values for hashing (8 decimal digits of precision)
-            let key: Vec<i64> = (0..k)
-                .map(|j| (full_basis[[i, j]] * 1e8).round() as i64)
-                .collect();
-
-            if let Some(&compressed_idx) = row_map.get(&key) {
-                indices.push(compressed_idx);
-            } else {
-                let compressed_idx = compressed_rows.len() as u32;
-                row_map.insert(key, compressed_idx);
-                compressed_rows.push(full_basis.row(i).to_vec());
-                indices.push(compressed_idx);
-            }
-        }
-
-        let m = compressed_rows.len();
-        let mut values = Array2::zeros((m, k));
-        for (row_idx, row) in compressed_rows.iter().enumerate() {
-            for (col_idx, &val) in row.iter().enumerate() {
-                values[[row_idx, col_idx]] = val;
-            }
-        }
-
-        CompressedBasis {
-            values,
-            indices,
-            col_offset,
-            num_basis: k,
-        }
-    }
-
-    /// Number of compressed (unique) rows
+impl DiscreteMarginal {
     #[inline]
     pub fn num_compressed(&self) -> usize {
-        self.values.nrows()
+        self.nr
     }
 
-    /// Number of observations
     #[inline]
     pub fn num_observations(&self) -> usize {
         self.indices.len()
     }
-
-    /// Compression ratio: n / m
-    #[inline]
-    pub fn compression_ratio(&self) -> f64 {
-        self.num_observations() as f64 / self.num_compressed() as f64
-    }
-
-    /// Expand compressed row for a single observation (for debugging/verification)
-    #[inline]
-    pub fn get_row(&self, obs_idx: usize) -> ndarray::ArrayView1<f64> {
-        let compressed_idx = self.indices[obs_idx] as usize;
-        self.values.row(compressed_idx)
-    }
 }
 
-/// Collection of compressed basis terms forming the full discretized design matrix.
-///
-/// This replaces the full n x p design matrix with a set of per-term compressed
-/// representations, enabling scatter-gather computation of X'WX.
-pub struct DiscretizedDesign {
-    /// Compressed basis for each smooth term
-    pub terms: Vec<CompressedBasis>,
-    /// Total number of basis functions (p = sum of all terms' k)
+/// Full discretized design — one `DiscreteMarginal` per smooth term, one
+/// per parametric column, plus an intercept marginal at index 0 when
+/// `has_intercept=true`. Mirrors mgcv's `Xd` list.
+#[derive(Debug, Clone)]
+pub struct DiscreteDesign {
+    /// Marginals in column order: intercept (if any), then one per
+    /// smooth term, ordered to match the global `β` layout.
+    pub marginals: Vec<DiscreteMarginal>,
+    /// Total number of basis columns `p` (= Σ marginal.num_basis).
     pub total_basis: usize,
-    /// Number of observations
+    /// Number of original observations.
     pub n: usize,
 }
 
-impl DiscretizedDesign {
-    /// Create a discretized design from full basis matrices and covariates.
+/// Compress a 1-D covariate column using mgcv's `compress.df` strategy.
+///
+/// Returns `(per_row_bin_index, bin_centres)`:
+///   - `per_row_bin_index[i] ∈ {0, ..., m-1}` for every original row `i`.
+///   - `bin_centres` is length `m`. For pure-dedup, these are the unique
+///     observed values (in stable first-occurrence order). For
+///     quantile-grid, these are the equal-width grid midpoints to which
+///     observations were snapped.
+///
+/// Regime: pure-dedup when `nunique(x_col) ≤ max_bins`; quantile-grid
+/// (`kx = round((x - xmin) / dx)`, `dx = range / max_bins`) otherwise.
+pub fn compress_1d(x_col: &Array1<f64>, max_bins: usize) -> (Vec<u32>, Vec<f64>) {
+    let n = x_col.len();
+    assert!(max_bins >= 1, "compress_1d: max_bins must be ≥ 1");
+
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Pass 1: count unique values via the bit-pattern hash, stable
+    // first-occurrence order.
+    let mut value_to_bin: HashMap<u64, u32> = HashMap::with_capacity(n.min(max_bins * 2));
+    let mut centres: Vec<f64> = Vec::new();
+    let mut indices: Vec<u32> = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let v = x_col[i];
+        let key = f64_bit_key(v);
+        match value_to_bin.get(&key) {
+            Some(&bin) => indices.push(bin),
+            None => {
+                let bin = centres.len() as u32;
+                value_to_bin.insert(key, bin);
+                centres.push(v);
+                indices.push(bin);
+            }
+        }
+    }
+
+    if centres.len() <= max_bins {
+        // Regime 1: pure dedup. Zero approximation error.
+        return (indices, centres);
+    }
+
+    // Regime 2: quantile-grid binning. Equal-width snap into max_bins
+    // grid cells. mgcv (compress.df, R/bam.r):
+    //   xl <- range(x); dx <- diff(xl) / m
+    //   kx <- round((x - xl[1]) / dx) + 1
+    // We use 0-based; otherwise identical. The resulting kx ∈ {0..m}
+    // (inclusive — `m+1` cells), so we have at most `m+1` distinct
+    // bin indices. mgcv lives with that off-by-one; so do we.
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    for &v in x_col.iter() {
+        if v < x_min {
+            x_min = v;
+        }
+        if v > x_max {
+            x_max = v;
+        }
+    }
+    let range = x_max - x_min;
+    if range <= 0.0 || !range.is_finite() {
+        // All values equal (after dedup we wouldn't be here, but be
+        // defensive). Fall back to a single bin.
+        return (vec![0u32; n], vec![x_min]);
+    }
+    let dx = range / max_bins as f64;
+
+    // Snap each observation, then dedup the snapped values exactly.
+    let mut snap_to_bin: HashMap<u32, u32> = HashMap::new();
+    let mut snap_centres: Vec<f64> = Vec::new();
+    let mut snap_indices: Vec<u32> = Vec::with_capacity(n);
+    for &v in x_col.iter() {
+        // `kx = round((v - xmin) / dx)` — kx ∈ {0..max_bins} inclusive.
+        let kx_f = ((v - x_min) / dx).round();
+        // Clamp to the valid range for safety against floating-point
+        // boundary slop. kx ∈ {0..max_bins} is the natural mgcv range.
+        let kx = kx_f
+            .max(0.0)
+            .min(max_bins as f64)
+            .min(u32::MAX as f64) as u32;
+        match snap_to_bin.get(&kx) {
+            Some(&bin) => snap_indices.push(bin),
+            None => {
+                let bin = snap_centres.len() as u32;
+                snap_to_bin.insert(kx, bin);
+                let centre = x_min + (kx as f64) * dx;
+                snap_centres.push(centre);
+                snap_indices.push(bin);
+            }
+        }
+    }
+
+    (snap_indices, snap_centres)
+}
+
+/// Stable bit-pattern key for hashing f64s. NaN keys are mapped to the
+/// canonical quiet-NaN bit pattern so all NaNs collide; -0.0 and +0.0
+/// map to the same key.
+#[inline]
+fn f64_bit_key(v: f64) -> u64 {
+    if v.is_nan() {
+        return u64::MAX;
+    }
+    if v == 0.0 {
+        // Both +0.0 and -0.0 → key 0.
+        return 0;
+    }
+    v.to_bits()
+}
+
+impl DiscreteDesign {
+    /// Build a `DiscreteDesign` from the list of smooth terms and the
+    /// raw covariate matrix.
     ///
-    /// # Arguments
-    /// * `basis_matrices` - Per-term basis matrices (each n x k_i)
-    /// * `covariates` - Per-term covariate vectors
-    /// * `config` - Discretization configuration
-    /// * `has_intercept` - When true, prepend a unit column at column 0
-    ///   modelled as a "virtual intercept term": single-bin CompressedBasis
-    ///   with values=[[1.0]] and indices=[0; n]. This makes the existing
-    ///   scatter-gather paths handle the leading intercept column for free
-    ///   (X'WX[0,0] = Σw, X'WX[0,j]/X'Wy[0]/eta intercept contribution all
-    ///   work out without special-casing).
+    /// Layout (matching `gam_optimized::FitCache::new`):
+    ///   1. Intercept marginal at index 0 (single 1.0 bin, indices all
+    ///      zero) when `has_intercept=true`.
+    ///   2. One marginal per smooth term, in input order. For each
+    ///      smooth we compress its covariate column via `compress_1d`
+    ///      and evaluate the basis on the **bin centres** (not the
+    ///      full n original observations) — that's the cheap path.
+    ///
+    /// Parametric terms (which carry `is_random_effect=true` per the
+    /// 0.14.0 convention in `SmoothTerm::parametric`) flow through the
+    /// same compress-then-evaluate pipeline. For a 0/1 indicator this
+    /// naturally produces a 2-bin marginal; for a level-encoded
+    /// integer column it produces one bin per unique level.
+    ///
+    /// Constraint matrices (sum-to-zero `Z`, pc-anchoring) are honoured
+    /// because we go through `SmoothTerm::evaluate`, which applies the
+    /// stored `constraint_matrix` after the raw basis eval.
     pub fn new(
-        basis_matrices: &[Array2<f64>],
-        covariates: &[Array1<f64>],
-        config: &DiscretizeConfig,
+        smooth_terms: &[SmoothTerm],
+        x: &Array2<f64>,
         has_intercept: bool,
+        config: &DiscreteConfig,
     ) -> Self {
-        let n = basis_matrices[0].nrows();
-        let mut terms = Vec::with_capacity(basis_matrices.len() + 1);
-        let mut col_offset = 0;
+        let n = x.nrows();
+        let mut marginals: Vec<DiscreteMarginal> = Vec::with_capacity(smooth_terms.len() + 1);
+        let mut total_basis: usize = 0;
 
         if has_intercept {
-            terms.push(CompressedBasis {
-                values: Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(),
+            marginals.push(DiscreteMarginal {
+                x_d: Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(),
                 indices: vec![0u32; n],
+                nr: 1,
                 col_offset: 0,
                 num_basis: 1,
             });
-            col_offset = 1;
+            total_basis += 1;
         }
 
-        for (basis, covariate) in basis_matrices.iter().zip(covariates.iter()) {
-            let k = basis.ncols();
-            let max_bins = config.max_unique_1d;
+        for (i, smooth) in smooth_terms.iter().enumerate() {
+            let x_col = x.column(i).to_owned();
+            let (indices, centres) = compress_1d(&x_col, config.max_bins_1d);
+            let centres_arr = Array1::from(centres);
 
-            let compressed = if n >= config.min_n_for_discretize {
-                CompressedBasis::from_basis_1d(basis, covariate, col_offset, max_bins)
-            } else {
-                CompressedBasis::from_basis_dedup(basis, col_offset)
-            };
+            // Evaluate the basis on the *bin centres* — this is the
+            // m × p compressed basis. SmoothTerm::evaluate applies the
+            // constraint matrix (Z or pc-anchor) internally.
+            let x_d = smooth
+                .evaluate(&centres_arr)
+                .expect("DiscreteDesign::new: basis evaluation on bin centres failed");
+            let num_basis = x_d.ncols();
+            let nr = x_d.nrows();
 
-            terms.push(compressed);
-            col_offset += k;
+            marginals.push(DiscreteMarginal {
+                x_d,
+                indices,
+                nr,
+                col_offset: total_basis,
+                num_basis,
+            });
+            total_basis += num_basis;
         }
 
-        DiscretizedDesign {
-            terms,
-            total_basis: col_offset,
+        DiscreteDesign {
+            marginals,
+            total_basis,
             n,
         }
     }
 
-    /// Compute X'WX using the scatter-gather algorithm.
-    ///
-    /// This is the core optimization from bam()'s XWXd() function.
-    /// Instead of the naive O(n*p^2) computation, we use:
-    ///
-    /// For each pair of term blocks (a, b):
-    ///   For each column j of block b:
-    ///     1. SCATTER: accumulate weighted basis values into compressed buckets
-    ///        temp_a[idx_a[i]] += w[i] * X_b[idx_b[i], j]   for i in 0..n  -- O(n)
-    ///     2. GATHER: compute block of X'WX via compressed matrix product
-    ///        X'WX[a_cols, b_col_j] = X_a_compressed.t() @ temp_a           -- O(m_a * k_a)
-    ///
-    /// Total: O(n * p + sum_a(m_a * k_a * p))  instead of  O(n * p^2)
-    /// For typical cases where m_a << n, this is much faster.
-    pub fn compute_xtwx(&self, w: &Array1<f64>) -> Array2<f64> {
-        let p = self.total_basis;
-        let n = self.n;
-        let mut xtwx = Array2::zeros((p, p));
-
-        let num_terms = self.terms.len();
-
-        for a in 0..num_terms {
-            let term_a = &self.terms[a];
-            let m_a = term_a.num_compressed();
-            let k_a = term_a.num_basis;
-            let off_a = term_a.col_offset;
-
-            for b in a..num_terms {
-                let term_b = &self.terms[b];
-                let k_b = term_b.num_basis;
-                let off_b = term_b.col_offset;
-
-                // For each column j of block b, scatter weighted values into
-                // term_a's compressed buckets, then gather via matrix product
-                for j in 0..k_b {
-                    // SCATTER: accumulate w[i] * X_b[idx_b[i], j] into buckets for term_a
-                    let mut temp = vec![0.0f64; m_a];
-                    for i in 0..n {
-                        let idx_a = term_a.indices[i] as usize;
-                        let idx_b = term_b.indices[i] as usize;
-                        temp[idx_a] += w[i] * term_b.values[[idx_b, j]];
-                    }
-
-                    // GATHER: X'WX[a_cols, b_col_j] = X_a_compressed.t() @ temp
-                    // This is a matrix-vector product: (k_a x m_a) @ (m_a) = (k_a)
-                    for ia in 0..k_a {
-                        let mut sum = 0.0f64;
-                        for im in 0..m_a {
-                            sum += term_a.values[[im, ia]] * temp[im];
-                        }
-                        xtwx[[off_a + ia, off_b + j]] = sum;
-
-                        // Fill symmetric part
-                        if a != b {
-                            xtwx[[off_b + j, off_a + ia]] = sum;
-                        }
-                    }
-                }
-
-                // For the diagonal block (a == b), fill the lower triangle
-                if a == b {
-                    for ia in 0..k_a {
-                        for ja in 0..ia {
-                            xtwx[[off_a + ia, off_a + ja]] = xtwx[[off_a + ja, off_a + ia]];
-                        }
-                    }
-                }
-            }
-        }
-
-        xtwx
-    }
-
-    /// Compute X'Wy using scatter-gather.
-    ///
-    /// For each term a:
-    ///   1. SCATTER: temp_a[idx_a[i]] += w[i] * y[i]   for i in 0..n  -- O(n)
-    ///   2. GATHER: X'Wy[a_cols] = X_a_compressed.t() @ temp_a         -- O(m_a * k_a)
-    pub fn compute_xtwy(&self, w: &Array1<f64>, y: &Array1<f64>) -> Array1<f64> {
-        let p = self.total_basis;
-        let n = self.n;
-        let mut xtwy = Array1::zeros(p);
-
-        for term in &self.terms {
-            let m = term.num_compressed();
-            let k = term.num_basis;
-            let off = term.col_offset;
-
-            // SCATTER: accumulate w[i] * y[i] into compressed buckets
-            let mut temp = vec![0.0f64; m];
-            for i in 0..n {
-                let idx = term.indices[i] as usize;
-                temp[idx] += w[i] * y[i];
-            }
-
-            // GATHER: X'Wy[a_cols] = X_compressed.t() @ temp
-            for j in 0..k {
-                let mut sum = 0.0f64;
-                for im in 0..m {
-                    sum += term.values[[im, j]] * temp[im];
-                }
-                xtwy[off + j] = sum;
-            }
-        }
-
-        xtwy
-    }
-
-    /// Compute eta = X * beta efficiently using compressed storage.
-    ///
-    /// Instead of materializing the full n x p design matrix:
-    ///   For each term j:
-    ///     eta_j_compressed = X_j_compressed @ beta_j    (m_j x k_j times k_j = m_j vector)
-    ///     eta[i] += eta_j_compressed[idx_j[i]]          (gather via index)
-    ///
-    /// Total: O(sum(m_j * k_j) + n * d) instead of O(n * p)
-    pub fn compute_eta(&self, beta: &Array1<f64>) -> Array1<f64> {
-        let n = self.n;
-        let mut eta = Array1::zeros(n);
-
-        for term in &self.terms {
-            let k = term.num_basis;
-            let off = term.col_offset;
-
-            // Extract this term's coefficients
-            let beta_j = beta.slice(s![off..off + k]);
-
-            // Compute compressed eta: m x k times k = m vector
-            let eta_compressed = term.values.dot(&beta_j);
-
-            // GATHER: scatter compressed eta to full observations
-            for i in 0..n {
-                let idx = term.indices[i] as usize;
-                eta[i] += eta_compressed[idx];
-            }
-        }
-
-        eta
-    }
-
-    /// Compute X'Wz for PiRLS where z = w * y (working response already weighted).
-    /// Same as compute_xtwy but with pre-weighted values.
-    pub fn compute_xtwz(&self, wz: &Array1<f64>) -> Array1<f64> {
-        let p = self.total_basis;
-        let n = self.n;
-        let mut xtwz = Array1::zeros(p);
-
-        for term in &self.terms {
-            let m = term.num_compressed();
-            let k = term.num_basis;
-            let off = term.col_offset;
-
-            // SCATTER: accumulate wz[i] into compressed buckets
-            let mut temp = vec![0.0f64; m];
-            for i in 0..n {
-                let idx = term.indices[i] as usize;
-                temp[idx] += wz[i];
-            }
-
-            // GATHER
-            for j in 0..k {
-                let mut sum = 0.0f64;
-                for im in 0..m {
-                    sum += term.values[[im, j]] * temp[im];
-                }
-                xtwz[off + j] = sum;
-            }
-        }
-
-        xtwz
-    }
-
-    /// Materialize the full n x p design matrix (for fallback/verification).
-    ///
-    /// This is O(n*p) and should only be used for debugging or when the
-    /// discretized path is not applicable.
+    /// Materialise the full `n × p` design matrix from the compressed
+    /// marginals. **Only for parity / debugging** — defeats the whole
+    /// point of binning if called in the hot path.
     pub fn to_full_matrix(&self) -> Array2<f64> {
         let n = self.n;
         let p = self.total_basis;
         let mut full = Array2::zeros((n, p));
-
-        for term in &self.terms {
-            let k = term.num_basis;
-            let off = term.col_offset;
-
+        for marg in &self.marginals {
+            let off = marg.col_offset;
+            let p_j = marg.num_basis;
             for i in 0..n {
-                let idx = term.indices[i] as usize;
-                for j in 0..k {
-                    full[[i, off + j]] = term.values[[idx, j]];
+                let bin = marg.indices[i] as usize;
+                for c in 0..p_j {
+                    full[[i, off + c]] = marg.x_d[[bin, c]];
                 }
             }
         }
-
         full
     }
+}
 
-    /// Compute X'X using scatter-gather (for Gaussian family where W = I).
-    /// Specialization of compute_xtwx with w = 1.
-    pub fn compute_xtx(&self) -> Array2<f64> {
-        let ones = Array1::ones(self.n);
-        self.compute_xtwx(&ones)
+/// Compressed `X'WX` assembly (mgcv's `XWXd`).
+///
+/// Returns the same `p × p` matrix as
+/// `reml::compute_xtwx(disc.to_full_matrix(), w)`, matching to 1e-12 on
+/// pure-dedup fixtures (no approximation at this layer).
+///
+/// Two block patterns (see §1.2 of the design doc):
+///
+///   - **Diagonal block** (a == b): `t[μ] = Σ_{i: k_a[i]=μ} w_i`;
+///     result = `X̃_a' · diag(t) · X̃_a` via a single GEMM with `t`
+///     applied as a row scale. Cost: `O(n + m_a · p_a²)`.
+///   - **Off-diagonal** (a != b): build `T[μ, ν] = Σ_i w_i ·
+///     1[k_a[i]=μ ∧ k_b[i]=ν]`; result = `X̃_a' · T · X̃_b`.
+///     T is kept dense; for our small m (≤ 1000) this is fine.
+///     Cost: `O(n + m_a · m_b · (p_a + p_b))`.
+///
+/// The full assembly fills both upper and lower triangles (symmetric
+/// matrix; matches the canonical `compute_xtwx` output).
+pub fn compute_xtwx_discrete(disc: &DiscreteDesign, w: &Array1<f64>) -> Array2<f64> {
+    let p = disc.total_basis;
+    let n = disc.n;
+    assert_eq!(w.len(), n, "compute_xtwx_discrete: w length mismatch");
+
+    let mut xtwx = Array2::<f64>::zeros((p, p));
+    let num_marg = disc.marginals.len();
+
+    for a in 0..num_marg {
+        let m_a = &disc.marginals[a];
+        let off_a = m_a.col_offset;
+        let p_a = m_a.num_basis;
+        let nr_a = m_a.nr;
+
+        // Diagonal block — row-scaled GEMM.
+        // t[μ] = Σ_{i: k_a[i]=μ} w_i
+        let mut t = vec![0.0f64; nr_a];
+        for i in 0..n {
+            let mu = m_a.indices[i] as usize;
+            t[mu] += w[i];
+        }
+        // Form X̃_a' · diag(t) · X̃_a.
+        // Implementation: scale a copy of X̃_a row-wise by t, then
+        // multiply X̃_a' against it. ndarray .dot uses BLAS GEMM under
+        // the `blas` feature.
+        let mut scaled = m_a.x_d.clone();
+        for mu in 0..nr_a {
+            let tmu = t[mu];
+            if tmu == 0.0 {
+                // Zero out the row to be explicit (clone might keep
+                // values that would otherwise contribute zero anyway,
+                // but make the contract obvious).
+                for c in 0..p_a {
+                    scaled[[mu, c]] = 0.0;
+                }
+            } else {
+                for c in 0..p_a {
+                    scaled[[mu, c]] *= tmu;
+                }
+            }
+        }
+        let block_aa = m_a.x_d.t().dot(&scaled);
+        // Write into xtwx[off_a..off_a+p_a, off_a..off_a+p_a].
+        for r in 0..p_a {
+            for c in 0..p_a {
+                xtwx[[off_a + r, off_a + c]] = block_aa[[r, c]];
+            }
+        }
+
+        for b in (a + 1)..num_marg {
+            let m_b = &disc.marginals[b];
+            let off_b = m_b.col_offset;
+            let p_b = m_b.num_basis;
+            let nr_b = m_b.nr;
+
+            // Build T[μ, ν] = Σ_i w_i · 1[k_a[i]=μ ∧ k_b[i]=ν].
+            let mut t_mat = Array2::<f64>::zeros((nr_a, nr_b));
+            for i in 0..n {
+                let mu = m_a.indices[i] as usize;
+                let nu = m_b.indices[i] as usize;
+                t_mat[[mu, nu]] += w[i];
+            }
+            // block_ab = X̃_a' · T · X̃_b
+            // Compute as (X̃_a' · T) first (p_a × nr_b), then · X̃_b.
+            let xa_t_dot_t = m_a.x_d.t().dot(&t_mat);
+            let block_ab = xa_t_dot_t.dot(&m_b.x_d);
+
+            // Write upper block and mirror to lower.
+            for r in 0..p_a {
+                for c in 0..p_b {
+                    let val = block_ab[[r, c]];
+                    xtwx[[off_a + r, off_b + c]] = val;
+                    xtwx[[off_b + c, off_a + r]] = val;
+                }
+            }
+        }
+    }
+
+    xtwx
+}
+
+/// Compressed `X'Wy` assembly (mgcv's `XWyd`).
+///
+/// Returns the same length-`p` vector as
+/// `reml::compute_xtwy(disc.to_full_matrix(), w, y)`. For each marginal:
+///   `t[μ] = Σ_{i: k[i]=μ} w_i · y_i`,
+///   `(X'Wy)_j = X̃_j' · t`.
+/// Cost: `O(n + Σ_j m_j · p_j)`.
+pub fn compute_xtwy_discrete(
+    disc: &DiscreteDesign,
+    w: &Array1<f64>,
+    y: &Array1<f64>,
+) -> Array1<f64> {
+    let p = disc.total_basis;
+    let n = disc.n;
+    assert_eq!(w.len(), n, "compute_xtwy_discrete: w length mismatch");
+    assert_eq!(y.len(), n, "compute_xtwy_discrete: y length mismatch");
+
+    let mut xtwy = Array1::<f64>::zeros(p);
+    for marg in &disc.marginals {
+        let off = marg.col_offset;
+        let nr = marg.nr;
+        let p_j = marg.num_basis;
+
+        // Scatter: t[μ] = Σ_{i: k[i]=μ} w_i · y_i
+        let mut t = Array1::<f64>::zeros(nr);
+        for i in 0..n {
+            let mu = marg.indices[i] as usize;
+            t[mu] += w[i] * y[i];
+        }
+        // Gather: contribution = X̃_j' · t  (length p_j).
+        let contrib = marg.x_d.t().dot(&t);
+        for c in 0..p_j {
+            xtwy[off + c] = contrib[c];
+        }
+    }
+    xtwy
+}
+
+/// Compressed `η = X β` (mgcv's `Xbd`).
+///
+/// For each marginal:
+///   `ξ_j[μ] = X̃_j[μ, :] · β_j` (one m_j-long vector per marginal),
+///   `η[i]  += ξ_j[k_j[i]]` (gather).
+/// Cost: `O(Σ_j m_j · p_j + n · num_marginals)`.
+pub fn compute_eta_discrete(disc: &DiscreteDesign, beta: &Array1<f64>) -> Array1<f64> {
+    let n = disc.n;
+    assert_eq!(
+        beta.len(),
+        disc.total_basis,
+        "compute_eta_discrete: beta length mismatch (expected {}, got {})",
+        disc.total_basis,
+        beta.len()
+    );
+
+    let mut eta = Array1::<f64>::zeros(n);
+    for marg in &disc.marginals {
+        let off = marg.col_offset;
+        let p_j = marg.num_basis;
+        let beta_j = beta.slice(s![off..off + p_j]);
+        // ξ_j = X̃_j · β_j  (length nr).
+        let xi = marg.x_d.dot(&beta_j);
+        // Scatter into eta.
+        for i in 0..n {
+            let mu = marg.indices[i] as usize;
+            eta[i] += xi[mu];
+        }
+    }
+    eta
+}
+
+// ---------------------------------------------------------------------------
+// Back-compat stubs for the pre-D1-D3 callers in `gam_optimized.rs` and
+// `pirls.rs`. The old `DiscretizedDesign` / `DiscretizeConfig` /
+// `CompressedBasis` types are gone; D4 will rewire the callers properly.
+// Until then we expose minimal stubs so the crate compiles. Every call
+// site uses `todo!()` so any accidental invocation panics loudly.
+//
+// TODO(d4): delete the stubs and rewire the REML/PIRLS hot paths to use
+// the new `compute_xtwx_discrete` / `compute_xtwy_discrete` /
+// `compute_eta_discrete` free functions directly.
+// ---------------------------------------------------------------------------
+
+/// **Removed** — use `DiscreteConfig` instead. Kept as a type alias so
+/// the deprecated callers still parse until D4 rewires them.
+pub type DiscretizeConfig = DiscreteConfig;
+
+impl DiscreteConfig {
+    /// Compatibility constructor — accepts the old `max_unique_1d` /
+    /// `min_n_for_discretize` field names so the existing
+    /// `gam_optimized.rs` literal still parses. The
+    /// `min_n_for_discretize` field is dropped (the caller in
+    /// `gam_optimized.rs` already gates on `n >= 2000` before
+    /// constructing the design, so the field never had teeth).
+    #[doc(hidden)]
+    #[allow(non_snake_case)]
+    pub fn _from_legacy_fields(max_unique_1d: usize, _min_n_for_discretize: usize) -> Self {
+        DiscreteConfig {
+            max_bins_1d: max_unique_1d,
+        }
     }
 }
+
+/// **Removed**. Stub alias so the (now-broken) call sites still typecheck.
+/// Every method panics — D4 rewires them to use `DiscreteDesign` directly.
+pub struct DiscretizedDesign {
+    pub terms: Vec<CompressedBasisStub>,
+    pub total_basis: usize,
+    pub n: usize,
+}
+
+/// Minimal stub matching the field-access surface the old callers
+/// touched (`.num_compressed()`, `.num_observations()`, `.num_basis`,
+/// `.compression_ratio()`). All other methods panic.
+pub struct CompressedBasisStub {
+    pub num_basis: usize,
+}
+
+impl CompressedBasisStub {
+    pub fn num_compressed(&self) -> usize {
+        unreachable!("CompressedBasisStub: D4 not yet rewired")
+    }
+    pub fn num_observations(&self) -> usize {
+        unreachable!("CompressedBasisStub: D4 not yet rewired")
+    }
+    pub fn compression_ratio(&self) -> f64 {
+        unreachable!("CompressedBasisStub: D4 not yet rewired")
+    }
+}
+
+impl DiscretizedDesign {
+    /// **Stub** — panics. D4 rewires the construction site in
+    /// `FitCache::new`. Until then this exists only so the crate parses.
+    pub fn new(
+        _basis_matrices: &[Array2<f64>],
+        _covariates: &[Array1<f64>],
+        _config: &DiscreteConfig,
+        _has_intercept: bool,
+    ) -> Self {
+        // TODO(d4): rewire FitCache::new to call DiscreteDesign::new instead.
+        todo!("DiscretizedDesign::new is deprecated — D4 rewires to DiscreteDesign::new")
+    }
+
+    pub fn compute_xtwx(&self, _w: &Array1<f64>) -> Array2<f64> {
+        todo!("DiscretizedDesign::compute_xtwx — D4 dispatches to compute_xtwx_discrete")
+    }
+    pub fn compute_xtwy(&self, _w: &Array1<f64>, _y: &Array1<f64>) -> Array1<f64> {
+        todo!("DiscretizedDesign::compute_xtwy — D4 dispatches to compute_xtwy_discrete")
+    }
+    pub fn compute_xtwz(&self, _wz: &Array1<f64>) -> Array1<f64> {
+        todo!("DiscretizedDesign::compute_xtwz — D4 dispatches to compute_xtwy_discrete (pre-weighted)")
+    }
+    pub fn compute_xtx(&self) -> Array2<f64> {
+        todo!("DiscretizedDesign::compute_xtx — D4 dispatches to compute_xtwx_discrete with w=1")
+    }
+    pub fn compute_eta(&self, _beta: &Array1<f64>) -> Array1<f64> {
+        todo!("DiscretizedDesign::compute_eta — D4 dispatches to compute_eta_discrete")
+    }
+    pub fn to_full_matrix(&self) -> Array2<f64> {
+        todo!("DiscretizedDesign::to_full_matrix — D4 uses DiscreteDesign::to_full_matrix")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+    use ndarray::{array, Array1, Array2};
+
+    fn approx_max_abs(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+        let mut m = 0.0f64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            m = m.max((x - y).abs());
+        }
+        m
+    }
+
+    fn approx_max_abs_1d(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
+        let mut m = 0.0f64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            m = m.max((x - y).abs());
+        }
+        m
+    }
+
+    // ------------------ D1: compress_1d ------------------
 
     #[test]
-    fn test_compressed_basis_dedup() {
-        // Create a basis with duplicate rows
-        let full = Array2::from_shape_vec(
-            (6, 2),
+    fn compress_1d_pure_dedup() {
+        // 5 unique values repeated; expect 5 bins, indices map back exactly.
+        let x = Array1::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.0, 5.0, 3.0, 2.0, 4.0]);
+        let (idx, centres) = compress_1d(&x, 1000);
+
+        assert_eq!(centres.len(), 5, "expected 5 unique bins");
+        assert_eq!(idx.len(), x.len());
+
+        // Each row's x value must equal the centre at its bin.
+        for i in 0..x.len() {
+            let mu = idx[i] as usize;
+            assert_abs_diff_eq!(x[i], centres[mu], epsilon = 0.0);
+        }
+        // Identical values must share a bin.
+        assert_eq!(idx[0], idx[5]); // both 1.0
+        assert_eq!(idx[4], idx[6]); // both 5.0
+        assert_eq!(idx[2], idx[7]); // both 3.0
+    }
+
+    #[test]
+    fn compress_1d_quantile_grid() {
+        // 2000 unique values in [0,1]; max_bins = 10 forces quantile-grid.
+        let n = 2000usize;
+        let x: Array1<f64> = (0..n).map(|i| i as f64 / (n as f64 - 1.0)).collect();
+        let (idx, centres) = compress_1d(&x, 10);
+
+        assert!(
+            centres.len() <= 11,
+            "quantile grid should give ≤ max_bins+1 (={}) bins, got {}",
+            11,
+            centres.len()
+        );
+        // Every index must point at a valid centre.
+        for &k in &idx {
+            assert!((k as usize) < centres.len());
+        }
+        // Worst-case error bound: |x_orig - x_binned| ≤ dx/2 = range / (2m) = 0.05.
+        for i in 0..n {
+            let mu = idx[i] as usize;
+            assert!(
+                (x[i] - centres[mu]).abs() <= 0.06, // small slop for the 0.05 bound
+                "row {} snapped to centre {}, |Δ|={} exceeds 0.06",
+                i,
+                centres[mu],
+                (x[i] - centres[mu]).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn compress_1d_constant_column() {
+        // All values equal — pure-dedup gives 1 bin.
+        let x = Array1::from(vec![3.0; 100]);
+        let (idx, centres) = compress_1d(&x, 1000);
+        assert_eq!(centres.len(), 1);
+        assert_eq!(centres[0], 3.0);
+        assert!(idx.iter().all(|&k| k == 0));
+    }
+
+    #[test]
+    fn compress_1d_empty() {
+        let x: Array1<f64> = Array1::from(vec![]);
+        let (idx, centres) = compress_1d(&x, 1000);
+        assert!(idx.is_empty());
+        assert!(centres.is_empty());
+    }
+
+    // ------------------ D3: compute_xtwx_discrete (single marginal) ------------------
+
+    #[test]
+    fn compute_xtwx_discrete_diagonal_block_pure_dedup() {
+        // Single smooth, pure-dedup. Result must match the un-binned
+        // X'WX to 1e-12 (no approximation).
+        let n = 50usize;
+        let nr = 5usize;
+        let p = 3usize;
+        // Per-bin basis values (small enough to inspect).
+        let x_d = Array2::from_shape_vec(
+            (nr, p),
             vec![
-                1.0, 2.0, // row 0
-                3.0, 4.0, // row 1
-                1.0, 2.0, // row 2 = row 0
-                3.0, 4.0, // row 3 = row 1
-                5.0, 6.0, // row 4
-                1.0, 2.0, // row 5 = row 0
+                1.0, 0.0, 0.0, 1.0, 0.5, 0.25, 1.0, 1.0, 1.0, 1.0, 1.5, 2.25, 1.0, 2.0, 4.0,
             ],
         )
         .unwrap();
-
-        let cb = CompressedBasis::from_basis_dedup(&full, 0);
-
-        assert_eq!(cb.num_compressed(), 3); // 3 unique rows
-        assert_eq!(cb.num_observations(), 6);
-        assert!(cb.compression_ratio() >= 1.9); // 6/3 = 2.0
-
-        // Verify indices map correctly
-        assert_eq!(cb.indices[0], cb.indices[2]); // rows 0,2,5 same
-        assert_eq!(cb.indices[0], cb.indices[5]);
-        assert_eq!(cb.indices[1], cb.indices[3]); // rows 1,3 same
-    }
-
-    #[test]
-    fn test_compressed_basis_1d() {
-        let n = 1000;
-        let k = 10;
-        let max_bins = 100;
-
-        // Create synthetic covariate and basis
-        let covariate = Array1::linspace(0.0, 1.0, n);
-        let mut full_basis = Array2::zeros((n, k));
-        for i in 0..n {
-            for j in 0..k {
-                full_basis[[i, j]] = (covariate[i] * (j + 1) as f64 * std::f64::consts::PI).sin();
-            }
-        }
-
-        let cb = CompressedBasis::from_basis_1d(&full_basis, &covariate, 0, max_bins);
-
-        assert!(cb.num_compressed() <= max_bins);
-        assert_eq!(cb.num_observations(), n);
-        assert!(cb.compression_ratio() >= 5.0); // should be ~10x
-    }
-
-    #[test]
-    fn test_xtwx_correctness() {
-        // Verify scatter-gather X'WX matches naive computation
-        let n = 200;
-        let k1 = 5;
-        let k2 = 4;
-        let p = k1 + k2;
-
-        // Create two basis matrices
-        let cov1 = Array1::linspace(0.0, 1.0, n);
-        let cov2 = Array1::linspace(-1.0, 1.0, n);
-
-        let mut basis1 = Array2::zeros((n, k1));
-        let mut basis2 = Array2::zeros((n, k2));
-        for i in 0..n {
-            for j in 0..k1 {
-                basis1[[i, j]] = (cov1[i] * (j + 1) as f64).powi(2);
-            }
-            for j in 0..k2 {
-                basis2[[i, j]] = (cov2[i] * (j + 1) as f64).cos();
-            }
-        }
-
-        // Weights
-        let w: Array1<f64> = (0..n).map(|i| 1.0 + (i as f64 * 0.01).sin()).collect();
-
-        // Naive X'WX using full design matrix
-        let mut full_x = Array2::zeros((n, p));
-        full_x.slice_mut(s![.., 0..k1]).assign(&basis1);
-        full_x.slice_mut(s![.., k1..k1 + k2]).assign(&basis2);
-
-        let mut naive_xtwx = Array2::<f64>::zeros((p, p));
-        for i in 0..n {
-            for a in 0..p {
-                for b in 0..p {
-                    naive_xtwx[[a, b]] += full_x[[i, a]] * w[i] * full_x[[i, b]];
-                }
-            }
-        }
-
-        // Discretized X'WX
-        let config = DiscretizeConfig {
-            max_unique_1d: 50,
-            min_n_for_discretize: 100,
+        // Indices cycle through bins.
+        let indices: Vec<u32> = (0..n).map(|i| (i % nr) as u32).collect();
+        let marg = DiscreteMarginal {
+            x_d: x_d.clone(),
+            indices: indices.clone(),
+            nr,
+            col_offset: 0,
+            num_basis: p,
         };
-        let dd = DiscretizedDesign::new(&[basis1, basis2], &[cov1, cov2], &config, false);
-        let sg_xtwx = dd.compute_xtwx(&w);
-
-        // Check agreement (not exact due to binning, but should be close)
-        // For continuous covariates with moderate binning, error should be small
-        let max_err: f64 = naive_xtwx
-            .iter()
-            .zip(sg_xtwx.iter())
-            .map(|(&a, &b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
-        let max_val: f64 = naive_xtwx.iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
-        let rel_err = max_err / max_val.max(1e-10);
-
+        let disc = DiscreteDesign {
+            marginals: vec![marg],
+            total_basis: p,
+            n,
+        };
+        // Reconstruct full X[i, :] = x_d[indices[i], :].
+        let full = disc.to_full_matrix();
+        // Weight vector with structure.
+        let w: Array1<f64> = (0..n).map(|i| 1.0 + (i as f64 * 0.07).sin().abs()).collect();
+        let xtwx_full = crate::reml::compute_xtwx(&full, &w);
+        let xtwx_disc = compute_xtwx_discrete(&disc, &w);
+        let err = approx_max_abs(&xtwx_full, &xtwx_disc);
         assert!(
-            rel_err < 0.1,
-            "X'WX relative error too large: {} (max_err={}, max_val={})",
-            rel_err,
-            max_err,
-            max_val
+            err < 1e-12,
+            "diagonal-block X'WX mismatch: max abs err = {} (expected < 1e-12)",
+            err
         );
     }
 
     #[test]
-    fn test_xtwx_exact_no_binning() {
-        // With n small enough that no binning occurs, X'WX should be exact
-        let n = 20;
-        let k = 3;
+    fn compute_xtwx_discrete_off_diagonal_two_marginals() {
+        // Two marginals with independent bin indices. Reconstruct the
+        // full design and compare X'WX block-by-block.
+        let n = 80usize;
+        // Marginal A: nr=4, p=2.
+        let nr_a = 4usize;
+        let p_a = 2usize;
+        let x_d_a = Array2::from_shape_vec(
+            (nr_a, p_a),
+            vec![1.0, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.5],
+        )
+        .unwrap();
+        let idx_a: Vec<u32> = (0..n).map(|i| (i % nr_a) as u32).collect();
+        // Marginal B: nr=3, p=3.
+        let nr_b = 3usize;
+        let p_b = 3usize;
+        let x_d_b = Array2::from_shape_vec(
+            (nr_b, p_b),
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
+        let idx_b: Vec<u32> = (0..n).map(|i| ((i / nr_a) % nr_b) as u32).collect();
 
-        let cov: Array1<f64> = Array1::linspace(0.0, 1.0, n);
-        let mut basis = Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            for j in 0..k {
-                basis[[i, j]] = cov[i].powi(j as i32);
+        let disc = DiscreteDesign {
+            marginals: vec![
+                DiscreteMarginal {
+                    x_d: x_d_a.clone(),
+                    indices: idx_a.clone(),
+                    nr: nr_a,
+                    col_offset: 0,
+                    num_basis: p_a,
+                },
+                DiscreteMarginal {
+                    x_d: x_d_b.clone(),
+                    indices: idx_b.clone(),
+                    nr: nr_b,
+                    col_offset: p_a,
+                    num_basis: p_b,
+                },
+            ],
+            total_basis: p_a + p_b,
+            n,
+        };
+
+        let full = disc.to_full_matrix();
+        let w: Array1<f64> = (0..n).map(|i| 0.5 + 0.5 * ((i as f64) * 0.13).cos().abs()).collect();
+        let xtwx_full = crate::reml::compute_xtwx(&full, &w);
+        let xtwx_disc = compute_xtwx_discrete(&disc, &w);
+        let err = approx_max_abs(&xtwx_full, &xtwx_disc);
+        assert!(
+            err < 1e-12,
+            "off-diagonal X'WX mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+    }
+
+    #[test]
+    fn compute_xtwx_discrete_intercept_plus_smooth() {
+        // Mimic the production layout: an intercept marginal at index 0
+        // (m=1, x_d=[[1.0]], indices all zero) plus one "smooth" marginal.
+        let n = 60usize;
+        let nr_s = 6usize;
+        let p_s = 4usize;
+        let mut x_d_s = Array2::<f64>::zeros((nr_s, p_s));
+        for mu in 0..nr_s {
+            for c in 0..p_s {
+                x_d_s[[mu, c]] = ((mu as f64 + 1.0) * (c as f64 + 1.0) * 0.1).sin();
             }
         }
+        let idx_s: Vec<u32> = (0..n).map(|i| (i % nr_s) as u32).collect();
 
-        let w = Array1::ones(n);
+        let disc = DiscreteDesign {
+            marginals: vec![
+                DiscreteMarginal {
+                    x_d: Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(),
+                    indices: vec![0u32; n],
+                    nr: 1,
+                    col_offset: 0,
+                    num_basis: 1,
+                },
+                DiscreteMarginal {
+                    x_d: x_d_s.clone(),
+                    indices: idx_s,
+                    nr: nr_s,
+                    col_offset: 1,
+                    num_basis: p_s,
+                },
+            ],
+            total_basis: 1 + p_s,
+            n,
+        };
+        let full = disc.to_full_matrix();
+        // Intercept column must be ones.
+        for i in 0..n {
+            assert_abs_diff_eq!(full[[i, 0]], 1.0, epsilon = 0.0);
+        }
+        let w: Array1<f64> = (0..n)
+            .map(|i| 0.7 + 0.3 * ((i as f64) * 0.21).sin().abs())
+            .collect();
+        let xtwx_full = crate::reml::compute_xtwx(&full, &w);
+        let xtwx_disc = compute_xtwx_discrete(&disc, &w);
+        let err = approx_max_abs(&xtwx_full, &xtwx_disc);
+        assert!(
+            err < 1e-12,
+            "intercept+smooth X'WX mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+    }
 
-        // Naive
-        let naive_xtwx = basis.t().dot(&basis);
+    // ------------------ D3: compute_xtwy_discrete ------------------
 
-        // Discretized (n=20 < min_n_for_discretize=500, so no binning)
-        let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
-        let sg_xtwx = dd.compute_xtwx(&w);
+    #[test]
+    fn compute_xtwy_discrete_single_marginal() {
+        let n = 100usize;
+        let nr = 8usize;
+        let p = 3usize;
+        let mut x_d = Array2::<f64>::zeros((nr, p));
+        for mu in 0..nr {
+            for c in 0..p {
+                x_d[[mu, c]] = ((mu as f64) + 0.1 * (c as f64 + 1.0)).cos();
+            }
+        }
+        let indices: Vec<u32> = (0..n).map(|i| (i % nr) as u32).collect();
+        let disc = DiscreteDesign {
+            marginals: vec![DiscreteMarginal {
+                x_d,
+                indices,
+                nr,
+                col_offset: 0,
+                num_basis: p,
+            }],
+            total_basis: p,
+            n,
+        };
+        let full = disc.to_full_matrix();
+        let w: Array1<f64> = (0..n).map(|i| 1.0 + 0.5 * ((i as f64) * 0.03).sin()).collect();
+        let y: Array1<f64> = (0..n).map(|i| (i as f64) * 0.17 - 3.0).collect();
 
-        for i in 0..k {
-            for j in 0..k {
-                assert_abs_diff_eq!(naive_xtwx[[i, j]], sg_xtwx[[i, j]], epsilon = 1e-10);
+        let xtwy_full = crate::reml::compute_xtwy(&full, &w, &y);
+        let xtwy_disc = compute_xtwy_discrete(&disc, &w, &y);
+        let err = approx_max_abs_1d(&xtwy_full, &xtwy_disc);
+        assert!(
+            err < 1e-12,
+            "X'Wy mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+    }
+
+    #[test]
+    fn compute_xtwy_discrete_two_marginals_plus_intercept() {
+        // Three marginals (intercept + two "smooths") on n=120 rows.
+        let n = 120usize;
+        // Smooth A: nr=5, p=2.
+        let nr_a = 5usize;
+        let p_a = 2usize;
+        let x_d_a = Array2::from_shape_vec(
+            (nr_a, p_a),
+            vec![1.0, 0.0, 1.0, 0.25, 1.0, 0.5, 1.0, 0.75, 1.0, 1.0],
+        )
+        .unwrap();
+        let idx_a: Vec<u32> = (0..n).map(|i| (i % nr_a) as u32).collect();
+        // Smooth B: nr=4, p=3.
+        let nr_b = 4usize;
+        let p_b = 3usize;
+        let mut x_d_b = Array2::<f64>::zeros((nr_b, p_b));
+        for mu in 0..nr_b {
+            for c in 0..p_b {
+                x_d_b[[mu, c]] = ((mu as f64 + 1.0) * (c as f64 + 2.0) * 0.07).sin();
+            }
+        }
+        let idx_b: Vec<u32> = (0..n).map(|i| ((i / nr_a) % nr_b) as u32).collect();
+
+        let disc = DiscreteDesign {
+            marginals: vec![
+                DiscreteMarginal {
+                    x_d: Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(),
+                    indices: vec![0u32; n],
+                    nr: 1,
+                    col_offset: 0,
+                    num_basis: 1,
+                },
+                DiscreteMarginal {
+                    x_d: x_d_a,
+                    indices: idx_a,
+                    nr: nr_a,
+                    col_offset: 1,
+                    num_basis: p_a,
+                },
+                DiscreteMarginal {
+                    x_d: x_d_b,
+                    indices: idx_b,
+                    nr: nr_b,
+                    col_offset: 1 + p_a,
+                    num_basis: p_b,
+                },
+            ],
+            total_basis: 1 + p_a + p_b,
+            n,
+        };
+        let full = disc.to_full_matrix();
+        let w: Array1<f64> = (0..n).map(|i| 0.4 + 0.6 * ((i as f64) * 0.05).cos().abs()).collect();
+        let y: Array1<f64> = (0..n).map(|i| ((i as f64) * 0.11).sin()).collect();
+        let xtwy_full = crate::reml::compute_xtwy(&full, &w, &y);
+        let xtwy_disc = compute_xtwy_discrete(&disc, &w, &y);
+        let err = approx_max_abs_1d(&xtwy_full, &xtwy_disc);
+        assert!(
+            err < 1e-12,
+            "X'Wy multi-marginal mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+    }
+
+    // ------------------ D3: compute_eta_discrete ------------------
+
+    #[test]
+    fn compute_eta_discrete_matches_full_dot() {
+        let n = 90usize;
+        let nr_a = 6usize;
+        let p_a = 3usize;
+        let mut x_d_a = Array2::<f64>::zeros((nr_a, p_a));
+        for mu in 0..nr_a {
+            for c in 0..p_a {
+                x_d_a[[mu, c]] = ((mu as f64 - 2.5) * (c as f64 + 1.0) * 0.2).cos();
+            }
+        }
+        let idx_a: Vec<u32> = (0..n).map(|i| (i % nr_a) as u32).collect();
+        let disc = DiscreteDesign {
+            marginals: vec![
+                DiscreteMarginal {
+                    x_d: Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(),
+                    indices: vec![0u32; n],
+                    nr: 1,
+                    col_offset: 0,
+                    num_basis: 1,
+                },
+                DiscreteMarginal {
+                    x_d: x_d_a,
+                    indices: idx_a,
+                    nr: nr_a,
+                    col_offset: 1,
+                    num_basis: p_a,
+                },
+            ],
+            total_basis: 1 + p_a,
+            n,
+        };
+        let beta = array![0.5, -1.0, 2.0, 0.75];
+        let full = disc.to_full_matrix();
+        let eta_full = full.dot(&beta);
+        let eta_disc = compute_eta_discrete(&disc, &beta);
+        let err = approx_max_abs_1d(&eta_full, &eta_disc);
+        assert!(
+            err < 1e-12,
+            "η mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
+    }
+
+    // ------------------ D2: DiscreteDesign::new on real basis ------------------
+
+    #[test]
+    fn discrete_design_new_roundtrips_via_smooth_term() {
+        // Build a tiny SmoothTerm, run DiscreteDesign::new on a covariate
+        // with duplicates, and check that the resulting design matrix
+        // matches `smooth.evaluate(x_col)` row-for-row.
+        use crate::gam::SmoothTerm;
+        let x_col = Array1::from(vec![
+            0.1, 0.5, 0.9, 0.1, 0.5, 0.5, 0.3, 0.7, 0.9, 0.3,
+        ]);
+        let n = x_col.len();
+        let mut smooth = SmoothTerm::cr_spline_quantile(
+            "x".to_string(),
+            5, // k=5
+            &x_col,
+        )
+        .unwrap();
+        // Apply the sum-to-zero centring so we go through the same
+        // constraint path as the real fit cache.
+        smooth
+            .apply_sum_to_zero_centering(&x_col)
+            .expect("centering failed");
+
+        // Full design on all n rows.
+        let full_basis = smooth.evaluate(&x_col).unwrap();
+
+        // Discretized version (no intercept here — we test only the smooth slab).
+        let x_mat = {
+            let mut m = Array2::<f64>::zeros((n, 1));
+            for i in 0..n {
+                m[[i, 0]] = x_col[i];
+            }
+            m
+        };
+        let config = DiscreteConfig::default();
+        let num_basis_pre = smooth.num_basis();
+        let smooth_list = vec![smooth];
+        let disc = DiscreteDesign::new(&smooth_list, &x_mat, false, &config);
+
+        // nr should be the number of unique x values (5: {0.1, 0.3, 0.5, 0.7, 0.9}).
+        assert_eq!(disc.marginals.len(), 1);
+        let m0 = &disc.marginals[0];
+        assert_eq!(m0.nr, 5, "expected 5 unique x values, got nr={}", m0.nr);
+        assert_eq!(m0.num_basis, num_basis_pre);
+
+        // Reconstructed full design must match the direct evaluation.
+        let full_disc = disc.to_full_matrix();
+        for i in 0..n {
+            for c in 0..num_basis_pre {
+                assert_abs_diff_eq!(full_basis[[i, c]], full_disc[[i, c]], epsilon = 1e-12);
             }
         }
     }
 
     #[test]
-    fn test_eta_computation() {
-        let n = 100;
-        let k = 4;
+    fn discrete_design_xtwx_via_smooth_term_matches_blas() {
+        // End-to-end: build a DiscreteDesign from a real SmoothTerm,
+        // compute X'WX via the scatter-gather kernel, and assert 1e-12
+        // agreement with the un-binned BLAS X'WX.
+        use crate::gam::SmoothTerm;
+        let n = 300usize;
+        // Repeat a small set of unique x values to force pure-dedup.
+        let unique_vals = [0.0_f64, 0.2, 0.4, 0.6, 0.8, 1.0];
+        let x_col: Array1<f64> = (0..n)
+            .map(|i| unique_vals[i % unique_vals.len()])
+            .collect();
+        let mut smooth = SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
+        smooth.apply_sum_to_zero_centering(&x_col).unwrap();
 
-        let cov: Array1<f64> = Array1::linspace(0.0, 1.0, n);
-        let mut basis = Array2::<f64>::zeros((n, k));
+        let mut x_mat = Array2::<f64>::zeros((n, 1));
         for i in 0..n {
-            for j in 0..k {
-                basis[[i, j]] = cov[i].powi(j as i32);
-            }
+            x_mat[[i, 0]] = x_col[i];
         }
-
-        let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
-
-        let beta = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
-
-        // Naive eta = X * beta
-        let naive_eta = basis.dot(&beta);
-
-        // Discretized eta
-        let disc_eta = dd.compute_eta(&beta);
-
+        // Evaluate the full design BEFORE moving the smooth into the
+        // design (SmoothTerm isn't Clone because of the Box<dyn>).
+        let smooth_full = smooth.evaluate(&x_col).unwrap();
+        let p_s = smooth_full.ncols();
+        let config = DiscreteConfig::default();
+        let smooth_list = vec![smooth];
+        let disc = DiscreteDesign::new(&smooth_list, &x_mat, true, &config);
+        let mut full = Array2::<f64>::zeros((n, 1 + p_s));
         for i in 0..n {
-            assert_abs_diff_eq!(naive_eta[i], disc_eta[i], epsilon = 1e-10);
-        }
-    }
-
-    #[test]
-    fn test_xtwy_computation() {
-        let n = 100;
-        let k = 3;
-
-        let cov: Array1<f64> = Array1::linspace(0.0, 1.0, n);
-        let mut basis = Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            for j in 0..k {
-                basis[[i, j]] = cov[i].powi(j as i32);
+            full[[i, 0]] = 1.0;
+            for c in 0..p_s {
+                full[[i, 1 + c]] = smooth_full[[i, c]];
             }
         }
+        let w: Array1<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * ((i as f64) * 0.011).sin())
+            .collect();
 
-        let w = Array1::ones(n);
-        let y: Array1<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
-
-        let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
-
-        // Naive X'Wy = X' * (w .* y) -- with w=1, this is X'y
-        let naive_xtwy = basis.t().dot(&y);
-
-        // Discretized
-        let disc_xtwy = dd.compute_xtwy(&w, &y);
-
-        for j in 0..k {
-            assert_abs_diff_eq!(naive_xtwy[j], disc_xtwy[j], epsilon = 1e-10);
-        }
-    }
-
-    #[test]
-    fn test_to_full_matrix_roundtrip() {
-        let n = 50;
-        let k = 3;
-
-        let cov: Array1<f64> = Array1::linspace(0.0, 1.0, n);
-        let mut basis = Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            for j in 0..k {
-                basis[[i, j]] = cov[i].powi(j as i32);
-            }
-        }
-
-        let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[basis.clone()], &[cov], &config, false);
-
-        let full = dd.to_full_matrix();
-
-        for i in 0..n {
-            for j in 0..k {
-                assert_abs_diff_eq!(basis[[i, j]], full[[i, j]], epsilon = 1e-10);
-            }
-        }
-    }
-
-    #[test]
-    fn test_multi_term_xtwx() {
-        // Test with multiple terms, verifying block structure
-        let n = 100;
-        let k1 = 3;
-        let k2 = 4;
-
-        let cov1: Array1<f64> = Array1::linspace(0.0, 1.0, n);
-        let cov2: Array1<f64> = Array1::linspace(-1.0, 1.0, n);
-
-        let mut b1 = Array2::<f64>::zeros((n, k1));
-        let mut b2 = Array2::<f64>::zeros((n, k2));
-        for i in 0..n {
-            for j in 0..k1 {
-                b1[[i, j]] = cov1[i].powi(j as i32);
-            }
-            for j in 0..k2 {
-                b2[[i, j]] = cov2[i].powi(j as i32);
-            }
-        }
-
-        let w = Array1::ones(n);
-
-        // Build full design matrix
-        let p = k1 + k2;
-        let mut full_x = Array2::zeros((n, p));
-        full_x.slice_mut(s![.., 0..k1]).assign(&b1);
-        full_x.slice_mut(s![.., k1..p]).assign(&b2);
-
-        let naive = full_x.t().dot(&full_x);
-
-        let config = DiscretizeConfig::default();
-        let dd = DiscretizedDesign::new(&[b1, b2], &[cov1, cov2], &config, false);
-        let disc = dd.compute_xtwx(&w);
-
-        for i in 0..p {
-            for j in 0..p {
-                assert_abs_diff_eq!(naive[[i, j]], disc[[i, j]], epsilon = 1e-10);
-            }
-        }
+        let xtwx_full = crate::reml::compute_xtwx(&full, &w);
+        let xtwx_disc = compute_xtwx_discrete(&disc, &w);
+        let err = approx_max_abs(&xtwx_full, &xtwx_disc);
+        assert!(
+            err < 1e-12,
+            "end-to-end X'WX mismatch: max abs err = {} (expected < 1e-12)",
+            err
+        );
     }
 }

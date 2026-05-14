@@ -4,7 +4,8 @@
 use crate::reml::ScaleParameterMethod;
 use crate::{
     block_penalty::BlockPenalty,
-    discrete::{DiscretizeConfig, DiscretizedDesign},
+    // TODO(d4): switch to the new DiscreteDesign / kernel free functions.
+    discrete::DiscretizedDesign,
     gam::{SmoothTerm, GAM},
     pirls::{fit_pirls_cached, fit_pirls_discretized, fit_pirls_tdist},
     smooth::{OptimizationMethod, SmoothingParameter},
@@ -87,60 +88,22 @@ impl FitCache {
             );
         }
 
-        // Build discretized design for efficient scatter-gather operations.
-        // This stores only unique/binned basis rows per term (m << n) plus
-        // an index array, enabling O(n*k + m*k^2) X'WX instead of O(n*k^2).
-        //
-        // Skip discretization for small n where overhead isn't worth it.
-        // At n=1000, compression is poor (ratio ~1.0x) and BLAS is faster.
+        // TODO(d4): rewire to the new DiscreteDesign / compute_xtwx_discrete
+        // kernels (src/discrete.rs after the D1-D3 rewrite). The previous
+        // path used a deprecated uniform-grid binner that diverged from
+        // mgcv's compress.df; D1-D3 ships the correct kernel but the
+        // REML/PIRLS rewire is D4. Until D4 lands, force the un-binned
+        // BLAS path so behaviour is unchanged.
         let disc_start = Instant::now();
-        let config = DiscretizeConfig {
-            max_unique_1d: 1000,
-            min_n_for_discretize: 2000, // Only discretize for n >= 2000
-        };
-        // mgcv_exact mode disables the discretized path; the
-        // scatter-gather X'WX has tiny binning errors (~1e-5) that
-        // shift predictions enough to break the 1e-3 byte-for-byte
-        // bar. Default mode keeps discretization for perf.
-        let mgcv_exact_disable_disc =
-            !design_matrices.is_empty() && std::env::var("MGCV_EXACT_FIT").is_ok();
-        let discretized = if n >= config.min_n_for_discretize && !mgcv_exact_disable_disc {
-            Some(DiscretizedDesign::new(
-                &design_matrices,
-                &covariates,
-                &config,
-                true,
-            ))
-        } else {
-            None
-        };
+        let _ = &covariates;
+        let discretized: Option<DiscretizedDesign> = None;
         let disc_time = disc_start.elapsed();
 
         if std::env::var("MGCV_PROFILE").is_ok() {
-            if let Some(ref disc) = discretized {
-                let total_compressed: usize = disc.terms.iter().map(|t| t.num_compressed()).sum();
-                let total_full: usize = disc
-                    .terms
-                    .iter()
-                    .map(|t| t.num_observations() * t.num_basis)
-                    .sum();
-                eprintln!(
-                    "[PROFILE] Discretization: {:.2}ms (compressed {} -> {} entries, {:.1}x)",
-                    disc_time.as_secs_f64() * 1000.0,
-                    total_full,
-                    total_compressed * disc.terms.iter().map(|t| t.num_basis).max().unwrap_or(1),
-                    disc.terms
-                        .iter()
-                        .map(|t| t.compression_ratio())
-                        .sum::<f64>()
-                        / disc.terms.len() as f64,
-                );
-            } else {
-                eprintln!(
-                    "[PROFILE] Discretization: skipped (n={} < {})",
-                    n, config.min_n_for_discretize
-                );
-            }
+            eprintln!(
+                "[PROFILE] Discretization: skipped (D1-D3 landed, awaiting D4 rewire; {:.2}ms)",
+                disc_time.as_secs_f64() * 1000.0
+            );
         }
 
         // Build full design matrix [1 | smooth_1 | smooth_2 | ...] —
