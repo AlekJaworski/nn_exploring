@@ -1,13 +1,12 @@
 # Cargo config — picked up by every cargo invocation rooted at this repo.
 #
-# Linker: use `mold` (https://github.com/rui314/mold) for ~5-10× faster
-# linking than the default `ld`. Helps most on the `release-fast` profile
-# (lto = false) where the link step is pure linking; with `lto = "fat"` on
-# the `release` profile, much of the "link" time is LLVM IR merging which
-# mold can't accelerate, but mold still shaves ~5s off the final ld step.
+# Linker: `mold` (https://github.com/rui314/mold) gives ~5-10× faster
+# linking than default `ld`. Local devs on Arch: `sudo pacman -S mold` then
+# uncomment the block below (or `export RUSTFLAGS=...` in your shell rc).
 #
-# Install on Arch: `sudo pacman -S mold`. Drop this file (or comment the
-# rustflags line) if mold isn't available; cargo will fall back to `ld`.
+# Kept commented in the repo because the manylinux CI containers used by
+# release.yml don't have mold installed and `cc: error: unrecognized
+# command-line option '-fuse-ld=mold'` would break the wheel build.
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
