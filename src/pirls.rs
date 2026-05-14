@@ -794,7 +794,7 @@ impl Family {
 /// Lanczos approximation of the log-Gamma function. Accurate to ~14 digits
 /// for x > 0. Pulled in directly to avoid a dependency on `statrs` for this
 /// single use.
-fn log_gamma(x: f64) -> f64 {
+pub(crate) fn log_gamma(x: f64) -> f64 {
     if x < 0.5 {
         // Reflection formula: Γ(x)Γ(1-x) = π/sin(πx)
         let pi = std::f64::consts::PI;

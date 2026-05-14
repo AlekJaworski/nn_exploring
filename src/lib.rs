@@ -9,6 +9,7 @@ pub mod block_penalty;
 pub mod blockwise_qr;
 pub mod chunked_qr;
 pub mod discrete;
+pub mod family_theta;
 pub mod gam;
 pub mod gam_optimized;
 pub mod linalg;
