@@ -1,0 +1,303 @@
+{
+  "scenario": "production_sale_price_split0",
+  "n": 5157,
+  "formula": ["sale_to_list_price_ratio ~ s(current_list_price, k = 7, bs = \"cr\") + ", "    s(price_change_pct_from_original, k = 7, bs = \"cr\") + s(cum_dom_before_current_regime, ", "    k = 7, bs = \"cr\") + s(days_in_current_price_regime, k = 7, ", "    bs = \"cr\") + s(monthly_index, k = 5, bs = \"cr\")"],
+  "family_str": "gaussian",
+  "method": "REML",
+  "bam_method": "fREML",
+  "select": false,
+  "weighted": false,
+  "fit_gam": {
+    "tag": "gam_reference",
+    "elapsed_sec": 0.687,
+    "coefficients": [0.937346345089106, -0.0263464664941994, -0.0093187294769126, -0.068773047042311, 0.0113366538918587, -0.0825743572793741, -4.19430646837762, -0.00771263508193163, 0.010126559060818, -0.00207329173938842, 0.0149766836089834, -0.0279782954948817, 3.35460402957069, -0.00708594757469345, -0.0119577845154474, -0.0083307247767703, 0.00901150876686499, 0.00558333134921447, -0.0291014364911711, -0.000953293836753361, -0.00164925861715229, -0.00250678995641425, -0.00286799505237887, -0.00274817092010254, -0.00233049893015922, 0.00260047063149231, 0.00648824368978573, 0.0192127085063105, 0.0385399685245564],
+    "coef_names": ["(Intercept)", "s(current_list_price).1", "s(current_list_price).2", "s(current_list_price).3", "s(current_list_price).4", "s(current_list_price).5", "s(current_list_price).6", "s(price_change_pct_from_original).1", "s(price_change_pct_from_original).2", "s(price_change_pct_from_original).3", "s(price_change_pct_from_original).4", "s(price_change_pct_from_original).5", "s(price_change_pct_from_original).6", "s(cum_dom_before_current_regime).1", "s(cum_dom_before_current_regime).2", "s(cum_dom_before_current_regime).3", "s(cum_dom_before_current_regime).4", "s(cum_dom_before_current_regime).5", "s(cum_dom_before_current_regime).6", "s(days_in_current_price_regime).1", "s(days_in_current_price_regime).2", "s(days_in_current_price_regime).3", "s(days_in_current_price_regime).4", "s(days_in_current_price_regime).5", "s(days_in_current_price_regime).6", "s(monthly_index).1", "s(monthly_index).2", "s(monthly_index).3", "s(monthly_index).4"],
+    "sp": [0.669117608522568, 1.35915256472872, 5.83473382669143, 21471.2491038974, 478.012644403385],
+    "log_sp": [-0.40179543681185, 0.306861391361584, 1.76382864802134, 9.97447006821624, 6.16963718486833],
+    "edf_total": 22.0809832490379,
+    "edf_per_smooth": [5.75144327497965, 5.27785702372054, 5.22109122971035, 1.85264165343158, 2.97795006719572],
+    "deviance": 10.4127449488903,
+    "aic": -17318.5023363721,
+    "reml_score": -8615.26758461877,
+    "converged": true,
+    "iter": 1,
+    "fitted_first10": [0.955333850680035, 0.954680890987687, 0.956486512512318, 0.939931171699263, 0.939278212006916, 0.938056378356475, 0.937403418664127, 0.936777133438294, 0.943191231154464, 0.942697253980304],
+    "optimizer": ["outer", "newton"]
+  },
+  "fit_bam_nondiscrete": {
+    "tag": "bam_nondiscrete",
+    "elapsed_sec": 0.0720000000000001,
+    "coefficients": [0.937346345089089, 4.30459617113116, 4.207457440648, 4.205211129068, 4.18894836321252, 4.17877488064285, 4.18128341335393, -3.32294216066401, -3.35765758587926, -3.34451177624586, -3.34974977173517, -3.35306695938086, -3.35554100199484, 0.0326227271751684, 0.0224484096378673, 0.0174139702691978, 0.020973785836257, 0.038221359665255, 0.0348412989356845, 0.00446933520569101, 0.00235902559819389, 0.00102733797855145, 4.59895193245714e-05, -0.000432774382224516, -0.000350754084561037, -0.0493999094353123, -0.0411499342270982, -0.0351784620941628, -0.0213393278877318],
+    "coef_names": ["(Intercept)", "s(current_list_price).1", "s(current_list_price).2", "s(current_list_price).3", "s(current_list_price).4", "s(current_list_price).5", "s(current_list_price).6", "s(price_change_pct_from_original).1", "s(price_change_pct_from_original).2", "s(price_change_pct_from_original).3", "s(price_change_pct_from_original).4", "s(price_change_pct_from_original).5", "s(price_change_pct_from_original).6", "s(cum_dom_before_current_regime).1", "s(cum_dom_before_current_regime).2", "s(cum_dom_before_current_regime).3", "s(cum_dom_before_current_regime).4", "s(cum_dom_before_current_regime).5", "s(cum_dom_before_current_regime).6", "s(days_in_current_price_regime).1", "s(days_in_current_price_regime).2", "s(days_in_current_price_regime).3", "s(days_in_current_price_regime).4", "s(days_in_current_price_regime).5", "s(days_in_current_price_regime).6", "s(monthly_index).1", "s(monthly_index).2", "s(monthly_index).3", "s(monthly_index).4"],
+    "sp": [0.669115830321561, 1.35870498147701, 5.83405479871899, 21471.1571324525, 478.013123497971],
+    "log_sp": [-0.401798094346709, 0.30653202659677, 1.76371226439404, 9.97446578473736, 6.16963818713125],
+    "edf_total": 22.0811687042459,
+    "edf_per_smooth": [5.75144372518715, 5.27798674985041, 5.22114515024185, 1.85264352835127, 2.97794955061525],
+    "deviance": 10.4127438189315,
+    "aic": -17318.5025250834,
+    "reml_score": -8618.66721719164,
+    "converged": true,
+    "iter": 1,
+    "fitted_first10": [0.955333854397097, 0.954680893981824, 0.956486510614673, 0.939931203741041, 0.939278243325769, 0.938056412425823, 0.93740345201055, 0.936777166162281, 0.943191268019012, 0.942697290719832],
+    "optimizer": ["perf", "newton"]
+  },
+  "fit_bam_discrete": {
+    "tag": "bam_discrete",
+    "elapsed_sec": 0.0489999999999999,
+    "coefficients": [0.941003491254441, -0.0249024642896015, 0.00156949902411444, -0.0645552836704443, 0.0195415834260495, -0.081251758079357, -4.1906618708189, -0.0197892575701832, 0.00635355310311351, -0.0106776360145768, 0.00435582990418, -0.0245383654116724, 3.34998194530073, -0.0058733341472856, -0.0100691345660312, -0.00788114719976405, 0.0120950457524607, 0.00482268016520547, -0.0262647622457723, 0.000150772089051443, -0.000805124689994226, -0.00208785215701144, -0.00250493648008718, -0.00242188200544333, -0.00160760321668667, -0.00230381727382326, 0.0022178730196095, 0.0171606042670946, 0.0347533111237778],
+    "coef_names": ["(Intercept)", "s(current_list_price).1", "s(current_list_price).2", "s(current_list_price).3", "s(current_list_price).4", "s(current_list_price).5", "s(current_list_price).6", "s(price_change_pct_from_original).1", "s(price_change_pct_from_original).2", "s(price_change_pct_from_original).3", "s(price_change_pct_from_original).4", "s(price_change_pct_from_original).5", "s(price_change_pct_from_original).6", "s(cum_dom_before_current_regime).1", "s(cum_dom_before_current_regime).2", "s(cum_dom_before_current_regime).3", "s(cum_dom_before_current_regime).4", "s(cum_dom_before_current_regime).5", "s(cum_dom_before_current_regime).6", "s(days_in_current_price_regime).1", "s(days_in_current_price_regime).2", "s(days_in_current_price_regime).3", "s(days_in_current_price_regime).4", "s(days_in_current_price_regime).5", "s(days_in_current_price_regime).6", "s(monthly_index).1", "s(monthly_index).2", "s(monthly_index).3", "s(monthly_index).4"],
+    "sp": [0.669115842795368, 1.35870494071568, 5.83405486699993, 21471.4314668437, 478.01304829642],
+    "log_sp": [-0.401798075704485, 0.306531996596633, 1.7637122760979, 9.97447856153542, 6.16963802981014],
+    "edf_total": 22.0811629917254,
+    "edf_per_smooth": [5.75144371607615, 5.27798674153821, 5.22114514580849, 1.8526377633842, 2.97794962491837],
+    "deviance": 10.4127438439352,
+    "aic": -17318.5025241251,
+    "reml_score": -8627.89274558302,
+    "converged": true,
+    "iter": 12,
+    "fitted_first10": [0.955333850415813, 0.954680892297083, 0.956486511015605, 0.9399312001649, 0.93927824204617, 0.938056408779912, 0.937403450661181, 0.936777166856816, 0.943191270476476, 0.942697293970473],
+    "optimizer": ["perf", "chol"]
+  },
+  "perf_ratio_discrete_vs_gam": 14.0204081632653,
+  "discrete_state": {
+    "has_kd": false,
+    "has_Xd": false
+  },
+  "discrete_mf": {
+    "n_obs": 5157,
+    "nr": [null, 606, 767, 168, 22, 12, 1],
+    "ks": [
+      [1, 2],
+      [2, 3],
+      [3, 4],
+      [4, 5],
+      [5, 6],
+      [6, 7]
+    ],
+    "k_dim": [5157, 6],
+    "k_first50": [
+      [408, 690, 149, 20, 3, 1],
+      [408, 690, 149, 3, 3, 1],
+      [408, 690, 149, 11, 6, 1],
+      [172, 690, 149, 20, 5, 1],
+      [172, 690, 149, 3, 5, 1],
+      [97, 690, 149, 20, 5, 1],
+      [97, 690, 149, 3, 5, 1],
+      [97, 690, 149, 11, 5, 1],
+      [97, 690, 149, 21, 12, 1],
+      [97, 690, 149, 7, 12, 1],
+      [475, 610, 78, 20, 12, 1],
+      [342, 763, 64, 20, 12, 1],
+      [373, 690, 149, 20, 9, 1],
+      [373, 690, 149, 3, 9, 1],
+      [373, 690, 149, 11, 10, 1],
+      [602, 304, 114, 20, 10, 1],
+      [602, 304, 114, 3, 10, 1],
+      [602, 304, 114, 11, 10, 1],
+      [602, 304, 114, 21, 7, 1],
+      [602, 304, 114, 7, 7, 1],
+      [376, 690, 149, 20, 11, 1],
+      [376, 690, 149, 3, 11, 1],
+      [376, 690, 149, 11, 11, 1],
+      [376, 690, 149, 21, 11, 1],
+      [376, 690, 149, 7, 8, 1],
+      [376, 690, 149, 22, 8, 1],
+      [376, 690, 149, 14, 8, 1],
+      [482, 690, 149, 20, 9, 1],
+      [342, 690, 149, 20, 10, 1],
+      [323, 690, 149, 20, 10, 1],
+      [323, 690, 149, 3, 7, 1],
+      [323, 690, 149, 11, 7, 1],
+      [323, 690, 149, 21, 7, 1],
+      [323, 690, 149, 7, 7, 1],
+      [323, 690, 149, 22, 7, 1],
+      [323, 690, 149, 14, 1, 1],
+      [265, 690, 149, 20, 3, 1],
+      [265, 690, 149, 3, 3, 1],
+      [265, 690, 149, 11, 6, 1],
+      [265, 690, 149, 21, 6, 1],
+      [265, 690, 149, 7, 6, 1],
+      [265, 690, 149, 22, 6, 1],
+      [265, 690, 149, 14, 6, 1],
+      [265, 690, 149, 19, 9, 1],
+      [376, 100, 119, 20, 9, 1],
+      [376, 100, 119, 3, 9, 1],
+      [376, 100, 119, 11, 9, 1],
+      [376, 100, 119, 21, 10, 1],
+      [136, 672, 84, 20, 10, 1],
+      [136, 672, 84, 3, 10, 1]
+    ],
+    "compressed_mf_rows": 767,
+    "compressed_mf_head": [
+      {
+        "sale_to_list_price_ratio": 0.9932442435428,
+        "current_list_price": 849000,
+        "price_change_pct_from_original": -3.3085292460941,
+        "cum_dom_before_current_regime": 6,
+        "days_in_current_price_regime": 84,
+        "monthly_index": -4
+      },
+      {
+        "sale_to_list_price_ratio": 0.916875,
+        "current_list_price": 915000,
+        "price_change_pct_from_original": -7.16189869892174,
+        "cum_dom_before_current_regime": 47,
+        "days_in_current_price_regime": 105,
+        "monthly_index": 0
+      },
+      {
+        "sale_to_list_price_ratio": 0.75,
+        "current_list_price": 765990,
+        "price_change_pct_from_original": 0.612328624526211,
+        "cum_dom_before_current_regime": 85,
+        "days_in_current_price_regime": 7,
+        "monthly_index": -9
+      },
+      {
+        "sale_to_list_price_ratio": 0.931578947368421,
+        "current_list_price": 1394576,
+        "price_change_pct_from_original": -7.42131979695431,
+        "cum_dom_before_current_regime": 282,
+        "days_in_current_price_regime": 56,
+        "monthly_index": -1
+      },
+      {
+        "sale_to_list_price_ratio": 0.961290322580645,
+        "current_list_price": 865990,
+        "price_change_pct_from_original": -2.50951254756274,
+        "cum_dom_before_current_regime": 110,
+        "days_in_current_price_regime": 77,
+        "monthly_index": -3
+      },
+      {
+        "sale_to_list_price_ratio": 0.976351351351351,
+        "current_list_price": 707877,
+        "price_change_pct_from_original": -2.87769784172662,
+        "cum_dom_before_current_regime": 25,
+        "days_in_current_price_regime": 91,
+        "monthly_index": -8
+      },
+      {
+        "sale_to_list_price_ratio": 0.98314606741573,
+        "current_list_price": 814935,
+        "price_change_pct_from_original": -9.61904761904762,
+        "cum_dom_before_current_regime": 183,
+        "days_in_current_price_regime": 28,
+        "monthly_index": -5
+      },
+      {
+        "sale_to_list_price_ratio": 0.844444444444444,
+        "current_list_price": 1052066,
+        "price_change_pct_from_original": -2.52897787144363,
+        "cum_dom_before_current_regime": 76,
+        "days_in_current_price_regime": 112,
+        "monthly_index": -10
+      },
+      {
+        "sale_to_list_price_ratio": 0.968626210782763,
+        "current_list_price": 1003513,
+        "price_change_pct_from_original": -3.7037037037037,
+        "cum_dom_before_current_regime": 46,
+        "days_in_current_price_regime": 140,
+        "monthly_index": -7
+      },
+      {
+        "sale_to_list_price_ratio": 0.968421052631579,
+        "current_list_price": 1099900,
+        "price_change_pct_from_original": -7.14285714285714,
+        "cum_dom_before_current_regime": 58,
+        "days_in_current_price_regime": 63,
+        "monthly_index": -6
+      },
+      {
+        "sale_to_list_price_ratio": 0.947468154542583,
+        "current_list_price": 835000,
+        "price_change_pct_from_original": -5.49450549450549,
+        "cum_dom_before_current_regime": 63,
+        "days_in_current_price_regime": 14,
+        "monthly_index": -11
+      },
+      {
+        "sale_to_list_price_ratio": 0.96,
+        "current_list_price": 964010,
+        "price_change_pct_from_original": -5.75926701570681,
+        "cum_dom_before_current_regime": 140,
+        "days_in_current_price_regime": 98,
+        "monthly_index": -2
+      },
+      {
+        "sale_to_list_price_ratio": 0.911242603550296,
+        "current_list_price": 762474,
+        "price_change_pct_from_original": -6.63265306122449,
+        "cum_dom_before_current_regime": 71,
+        "days_in_current_price_regime": 119,
+        "monthly_index": -10
+      },
+      {
+        "sale_to_list_price_ratio": 0.981927710843373,
+        "current_list_price": 944900,
+        "price_change_pct_from_original": -3.08411890247664,
+        "cum_dom_before_current_regime": 354,
+        "days_in_current_price_regime": 42,
+        "monthly_index": 0
+      },
+      {
+        "sale_to_list_price_ratio": 0.927102610374832,
+        "current_list_price": 949950,
+        "price_change_pct_from_original": -1.29032258064516,
+        "cum_dom_before_current_regime": 125,
+        "days_in_current_price_regime": 126,
+        "monthly_index": -11
+      },
+      {
+        "sale_to_list_price_ratio": 0.951456310679612,
+        "current_list_price": 878990,
+        "price_change_pct_from_original": -3.39924991476304,
+        "cum_dom_before_current_regime": 112,
+        "days_in_current_price_regime": 133,
+        "monthly_index": -3
+      },
+      {
+        "sale_to_list_price_ratio": 0.976351351351351,
+        "current_list_price": 849999,
+        "price_change_pct_from_original": -2.06187692656625,
+        "cum_dom_before_current_regime": 2,
+        "days_in_current_price_regime": 147,
+        "monthly_index": -1
+      },
+      {
+        "sale_to_list_price_ratio": 0.969891203508476,
+        "current_list_price": 928471,
+        "price_change_pct_from_original": -12.6810004387889,
+        "cum_dom_before_current_regime": 130,
+        "days_in_current_price_regime": 70,
+        "monthly_index": -5
+      },
+      {
+        "sale_to_list_price_ratio": 0.952254867658323,
+        "current_list_price": 913990,
+        "price_change_pct_from_original": 1.08196721311475,
+        "cum_dom_before_current_regime": 176,
+        "days_in_current_price_regime": 49,
+        "monthly_index": 0
+      },
+      {
+        "sale_to_list_price_ratio": 0.896969696969697,
+        "current_list_price": 689900,
+        "price_change_pct_from_original": -4.67121067683508,
+        "cum_dom_before_current_regime": 109,
+        "days_in_current_price_regime": 0,
+        "monthly_index": -2
+      }
+    ],
+    "nunique_per_col": [509, 606, 767, 168, 22, 12]
+  },
+  "scat_perf": {
+    "gam_scat_sec": 1.382,
+    "bam_scat_discrete_sec": 0.164000000000001,
+    "ratio": 8.42682926829266,
+    "reml_score_gam": -8897.28913561361,
+    "reml_score_bam": -8891.27712442668,
+    "coef_max_abs_diff": 0.00422794293793594
+  }
+}
