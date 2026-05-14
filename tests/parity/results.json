@@ -2133,6 +2133,107 @@
       "extrap": {
         "atol": 0.001,
         "eff_atol": 0.001,
+        "max_absdiff": 0.004459951991243438,
+        "max_relerr": 0.36892576880056266,
+        "n": 20,
+        "ok": true,
+        "rtol": 0.05
+      },
+      "test": {
+        "atol": 1e-06,
+        "eff_atol": 0.00035914402881169233,
+        "max_absdiff": 0.0014179456360469134,
+        "max_relerr": 0.09693779006272313,
+        "n": 100,
+        "ok": true,
+        "rtol": 0.001
+      },
+      "train": {
+        "atol": 1e-06,
+        "eff_atol": 0.00035569838964368586,
+        "max_absdiff": 0.0014192417996441442,
+        "max_relerr": 0.044793857733189044,
+        "n": 300,
+        "ok": true,
+        "rtol": 0.001
+      }
+    },
+    "bar_b": {
+      "beta_maxabsdiff": 0.0012873233432242337,
+      "beta_maxrelerr": 0.013752009478844958,
+      "beta_ok": true,
+      "deviance_actual": 18.18214691252748,
+      "deviance_expected": 492.8326753310942,
+      "deviance_relerr": 0.9631068558911757,
+      "edf_per_smooth": "not_implemented",
+      "edf_total": "not_implemented",
+      "n_iter": "not_implemented",
+      "scale": "not_implemented",
+      "vcov": "not_implemented"
+    },
+    "bar_c": {
+      "lambda_actual": [
+        137.80128814709917
+      ],
+      "lambda_expected": [
+        136.54015479876773
+      ],
+      "lambda_max_relerr": 0.009236355050205515,
+      "lambda_ok": true
+    },
+    "description": "Weighted t-dist (scat) \u2014 covers sample_weight= on the TDist family",
+    "fixture_path": "/home/alex/vibe_coding/nn_exploring/tests/parity/fixtures/1d_scat_weighted_n300_k10_cr.json",
+    "name": "1d_scat_weighted_n300_k10_cr",
+    "trajectory": {
+      "first_diverged_iter": 1,
+      "iter_diffs": [
+        {
+          "absdiff": 229.905847234762,
+          "iter": 1,
+          "mgcv_reml": 19.541326765237987,
+          "reldiff_score_scale": 24.063577488408153,
+          "rust_reml": 249.447174
+        },
+        {
+          "absdiff": 118.3994820560259,
+          "iter": 2,
+          "mgcv_reml": 16.12470194397409,
+          "reldiff_score_scale": 12.392530008744297,
+          "rust_reml": 134.524184
+        },
+        {
+          "absdiff": 7.044702687931672,
+          "iter": 3,
+          "mgcv_reml": 15.620027312068327,
+          "reldiff_score_scale": 0.7373485757443113,
+          "rust_reml": 22.66473
+        },
+        {
+          "absdiff": 4.4042336485586375,
+          "iter": 4,
+          "mgcv_reml": 15.308951351441362,
+          "reldiff_score_scale": 0.4609783481101511,
+          "rust_reml": 19.713185
+        },
+        {
+          "absdiff": 1.927534637263797,
+          "iter": 5,
+          "mgcv_reml": 14.705437362736202,
+          "reldiff_score_scale": 0.2017494538015163,
+          "rust_reml": 16.632972
+        }
+      ],
+      "mgcv_final_reml": 14.451563209788542,
+      "n_mgcv_iters": 9,
+      "n_rust_iters": 9,
+      "rust_final_reml": 15.843551
+    }
+  },
+  {
+    "bar_a": {
+      "extrap": {
+        "atol": 0.001,
+        "eff_atol": 0.001,
         "max_absdiff": 0.00025643279762577187,
         "max_relerr": 0.00016290509358046106,
         "n": 20,
