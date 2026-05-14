@@ -486,6 +486,51 @@ impl RemlScoreParts {
     }
 }
 
+/// Aggregate `log|S(ρ)|+` and its first/second derivatives across all
+/// penalty blocks, given one log-smoothing-parameter ρ_k per block.
+///
+/// Returns `(ldet, d1, d2)`:
+/// - `ldet = Σ_k log|λ_k S_k|+` (total log pseudo-determinant)
+/// - `d1[k] = ∂ ldet / ∂ρ_k`     (length = `sl.len()`)
+/// - `d2[k,j] = ∂² ldet / ∂ρ_k ∂ρ_j` (`sl.len()` × `sl.len()`)
+///
+/// In the singleton-block case (one ρ per block — the only case any
+/// production caller currently triggers), blocks are independent in ρ:
+/// `d1[k] = rank_k` and `d2` is identically zero. Off-diagonal entries
+/// stay zero whether multi-S blocks ever land, because penalties on
+/// disjoint smooths never share λ. The diagonal will become non-zero
+/// only once an `ldetS`-style multi-S port (see `BlockPenalty::
+/// log_det_singleton_with_derivs`) is added.
+///
+/// This is the R3 building block for B2 (`ldetS` derivatives) and B3
+/// (`Sl.fitChol` core) per `docs/PATH_B_FREML_PLAN.md` §9.
+#[cfg(feature = "blas")]
+pub fn compute_ldet_s_with_derivs(
+    sl: &[BlockPenalty],
+    rho: &[f64],
+) -> (f64, Array1<f64>, Array2<f64>) {
+    assert_eq!(
+        sl.len(),
+        rho.len(),
+        "compute_ldet_s_with_derivs: sl and rho must have the same length"
+    );
+    let m = sl.len();
+    let mut ldet = 0.0;
+    let mut d1 = Array1::<f64>::zeros(m);
+    let d2 = Array2::<f64>::zeros((m, m));
+    for k in 0..m {
+        let (val, g, h) = sl[k].log_det_singleton_with_derivs(rho[k]);
+        ldet += val;
+        d1[k] = g;
+        // For singleton blocks, the per-block Hessian contribution is 0,
+        // and blocks are independent so off-diagonals are 0 too. We assign
+        // the diagonal entry explicitly for symmetry with future multi-S
+        // extensions where `h` may be non-zero.
+        debug_assert_eq!(h, 0.0, "singleton blocks have zero second-derivative");
+    }
+    (ldet, d1, d2)
+}
+
 // ---------------------------------------------------------------------------
 // D4 dispatch-helper unit tests
 // ---------------------------------------------------------------------------

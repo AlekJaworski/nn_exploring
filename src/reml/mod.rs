@@ -6,7 +6,7 @@ pub use system::{
     ScaleParameterMethod,
 };
 #[cfg(feature = "blas")]
-pub use system::{compute_edf_from_cholesky, compute_xtwx_cholesky};
+pub use system::{compute_edf_from_cholesky, compute_ldet_s_with_derivs, compute_xtwx_cholesky};
 #[cfg(feature = "blas")]
 pub(crate) use system::{assemble_reml_system, RemlScoreParts};
 

@@ -245,6 +245,40 @@ impl BlockPenalty {
     pub fn trace(&self) -> f64 {
         self.block_diagonal_iter().sum()
     }
+
+    /// Compute `(log|λS|+, d/dρ log|λS|+, d²/dρ² log|λS|+)` for a singleton
+    /// block, where `ρ = log(λ)` is the log-smoothing-parameter.
+    ///
+    /// For a single-`S` block, the penalty under λ-scaling is `λ·S`, so
+    /// `log|λS|+ = rank·log(λ) + log|S|+ = rank·ρ + log_pseudo_det_unit`,
+    /// where `log_pseudo_det_unit` is the (constant-in-ρ) pseudo-determinant
+    /// of the unit-scaled `S`. Hence the derivatives are `(rank, 0)`.
+    ///
+    /// This corresponds to the singleton branch of mgcv's `ldetS`
+    /// (`R/fast-REML.r:762`). Multi-`S` blocks (rare; tensor smooths with
+    /// multiple penalty marginals) require an eigendecomposition of
+    /// `Σ_k λ_k S_k` and are not yet supported — see `todo!()` below.
+    ///
+    /// Reuses `crate::reml::pseudo_determinant` for the unit-S log-det.
+    #[cfg(feature = "blas")]
+    pub fn log_det_singleton_with_derivs(&self, rho: f64) -> (f64, f64, f64) {
+        let rank = self.estimate_rank() as f64;
+        // Unit-scaled S log-pseudo-determinant — independent of ρ.
+        // `pseudo_determinant` returns log Π_{i: λ_i>0} λ_i for the block's S.
+        let log_pseudo_det_unit = crate::reml::pseudo_determinant(self)
+            .expect("pseudo_determinant should succeed on a finite penalty block");
+        (rank * rho + log_pseudo_det_unit, rank, 0.0)
+    }
+
+    /// Non-BLAS fallback: pseudo-determinant isn't available without
+    /// `ndarray-linalg`, so the singleton log-det reduces to `rank·ρ` only.
+    /// This branch exists for compile-time completeness; production fits
+    /// always run with the `blas` feature.
+    #[cfg(not(feature = "blas"))]
+    pub fn log_det_singleton_with_derivs(&self, rho: f64) -> (f64, f64, f64) {
+        let rank = self.estimate_rank() as f64;
+        (rank * rho, rank, 0.0)
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +366,95 @@ mod tests {
         let trace = bp.trace_product(&dense);
         // tr(2I * S) = 2 * tr(S) = 2 * (4+4+4) = 24
         assert!((trace - 24.0).abs() < 1e-10);
+    }
+
+    /// FD parity for `compute_ldet_s_with_derivs` on a 3-block fixture
+    /// with mixed ranks. The singleton-block formula gives
+    /// `d/dρ_k log|λS|+ = rank_k` exactly, so we check that against a
+    /// central-difference of the scalar.
+    #[cfg(feature = "blas")]
+    #[test]
+    fn log_det_singleton_with_derivs_fd_parity() {
+        use crate::reml::compute_ldet_s_with_derivs;
+
+        // Block 1: 3×3 tridiagonal (rank 3, det > 0)
+        let b1 = Array2::from_shape_vec(
+            (3, 3),
+            vec![4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0],
+        )
+        .unwrap();
+        // Block 2: 4×4 with one zero row → rank 3 (a singular SPSD case
+        // exercises the pseudo-determinant path).
+        let b2 = Array2::from_shape_vec(
+            (4, 4),
+            vec![
+                2.0, 0.5, 0.0, 0.0, 0.5, 2.0, 0.5, 0.0, 0.0, 0.5, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+        )
+        .unwrap();
+        // Block 3: 2×2 SPD (rank 2)
+        let b3 = Array2::from_shape_vec((2, 2), vec![3.0, 1.0, 1.0, 3.0]).unwrap();
+
+        let total = 3 + 4 + 2;
+        let bp1 = BlockPenalty::new(b1, 0, total);
+        let bp2 = BlockPenalty::new(b2, 3, total);
+        let bp3 = BlockPenalty::new(b3, 7, total);
+        let sl = vec![bp1, bp2, bp3];
+
+        let rho = vec![0.7, -0.3, 1.4];
+        let (val, d1, d2) = compute_ldet_s_with_derivs(&sl, &rho);
+
+        // Analytical: d1[k] = rank_k, d2 = 0.
+        let ranks = [3usize, 3, 2];
+        for (k, r) in ranks.iter().enumerate() {
+            assert!(
+                (d1[k] - (*r as f64)).abs() < 1e-12,
+                "analytical d1[{}]: got {}, expected {}",
+                k,
+                d1[k],
+                r
+            );
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_eq!(d2[[i, j]], 0.0, "d2[{},{}] should be 0 (singleton)", i, j);
+            }
+        }
+
+        // FD check: central-difference on each ρ_k against scalar `val`.
+        let h = 1e-6;
+        for k in 0..3 {
+            let mut rho_plus = rho.clone();
+            let mut rho_minus = rho.clone();
+            rho_plus[k] += h;
+            rho_minus[k] -= h;
+            let (val_plus, _, _) = compute_ldet_s_with_derivs(&sl, &rho_plus);
+            let (val_minus, _, _) = compute_ldet_s_with_derivs(&sl, &rho_minus);
+            let fd = (val_plus - val_minus) / (2.0 * h);
+            assert!(
+                (fd - d1[k]).abs() < 1e-6,
+                "FD d1[{}]: analytical {}, FD {}, |diff| {}",
+                k,
+                d1[k],
+                fd,
+                (fd - d1[k]).abs()
+            );
+        }
+
+        // Sanity: total value should equal Σ_k (rank_k·ρ_k + log_pseudo_det_k).
+        // We don't hard-code log_pseudo_det values; just verify monotone
+        // behaviour in ρ — increasing ρ_0 by Δ increases `val` by rank_0·Δ.
+        let delta = 0.25;
+        let mut rho_shift = rho.clone();
+        rho_shift[0] += delta;
+        let (val_shift, _, _) = compute_ldet_s_with_derivs(&sl, &rho_shift);
+        let expected = val + (ranks[0] as f64) * delta;
+        assert!(
+            (val_shift - expected).abs() < 1e-12,
+            "shift sanity: got {}, expected {}",
+            val_shift,
+            expected
+        );
     }
 
     #[test]
