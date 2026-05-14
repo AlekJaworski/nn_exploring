@@ -58,18 +58,35 @@
 //!   `d2[i,j] = −λ_i λ_j tr(PP·S_i·PP·S_j) + δ_ij · d1[i]`. Mirrors
 //!   `d.detXXS`.
 //!
-//! ## Numerical choice: full inverse vs preconditioned Cholesky
+//! ## Numerical kernel: preconditioned pivoted Cholesky (R8)
 //!
-//! mgcv builds a preconditioned pivoted Cholesky of `D⁻¹(X'X+S)D⁻¹` and forms
-//! `PP = (X'X+S)⁻¹` from its triangular factor. We take the simpler path —
-//! `solve` for β̂ and `inverse(X'X+S)` for `PP` — to match the existing
-//! `assemble_reml_system` convention used throughout `reml/mod.rs`. The
-//! pivoted-Cholesky route is a B-task optimisation, not a numerics change;
-//! the analytical content is identical at the precision we test
-//! (FD ≤ 1e-3 abs on the Hessian).
+//! mgcv builds a preconditioned pivoted Cholesky of `D⁻¹(X'X+S)D⁻¹` and
+//! forms `PP = (X'X+S)⁻¹` from its triangular factor (R/fast-REML.r:1606).
+//! We follow the same recipe via LAPACK `dpstrf`
+//! (see [`crate::linalg::pivoted_cholesky`]), which:
+//!
+//!   1. Pivots aggressively so the working rank is exposed when the
+//!      penalised Hessian has near-null directions, rather than failing on
+//!      a non-PD leading minor.
+//!   2. Lets the caller **drop rank-deficient columns** and zero-pad the
+//!      null-space coordinate (mgcv R/fast-REML.r:1610-1613 + 1615).
+//!
+//! On well-conditioned inputs the result is numerically identical to plain
+//! `solve` + `inverse` (the previous implementation). The advantage is on
+//! **indefinite** or rank-deficient inputs that arise when `bgam.fitd` swaps
+//! Fisher → observed-info weights in scat / inverse-Gaussian IRLS: plain
+//! LU + 1e-12 ridge returns non-finite β; pivoted Chol with rank truncation
+//! returns the unique penalised-minimum-norm β̂ on the working subspace.
+//!
+//! ### Stability fallback
+//!
+//! If `pivoted_cholesky` reports `rank == 0` (numerically zero penalised
+//! Hessian — never happens in practice with `S(ρ) > 0`) or fails to factor,
+//! we fall back to the original `solve` + `inverse` path so the caller still
+//! receives a finite Newton step.
 
 use crate::block_penalty::BlockPenalty;
-use crate::linalg::{inverse, solve};
+use crate::linalg::{inverse, pivoted_cholesky, solve, PivotedCholesky};
 use crate::reml::compute_ldet_s_with_derivs;
 use crate::Result;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -223,20 +240,41 @@ pub fn compute_sl_fitchol_step(
         pen.scaled_add_to(&mut a, *lambda);
     }
 
-    // ===== 2) Solve A · β = f and form PP = A⁻¹ =====
-    // Use the same solve+invert convention as `assemble_reml_system` so the
-    // numerical conditioning ridge stays consistent across the reml/ module.
-    // (mgcv's preconditioned pivoted Cholesky is an optimisation, not a
-    // numerics change — same answer to machine precision on well-conditioned
-    // fixtures, which is what we test.)
-    let mut a_solve = a.clone();
-    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-    let solve_ridge = 1e-12 * max_diag;
-    for i in 0..p {
-        a_solve[[i, i]] += solve_ridge;
-    }
-    let beta = solve(a_solve, f_view.to_owned())?;
-    let pp = inverse(&a)?;
+    // ===== 2) Pivoted-Chol solve for β and PP = A⁻¹  =====
+    //
+    // Mirrors mgcv `Sl.fitChol` (R/fast-REML.r:1601-1626):
+    //
+    //   1. Diagonal preconditioner `d[i] = sqrt(A[i,i])` (1 where A[i,i] ≤ 0).
+    //   2. Pivoted Chol of `A_p = D⁻¹·A·D⁻¹` via LAPACK `dpstrf`.
+    //   3. Drop rank-deficient trailing columns (mgcv lines 1610-1613).
+    //   4. `β[piv] = R⁻¹·(R'⁻¹·(f[piv]/d[piv]))/d[piv]` (line 1615).
+    //   5. `PP[piv, piv] = chol2inv(R)`, then `PP = D⁻¹·PP·D⁻¹` (lines 1623-1626).
+    //   6. `ldet_xxs = 2·Σ(log R_kk + log d_piv_k)` (line 1627).
+    //
+    // The preconditioner brings the spectrum of `A_p` closer to 1, which is
+    // what makes pivoted Chol numerically stable on the `(X'WX + S)` block-
+    // diagonal structure (the penalty's null-space directions live on a few
+    // rows, so the rank-revealing pivot pulls them to the tail).
+    //
+    // If `try_pivoted_chol_solve` returns `None` (rank == 0, or LAPACK
+    // failure — never seen in practice for `S(ρ) > 0`), we fall back to the
+    // plain LU + ridge solve to keep the outer Newton stepping.
+    let pchol = try_pivoted_chol_solve(&a, &f_view.to_owned());
+    let (beta, pp, ldet_xxs) = match pchol {
+        Some(out) => (out.beta, out.pp, out.ldet_xxs),
+        None => {
+            let mut a_solve = a.clone();
+            let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+            let solve_ridge = 1e-12 * max_diag;
+            for i in 0..p {
+                a_solve[[i, i]] += solve_ridge;
+            }
+            let beta = solve(a_solve, f_view.to_owned())?;
+            let pp = inverse(&a)?;
+            let ldet_xxs = crate::linalg::determinant(&a)?.ln();
+            (beta, pp, ldet_xxs)
+        }
+    };
 
     // ===== 3) log|S(ρ)|₊ and its ρ-derivatives (singleton blocks) =====
     // For singleton penalties (one ρ per block, no shared λ across blocks),
@@ -255,11 +293,12 @@ pub fn compute_sl_fitchol_step(
     let rho_vec: Vec<f64> = rho.to_vec();
     let (ldet_s, ldet_s_d1, ldet_s_d2) = compute_ldet_s_with_derivs(sl_use, &rho_vec);
 
-    // ===== 4) log|X'WX + S(ρ)| via the trace identity on PP =====
-    // mgcv pulls this from `2·sum(log(diag(R)) + log(d[piv]))`. We compute it
-    // directly from `A` since we already paid for the inverse: log|A| matches
-    // `determinant(A).ln()` to machine precision.
-    let ldet_xxs = crate::linalg::determinant(&a)?.ln();
+    // ===== 4) log|X'WX + S(ρ)| =====
+    // Returned by `try_pivoted_chol_solve` above when the pivoted Chol succeeds
+    // (formula `2·Σ log(R_kk · d_piv_k)`, mgcv R/fast-REML.r:1627), or
+    // computed via `determinant(A).ln()` in the LU-ridge fallback. We keep
+    // the pivoted-Chol value to byte-match mgcv on the well-conditioned path.
+    let _ = &a; // silence unused (kept alive for the fallback path above)
 
     // ===== 5) IFT: dβ/dρ_k + bSb1 + (rss2 + bSb2) =====
     let ift = compute_sl_ift_chol(sl_use, xx_view, &pp, &beta, &lambdas)?;
@@ -607,6 +646,195 @@ fn compute_d_det_xxs(
     }
 
     (d1, d2)
+}
+
+/// Output of `try_pivoted_chol_solve`: the three quantities the parent
+/// `compute_sl_fitchol_step` needs from mgcv's preconditioned pivoted-Chol
+/// block (R/fast-REML.r:1601-1627).
+struct PivotedCholFitOut {
+    beta: Array1<f64>,
+    pp: Array2<f64>,
+    ldet_xxs: f64,
+}
+
+/// Mgcv's `Sl.fitChol` numerical kernel (R/fast-REML.r:1601-1627), ported
+/// straight to LAPACK `dpstrf`.
+///
+/// Given a symmetric `A = X'WX + S(ρ)` (only the upper triangle is used) and
+/// rhs `f`, returns:
+///   - `β` solving `A·β = f` (or the minimum-norm β̂ on the working
+///     subspace if A has near-null directions).
+///   - `PP = A⁺` (Moore-Penrose pseudo-inverse with zero null-space block).
+///   - `ldet_xxs = log|A|_+` from `2·Σ(log R_kk + log d_piv_k)`.
+///
+/// **Algorithm**:
+///   1. `d[i] = sqrt(A[i,i])` if `A[i,i] > 0` else `1`. (Diag preconditioner;
+///      mgcv lines 1603-1604).
+///   2. `A_p = D⁻¹ · A · D⁻¹` (numerically: divide row `i` and col `j` by
+///      `d[i]·d[j]`).
+///   3. `R, piv, rank = dpstrf(A_p, tol < 0)`. LAPACK default tol gives
+///      `n · ε · max_pivot`, matching R's `chol(..., pivot=TRUE)`.
+///   4. Drop rank-deficient trailing columns. `R` and `piv` are truncated
+///      to `R[..rank, ..rank]` and `piv[..rank]`.
+///   5. `β[piv] = R⁻¹·(R'⁻¹·(f[piv]/d[piv])) / d[piv]`, with the
+///      rank-deficient entries of `β` left at zero.
+///   6. `PP_perm = chol2inv(R)`, `PP[piv, piv] = D⁻¹ · PP_perm · D⁻¹`.
+///      Rank-deficient entries of `PP` remain zero.
+///   7. `ldet_xxs = 2 · Σ_{k<rank}(log R_kk + log d_{piv[k]})`.
+///
+/// Returns `None` if LAPACK reports total rank deficiency (`rank == 0`) or
+/// fails to factor. Both indicate the caller should fall back to the
+/// LU + ridge path.
+fn try_pivoted_chol_solve(a: &Array2<f64>, f: &Array1<f64>) -> Option<PivotedCholFitOut> {
+    let p = a.nrows();
+    if p == 0 {
+        return Some(PivotedCholFitOut {
+            beta: Array1::<f64>::zeros(0),
+            pp: Array2::<f64>::zeros((0, 0)),
+            ldet_xxs: 0.0,
+        });
+    }
+
+    // Step 1: diagonal preconditioner d[i] = sqrt(A[i,i]) for A[i,i] > 0
+    // else 1. Mgcv R/fast-REML.r:1603-1604.
+    let mut d = Array1::<f64>::zeros(p);
+    for i in 0..p {
+        let dii = a[[i, i]];
+        d[i] = if dii > 0.0 { dii.sqrt() } else { 1.0 };
+    }
+
+    // Step 2: A_p = D⁻¹ · A · D⁻¹. Materialise into an owned matrix because
+    // dpstrf needs an in-place buffer.
+    let mut a_p = Array2::<f64>::zeros((p, p));
+    for i in 0..p {
+        let di = d[i];
+        for j in 0..p {
+            let dj = d[j];
+            a_p[[i, j]] = a[[i, j]] / (di * dj);
+        }
+    }
+
+    // Step 3: pivoted Chol with LAPACK default tol (R `chol(... pivot=TRUE)`).
+    let pchol: PivotedCholesky = match pivoted_cholesky(&a_p, -1.0) {
+        Ok(p) => p,
+        Err(_) => return None, // LAPACK failure — fall back to LU+ridge.
+    };
+    if pchol.rank == 0 {
+        return None;
+    }
+
+    // Step 5: β[piv] = R⁻¹ · (R'⁻¹ · (f[piv] / d[piv])) / d[piv]. We feed
+    // `pivoted_cholesky_solve` the rhs `b[k] = f[piv[k]] / d[piv[k]]`, then
+    // it back-permutes and we still need the trailing `/d`. Easier to just
+    // do the forward/back-solve inline so we can divide by `d[piv]` on both
+    // ends without going through the `solve` helper that already permutes.
+    let r_eff = pchol.rank;
+    // Build b_perm[k] = f[piv[k]] / d[piv[k]] for k in 0..rank.
+    let mut bp = Array1::<f64>::zeros(r_eff);
+    for k in 0..r_eff {
+        let pk = pchol.piv[k];
+        bp[k] = f[pk] / d[pk];
+    }
+    // Forward solve R' y = bp.
+    let mut y = Array1::<f64>::zeros(r_eff);
+    for i in 0..r_eff {
+        let mut s = bp[i];
+        for j in 0..i {
+            s -= pchol.r[[j, i]] * y[j];
+        }
+        let diag = pchol.r[[i, i]];
+        if !(diag.abs() > 0.0) {
+            return None;
+        }
+        y[i] = s / diag;
+    }
+    // Back solve R z = y.
+    let mut z = Array1::<f64>::zeros(r_eff);
+    for i in (0..r_eff).rev() {
+        let mut s = y[i];
+        for j in (i + 1)..r_eff {
+            s -= pchol.r[[i, j]] * z[j];
+        }
+        let diag = pchol.r[[i, i]];
+        if !(diag.abs() > 0.0) {
+            return None;
+        }
+        z[i] = s / diag;
+    }
+    // β[piv] = z / d[piv]. Rank-deficient entries (piv[rank..]) stay at zero.
+    let mut beta = Array1::<f64>::zeros(p);
+    for k in 0..r_eff {
+        let pk = pchol.piv[k];
+        beta[pk] = z[k] / d[pk];
+    }
+
+    // Step 6: PP[piv, piv] = chol2inv(R), then PP = D⁻¹ · PP · D⁻¹.
+    // `chol2inv(R) = R⁻¹·R⁻¹'`. Reuse the linalg helper.
+    let r_block = pchol.r.slice(ndarray::s![..r_eff, ..r_eff]).to_owned();
+    let r_inv = match invert_upper_triangular_inline(&r_block) {
+        Some(ri) => ri,
+        None => return None,
+    };
+    let pp_perm = r_inv.dot(&r_inv.t()); // (R'R)⁻¹ for the rank-`r_eff` block.
+    let mut pp = Array2::<f64>::zeros((p, p));
+    for a_idx in 0..r_eff {
+        let pa = pchol.piv[a_idx];
+        let da = d[pa];
+        for b_idx in 0..r_eff {
+            let pb = pchol.piv[b_idx];
+            let db = d[pb];
+            pp[[pa, pb]] = pp_perm[[a_idx, b_idx]] / (da * db);
+        }
+    }
+
+    // Step 7: ldet_xxs = 2 · Σ(log R_kk + log d_{piv[k]}).
+    let mut ldet = 0.0;
+    for k in 0..r_eff {
+        let rkk = pchol.r[[k, k]];
+        let dpk = d[pchol.piv[k]];
+        if rkk > 0.0 && dpk > 0.0 {
+            ldet += rkk.ln() + dpk.ln();
+        } else {
+            // Numerically singular pivot — fall back so we don't emit NaN.
+            return None;
+        }
+    }
+    let ldet_xxs = 2.0 * ldet;
+
+    Some(PivotedCholFitOut {
+        beta,
+        pp,
+        ldet_xxs,
+    })
+}
+
+/// Inline upper-triangular inverse via back-substitution. Mirrors
+/// `linalg::invert_upper_triangular` but kept module-local so we don't have
+/// to re-export it from `linalg`.
+fn invert_upper_triangular_inline(r: &Array2<f64>) -> Option<Array2<f64>> {
+    let n = r.nrows();
+    if n == 0 {
+        return Some(Array2::<f64>::zeros((0, 0)));
+    }
+    let mut inv = Array2::<f64>::zeros((n, n));
+    for col in 0..n {
+        let mut x = Array1::<f64>::zeros(n);
+        for i in (0..n).rev() {
+            let mut s = if i == col { 1.0 } else { 0.0 };
+            for j in (i + 1)..n {
+                s -= r[[i, j]] * x[j];
+            }
+            let diag = r[[i, i]];
+            if !(diag.abs() > 0.0) {
+                return None;
+            }
+            x[i] = s / diag;
+        }
+        for i in 0..n {
+            inv[[i, col]] = x[i];
+        }
+    }
+    Some(inv)
 }
 
 /// Eigen-clamped Newton step `−H⁻¹·g` with magnitude cap. Mirrors mgcv's

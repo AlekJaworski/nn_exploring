@@ -660,24 +660,20 @@ fn repara_predictions_invariance_gaussian_3smooth() {
         pred_diff
     );
 
-    // Gradient comparison note (R5 known difference):
+    // Gradient comparison note (R8 update):
     //
-    // The gradient does NOT match byte-identical between plain and repara
-    // paths, because `compute_ldet_s_with_derivs` uses `estimate_rank()` (a
-    // row-norm heuristic). On the unrotated 2nd-diff penalty, the row-norm
-    // rank overestimates as `k = 10` instead of the true `k - 2 = 8` (every
-    // row has nonzero norm — the null vectors are linear functions whose
-    // rank gets lost in row-wise summation). On the rotated `S_rot` (a
-    // partial identity with 1's on the 8 range entries and 0 on the 2 null
-    // entries), the row-norm rank correctly gives 8.
+    // **Pre-R8**: gradient did NOT match byte-identical between plain and
+    // repara paths because `log|X'WX + S|` was computed via `det(A).ln()`,
+    // which counts the near-null pivots from rank-deficient rotated S even
+    // though `log|S|_+` from `compute_ldet_s_with_derivs` excludes them
+    // (row-norm rank). The mismatch was exactly `(rank_row − rank_eigen)/2 = 1`
+    // per ρ component for the k=10 2nd-diff fixture.
     //
-    // This is the same R3 rank-heuristic inconsistency that Test 3
-    // (`sanity_fastreml_vs_reml_constant_offset`) documents. The rotated
-    // path's gradient is the CORRECT one (matching mgcv's eigen-based rank);
-    // the plain path's gradient is off by `(rank_row - rank_eigen) / 2 = 1`
-    // per ρ component for this fixture.
-    //
-    // We confirm the off-by-rank structure here as a documentation guard:
+    // **R8 fix**: `compute_sl_fitchol_step` now uses LAPACK `dpstrf`
+    // pivoted Cholesky for `log|X'WX + S|`, which drops the same null
+    // pivots `Sl.fitChol`'s `Rrank(R)` does (R/fast-REML.r:1607-1613).
+    // With both `log|S|_+` and `log|X'WX + S|` agreeing on rank, the
+    // gradient is now invariant to the repara rotation to machine precision.
     for kk in 0..nblocks {
         let diff = (res_plain.grad[kk] - res_repara.grad[kk]).abs();
         eprintln!(
@@ -685,19 +681,17 @@ fn repara_predictions_invariance_gaussian_3smooth() {
             kk, res_plain.grad[kk], res_repara.grad[kk], diff
         );
     }
-    // The difference is exactly `(rank_row - rank_eigen) / 2` per component.
-    // For the 2nd-diff penalty with k=10, this is `(10 - 8) / 2 = 1.0`. We
-    // check that the diff is consistent (not arbitrary) by comparing to
-    // this exact analytical value.
-    let expected_grad_diff_per_block: f64 = 1.0;
+    // Strict invariance check: with pivoted Chol the per-component gradient
+    // diff should be at most ~1e-10 (sandwich-product rounding).
     for kk in 0..nblocks {
         let diff = (res_plain.grad[kk] - res_repara.grad[kk]).abs();
         assert!(
-            (diff - expected_grad_diff_per_block).abs() < 1e-10,
-            "grad[{}] diff {:.6} != expected rank correction {:.6}",
+            diff < 1e-8,
+            "grad[{}] diverged after R8 pivoted-Chol port: plain={:.6} repara={:.6} |diff|={:.2e}",
             kk,
-            diff,
-            expected_grad_diff_per_block
+            res_plain.grad[kk],
+            res_repara.grad[kk],
+            diff
         );
     }
 }

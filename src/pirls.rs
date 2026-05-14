@@ -1840,6 +1840,65 @@ fn t_bgam_fisher_pair(r: f64, eta: f64, sigma2: f64, df: f64) -> (f64, f64) {
     (w, z)
 }
 
+/// mgcv `bgam.fitd`-style observed-info IRLS pair for the t-density.
+///
+/// Returns `(½·D''_η, η − D'_η/D''_η)` matching mgcv's `Dmu2 · 0.5` working
+/// weight at `rho == 0` (bam.r:638-640) — the same per-row arithmetic
+/// already shipped in `t_newton_working_pair`, lifted here under a name
+/// that mirrors `t_bgam_fisher_pair` and inlined into the fREML driver.
+///
+/// **Indefinite-W posture (R8)**: on moderate-outlier rows
+/// `r² > ν·σ²` makes `D''_η` go through zero and then negative. The
+/// previous Fisher pair side-stepped this; here we let the row weight take
+/// its true (possibly negative) value and rely on
+/// `compute_sl_fitchol_step`'s pivoted-Chol route to handle the resulting
+/// indefinite `X'WX`. If observed-info is non-finite for a row we still
+/// fall back to Fisher on that row (otherwise the entire IRLS step is
+/// NaN-poisoned).
+///
+/// The `min_w` floor below stays at `f64::MIN_POSITIVE` for finite-positive
+/// rows — we deliberately do NOT clamp negative weights up. That allows
+/// observed-info to express the curvature mgcv sees in `bgam.fitd` when
+/// `rho == 0`, which is the main half-octave of λ that the Fisher path
+/// was sub-optimising.
+#[inline]
+#[allow(dead_code)] // wired in via fastreml_irls_step in a later step
+fn t_bgam_observed_info_pair(r: f64, eta: f64, sigma2: f64, df: f64) -> (f64, f64) {
+    let sigma2 = sigma2.max(1e-300);
+    // Dmu = -2·(ν+1)·r / (νσ² + r²)  (efam.r:3632, same as Fisher).
+    let denom = df * sigma2 + r * r;
+    let dmu = -2.0 * (df + 1.0) * r / denom;
+    // Observed-info second derivative wrt η at identity link
+    // (mgcv efam.r:3645, `Dmu2` for scat with identity-link η = μ):
+    //   D''_η = 2·(ν+1)·(ν·σ² − r²) / (ν·σ² + r²)²
+    // Strictly positive when `r² < ν·σ²`, zero at the inflection,
+    // negative for the heavy-tail extremes.
+    let observed_dmu2 = 2.0 * (df + 1.0) * (df * sigma2 - r * r) / (denom * denom);
+    // mgcv's row-level Fisher fallback (efam.r:3641, "EDmu2" branch when
+    // Dmu2 ≤ 0): used here only when the observed value is non-finite.
+    let expected_dmu2 = 2.0 * (df + 1.0) / (sigma2 * (df + 3.0));
+    let dmu2 = if observed_dmu2.is_finite() {
+        observed_dmu2
+    } else {
+        expected_dmu2
+    };
+    // Avoid division by exact zero (NaN poisoning): nudge magnitude up by
+    // f64::MIN_POSITIVE while preserving sign. The pivoted-Chol step
+    // tolerates the resulting indefinite X'WX.
+    let dmu2_safe = if dmu2.abs() < f64::MIN_POSITIVE {
+        if dmu2 >= 0.0 {
+            f64::MIN_POSITIVE
+        } else {
+            -f64::MIN_POSITIVE
+        }
+    } else {
+        dmu2
+    };
+    let w = 0.5 * dmu2_safe;
+    let z = eta - dmu / dmu2_safe;
+    (w, z)
+}
+
 /// Per-observation working pair `(w, z)` for one t-distribution IRLS step.
 ///
 /// Returned by [`tdist_irls_step`]. The values are the per-row working weight
@@ -3785,28 +3844,53 @@ fn fastreml_irls_step(
         Family::TDist { df, sigma2 } => {
             // mgcv `bgam.fitd` (bam.r:635-640) builds the IRLS pair from
             // `dDeta(y, μ, G$w, θ, family, 0)`. For `rho == 0` it uses
-            // observed-info `Dmu2·0.5`; for AR1 it uses Fisher `EDmu2·0.5`.
-            // We use Fisher unconditionally for scat — observed-info can
-            // go negative on moderate-outlier rows and our `compute_sl_fitchol_step`
-            // doesn't tolerate indefinite X'WX. See `t_bgam_fisher_pair`
-            // doc for the parity trade-off.
+            // **observed-info** `Dmu2·0.5`; for AR1 (which we don't support)
+            // it uses Fisher `EDmu2·0.5`. R7 used Fisher unconditionally
+            // because plain LU + ridge in `compute_sl_fitchol_step` could
+            // not handle the indefinite X'WX that observed-info produces.
             //
-            // The previous EM-weight path (`tdist_irls_step(use_newton_working=false)`)
-            // is correct for `fit_pirls_tdist`'s gam.fit5 σ² MLE step but
-            // gives the wrong fREML λ optimum (95% rel gap); Fisher closes
-            // it to ~25%. Prior weights fold in algebraically: they
-            // multiply Dmu and Dmu2 alike, so z is invariant and only w
-            // scales.
+            // **R8 swap**: with pivoted Chol + rank-revealing dpstrf in
+            // `compute_sl_fitchol_step`, indefinite/rank-deficient X'WX is
+            // tolerated by truncating the null block of the (preconditioned)
+            // factor. We can now match mgcv's `rho == 0` observed-info path,
+            // which closes the residual ~23% rel λ gap from R7.
+            //
+            // **Per-row Fisher fallback** (mirrors mgcv efam.r:3641): when
+            // a row's `D''_η` is non-finite (NaN/inf from extreme residuals),
+            // substitute the row's expected-info value. Negative-but-finite
+            // weights are kept verbatim — the pivoted-Chol solve handles them.
+            //
+            // **Whole-step fallback**: if MORE than half the rows yield
+            // non-finite observed-info simultaneously (a pathological
+            // β iterate), we switch the entire step to Fisher. This keeps
+            // R7's good behavior on adversarial inputs without sacrificing
+            // mgcv parity on well-conditioned scat fixtures.
             let mut w = Array1::<f64>::zeros(n);
             let mut z = Array1::<f64>::zeros(n);
+            let mut bad_rows = 0usize;
             for i in 0..n {
                 let r = y[i] - eta[i];
-                let (wi, zi) = t_bgam_fisher_pair(r, eta[i], sigma2, df);
+                let (wi, zi) = t_bgam_observed_info_pair(r, eta[i], sigma2, df);
                 if wi.is_finite() && zi.is_finite() {
                     w[i] = wi;
                     z[i] = zi;
+                } else {
+                    bad_rows += 1;
+                    // Leave w[i] = z[i] = 0 — bam.r:642-644 also does this.
                 }
-                // else: leave as 0 (bam.r:642-644).
+            }
+            if bad_rows * 2 > n {
+                // Pathological iterate: fall back to all-Fisher for this step.
+                w.fill(0.0);
+                z.fill(0.0);
+                for i in 0..n {
+                    let r = y[i] - eta[i];
+                    let (wi, zi) = t_bgam_fisher_pair(r, eta[i], sigma2, df);
+                    if wi.is_finite() && zi.is_finite() {
+                        w[i] = wi;
+                        z[i] = zi;
+                    }
+                }
             }
             if let Some(pw) = prior_weights {
                 for i in 0..n {
