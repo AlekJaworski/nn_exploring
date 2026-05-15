@@ -1,14 +1,14 @@
 //! REML (Restricted Maximum Likelihood) criterion for smoothing parameter selection
 
 pub mod system;
+#[cfg(feature = "blas")]
+pub(crate) use system::{assemble_reml_system, glm_deviance_weighted, RemlScoreParts};
+#[cfg(feature = "blas")]
+pub use system::{compute_edf_from_cholesky, compute_ldet_s_with_derivs, compute_xtwx_cholesky};
 pub use system::{
     compute_xtwx, compute_xtwx_dispatch, compute_xtwy, compute_xtwy_dispatch, glm_deviance,
     ScaleParameterMethod,
 };
-#[cfg(feature = "blas")]
-pub use system::{compute_edf_from_cholesky, compute_ldet_s_with_derivs, compute_xtwx_cholesky};
-#[cfg(feature = "blas")]
-pub(crate) use system::{assemble_reml_system, RemlScoreParts};
 
 #[cfg(feature = "blas")]
 pub mod tk_kkt;
@@ -21,9 +21,9 @@ pub mod fastreml;
 pub use fastreml::{compute_sl_fitchol_step, SlFitCholResult};
 
 pub mod search_vector;
-pub use search_vector::{ExtraKind, ExtraParam, OuterSearchVector};
 #[cfg(feature = "blas")]
 pub(crate) use search_vector::{newton_1d_with_halving, newton_2d_with_halving};
+pub use search_vector::{ExtraKind, ExtraParam, OuterSearchVector};
 
 use crate::block_penalty::BlockPenalty;
 use crate::linalg::{determinant, inverse, solve};
@@ -31,7 +31,6 @@ use crate::pirls::{digamma, trigamma};
 use crate::GAMError;
 use crate::Result;
 use ndarray::{s, Array1, Array2};
-
 
 /// Estimate the rank of a matrix using row norms as approximation to singular values
 /// For symmetric matrices like penalty matrices, this gives a reasonable estimate
@@ -301,6 +300,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     mp: usize,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
 ) -> Result<f64> {
     let n = y.len();
     let p = x.ncols();
@@ -312,11 +312,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // mgcv more closely at saturating λ where the un-rotated linear
     // system is poorly conditioned. Gate falls in R2-f once validated.
     let reparam_active = std::env::var("MGCV_REPARAM").is_ok();
-    let rot_state: Option<(
-        Array2<f64>,
-        Vec<BlockPenalty>,
-        f64,
-    )> = if reparam_active {
+    let rot_state: Option<(Array2<f64>, Vec<BlockPenalty>, f64)> = if reparam_active {
         let (u1, mp_detected) = crate::reparam::compute_total_penalty_space(penalties_blocks, p)?;
         let _ = mp_detected; // caller-supplied `mp` wins for now; this is for diagnostics.
         let rot = crate::reparam::apply_reparam(x, penalties_blocks, lambdas, &u1, mp_detected, 0)?;
@@ -354,15 +350,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     // the tiny solve-only ridge out of determinants/traces.
     // cached_xtwy is only valid in the un-rotated basis; skip in the rotated path.
     let xtwy_for_assemble = if reparam_active { None } else { cached_xtwy };
-    let system = assemble_reml_system(
-        y,
-        x_use,
-        w,
-        xtwx,
-        lambdas,
-        pens_use,
-        xtwy_for_assemble,
-    )?;
+    let system = assemble_reml_system(y, x_use, w, xtwx, lambdas, pens_use, xtwy_for_assemble)?;
 
     // Deviance numerator, β'(ΣλS)β, Dp and σ² from the shared score-parts
     // helper. Two deviance paths (item 1 of #47):
@@ -387,6 +375,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         pens_use,
         family,
         y_original,
+        y_original_weights,
         mp,
         n,
     );
@@ -412,11 +401,8 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
         // Newton α depends on residuals y_orig - μ̂ at the original y, so
         // route through y_original when the caller supplied it.
         let y_for_newton = y_original.unwrap_or(y);
-        let w_score = crate::pirls::compute_newton_score_weights(
-            y_for_newton,
-            system.fitted(x_use),
-            family,
-        );
+        let w_score =
+            crate::pirls::compute_newton_score_weights(y_for_newton, system.fitted(x_use), family);
         // Guard against extreme α blow-up at intermediate λ during Newton
         // line search: if any w_score is non-finite, fall back to the
         // Fisher-weighted log|A|. Matches mgcv's effective behaviour at
@@ -500,7 +486,6 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
 
     Ok(reml)
 }
-
 
 /// Frozen pieces of the REML score that DO NOT depend on the family's
 /// working parameter θ. Used by the analytical θ-derivative path (and by
@@ -643,14 +628,7 @@ impl<'a> OuterLinearCache<'a> {
         let scale_est = family.estimate_phi_mgcv(self.y_for_ls, dp, self.mp, 1.0, phi_init);
         let ls1 = family.saturated_log_likelihood(self.y_for_ls, scale_est);
         let formula = family.score_formula();
-        Ok(formula.assemble(
-            dp,
-            ls1,
-            self.log_det_h,
-            self.log_det_s,
-            scale_est,
-            self.mp,
-        ))
+        Ok(formula.assemble(dp, ls1, self.log_det_h, self.log_det_s, scale_est, self.mp))
     }
 
     /// Tweedie-specific convenience wrapper around `score_at_theta`.
@@ -1070,6 +1048,7 @@ fn tdist_dd_arrays(
     eta: &Array1<f64>,
     df: f64,
     sigma2: f64,
+    prior_weights: Option<&Array1<f64>>,
 ) -> (
     Array1<f64>,
     Array1<f64>,
@@ -1115,6 +1094,7 @@ fn tdist_dd_arrays(
     ];
 
     for i in 0..n {
+        let wt = prior_weights.map(|w| w[i]).unwrap_or(1.0);
         let ym = y[i] - eta[i];
         let a = 1.0 + (ym / sig) * (ym / sig) / nu;
         let sig2a = sig2 * a;
@@ -1131,43 +1111,48 @@ fn tdist_dd_arrays(
         let fymf1ym = fym * f1ym;
         let f1ymf1 = f1ym * f1;
 
-        det[i] = -2.0 * f;
-        det2[i] = 2.0 * nu1 * (1.0 / nusig2a - 2.0 * f1 * f1);
-        det3[i] = 4.0 * f * (3.0 / nusig2a - 4.0 * f1 * f1);
-        det4[i] = 12.0 * (-nu1nusig2a / nusig2a + 8.0 * ff1 / nusig2a - 8.0 * ff1 * f1 * f1);
+        det[i] = wt * -2.0 * f;
+        det2[i] = wt * 2.0 * nu1 * (1.0 / nusig2a - 2.0 * f1 * f1);
+        det3[i] = wt * 4.0 * f * (3.0 / nusig2a - 4.0 * f1 * f1);
+        det4[i] = wt * 12.0 * (-nu1nusig2a / nusig2a + 8.0 * ff1 / nusig2a - 8.0 * ff1 * f1 * f1);
 
-        dth[0][i] = nu2 * (a.ln() - fym / nu);
-        dth[1][i] = -2.0 * fym;
-        det_th[0][i] = 2.0 * (f - ymsig2a - fymf1) * nu2nu;
-        det_th[1][i] = 4.0 * f * (1.0 - f1ym);
-        det2_th[0][i] = 2.0
+        dth[0][i] = wt * nu2 * (a.ln() - fym / nu);
+        dth[1][i] = wt * -2.0 * fym;
+        det_th[0][i] = wt * 2.0 * (f - ymsig2a - fymf1) * nu2nu;
+        det_th[1][i] = wt * 4.0 * f * (1.0 - f1ym);
+        det2_th[0][i] = wt
+            * 2.0
             * (-nu1nusig2a + 1.0 / sig2a + 5.0 * ff1 - 2.0 * f1ym / sig2a - 4.0 * fymf1 * f1)
             * nu2nu;
-        det2_th[1][i] = 4.0 * (-nu1nusig2a + ff1 * 5.0 - 4.0 * ff1 * f1ym);
+        det2_th[1][i] = wt * 4.0 * (-nu1nusig2a + ff1 * 5.0 - 4.0 * ff1 * f1ym);
 
-        dth2[0][i] = nu2 * a.ln()
-            + nu2nu * ym * ym * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym)
-                / nusig2a;
-        dth2[1][i] = 2.0 * (fym - ym * ymsig2a - fymf1ym) * nu2nu;
-        dth2[2][i] = 4.0 * fym * (1.0 - f1ym);
+        dth2[0][i] = wt
+            * (nu2 * a.ln()
+                + nu2nu * ym * ym * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym)
+                    / nusig2a);
+        dth2[1][i] = wt * 2.0 * (fym - ym * ymsig2a - fymf1ym) * nu2nu;
+        dth2[2][i] = wt * 4.0 * fym * (1.0 - f1ym);
 
         let term = 2.0 * nu2nu - 2.0 * nu1nu * nu2nu - 1.0 + nu1nu;
-        det_th2[0][i] = 2.0
+        det_th2[0][i] = wt
+            * 2.0
             * f1
             * nu2
             * (term - 2.0 * nu2nu * f1ym + 4.0 * fym * nu2nu / nu
                 - fym / nu
                 - 2.0 * fymf1ym * nu2nu / nu);
         det_th2[1][i] =
-            4.0 * (-f + ymsig2a + 3.0 * fymf1 - ymsig2a * f1ym - 2.0 * fymf1 * f1ym) * nu2nu;
-        det_th2[2][i] = 8.0 * f * (-1.0 + 3.0 * f1ym - 2.0 * f1ym * f1ym);
-        det3_th[0][i] = 4.0
+            wt * 4.0 * (-f + ymsig2a + 3.0 * fymf1 - ymsig2a * f1ym - 2.0 * fymf1 * f1ym) * nu2nu;
+        det_th2[2][i] = wt * 8.0 * f * (-1.0 + 3.0 * f1ym - 2.0 * f1ym * f1ym);
+        det3_th[0][i] = wt
+            * 4.0
             * (-6.0 * f / nusig2a + 3.0 * f1 / sig2a + 18.0 * ff1 * f1
                 - 4.0 * f1ymf1 / sig2a
                 - 12.0 * nu1 * ym * f1.powi(4))
             * nu2nu;
-        det3_th[1][i] = 48.0 * f * (-1.0 / nusig2a + 3.0 * f1 * f1 - 2.0 * f1ymf1 * f1);
-        det2_th2[0][i] = 2.0
+        det3_th[1][i] = wt * 48.0 * f * (-1.0 / nusig2a + 3.0 * f1 * f1 - 2.0 * f1ymf1 * f1);
+        det2_th2[0][i] = wt
+            * 2.0
             * nu2
             * (-term + 10.0 * nu2nu * f1ym - 16.0 * fym * nu2nu / nu - 2.0 * f1ym
                 + 5.0 * nu1nu * f1ym
@@ -1176,14 +1161,16 @@ fn tdist_dd_arrays(
                 - 4.0 * nu1nu * f1ym * f1ym
                 - 12.0 * nu1nu * nu2nu * f1ym * f1ym * f1ym)
             / nusig2a;
-        det2_th2[1][i] = 4.0
+        det2_th2[1][i] = wt
+            * 4.0
             * (nu1nusig2a - 1.0 / sig2a - 11.0 * nu1 * f1 * f1
                 + 5.0 * f1ym / sig2a
                 + 22.0 * nu1 * fymf1 * f1
                 - 4.0 * f1ym * f1ym / sig2a
                 - 12.0 * nu1 * fymf1 * fymf1)
             * nu2nu;
-        det2_th2[2][i] = 8.0
+        det2_th2[2][i] = wt
+            * 8.0
             * (nu1nusig2a - 11.0 * nu1 * f1 * f1 + 22.0 * nu1 * fymf1 * f1
                 - 12.0 * nu1 * fymf1 * fymf1);
     }
@@ -1200,6 +1187,7 @@ fn tdist_gdi2_native(
     y_work: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
@@ -1233,7 +1221,7 @@ fn tdist_gdi2_native(
     let a_inv = inverse(&amat)?;
     let eta = x.dot(&beta);
     let (det, det2, det3, det4, dth, det_th, det2_th, det3_th, dth2, det_th2, det2_th2) =
-        tdist_dd_arrays(y_original, &eta, df, sigma2);
+        tdist_dd_arrays(y_original, &eta, df, sigma2, prior_weights);
 
     let mut b1: Vec<Array1<f64>> = Vec::with_capacity(ntot);
     for t in 0..ntheta {
@@ -1278,11 +1266,13 @@ fn tdist_gdi2_native(
     let nu2 = df - 2.0;
     let nu2nu = nu2 / df;
     let mut ls1 = Array1::<f64>::zeros(ntot);
-    ls1[0] = (y_original.len() as f64)
-        * (nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0 - 0.5 * nu2nu);
-    ls1[1] = -(y_original.len() as f64);
+    let sum_prior_w = prior_weights
+        .map(|w| w.sum())
+        .unwrap_or(y_original.len() as f64);
+    ls1[0] = sum_prior_w * (nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0 - 0.5 * nu2nu);
+    ls1[1] = -sum_prior_w;
     let mut ls2 = Array2::<f64>::zeros((ntot, ntot));
-    ls2[[0, 0]] = (y_original.len() as f64)
+    ls2[[0, 0]] = sum_prior_w
         * (nu2 * nu2 * (trigamma(half_nu1) - trigamma(half_nu)) / 4.0
             + nu2 * (digamma(half_nu1) - digamma(half_nu)) / 2.0
             + 0.5 * nu2nu * nu2nu
@@ -1429,6 +1419,7 @@ pub fn tdist_shape_derivatives_gamfit4(
     y_work: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
@@ -1439,6 +1430,7 @@ pub fn tdist_shape_derivatives_gamfit4(
         y_work,
         x,
         w,
+        prior_weights,
         lambdas,
         penalties,
         cached_xtwx,
@@ -1462,6 +1454,7 @@ pub fn reml_gradient_gamfit4_tdist_analytic(
     y_work: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
@@ -1473,6 +1466,7 @@ pub fn reml_gradient_gamfit4_tdist_analytic(
         y_work,
         x,
         w,
+        prior_weights,
         lambdas,
         penalties,
         cached_xtwx,
@@ -1491,6 +1485,7 @@ pub fn reml_hessian_gamfit4_tdist_analytic(
     y_work: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
@@ -1502,6 +1497,7 @@ pub fn reml_hessian_gamfit4_tdist_analytic(
         y_work,
         x,
         w,
+        prior_weights,
         lambdas,
         penalties,
         cached_xtwx,
@@ -1539,6 +1535,7 @@ pub fn reml_joint_gh_gamfit4_tdist_analytic(
     y_work: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
     lambdas: &[f64],
     penalties: &[BlockPenalty],
     cached_xtwx: Option<&Array2<f64>>,
@@ -1550,6 +1547,7 @@ pub fn reml_joint_gh_gamfit4_tdist_analytic(
         y_work,
         x,
         w,
+        prior_weights,
         lambdas,
         penalties,
         cached_xtwx,
@@ -1659,6 +1657,7 @@ fn compute_dev_grad_beta(
     beta: &Array1<f64>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
 ) -> Array1<f64> {
     let n = x.nrows();
     let mut v1 = Array1::<f64>::zeros(n);
@@ -1671,7 +1670,7 @@ fn compute_dev_grad_beta(
             }
         }
         (fam, Some(y_orig)) => {
-            // GLM deviance form: v1[i] = -2 (y_orig - μ) / (V(μ) · g'(μ))
+            // GLM deviance form: v1[i] = -2 prior_w[i] (y_orig - μ) / (V(μ) · g'(μ))
             // For canonical link V·g' = 1 so v1 = -2(y_orig - μ).
             // For non-canonical we'd need g' separately; use V·g' factor.
             let eta = x.dot(beta);
@@ -1682,7 +1681,8 @@ fn compute_dev_grad_beta(
                 let dmu_deta = fam.d_inverse_link(eta[i]).max(1e-300);
                 let g_prime = 1.0 / dmu_deta;
                 let denom = v_mu * g_prime;
-                v1[i] = -2.0 * (y_orig[i] - mu_i) / denom;
+                let prior_w = y_original_weights.map(|pw| pw[i]).unwrap_or(1.0);
+                v1[i] = -2.0 * prior_w * (y_orig[i] - mu_i) / denom;
             }
         }
     }
@@ -1705,6 +1705,7 @@ fn compute_sigma2_at(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
     mp: usize,
 ) -> Result<f64> {
     use crate::pirls::Family;
@@ -1748,7 +1749,7 @@ fn compute_sigma2_at(
         (fam, Some(y_orig)) => {
             let mu: ndarray::Array1<f64> =
                 fitted.iter().map(|&eta| fam.inverse_link(eta)).collect();
-            glm_deviance(y_orig, &mu, fam)
+            glm_deviance_weighted(y_orig, &mu, fam, y_original_weights)
         }
     };
     let bsb: f64 = lambdas
@@ -1795,12 +1796,23 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
     enable_sigma_chain: bool,
     mp: usize,
 ) -> Result<Array1<f64>> {
     reml_gradient_mgcv_exact_ift_inner_at_beta(
-        y, x, w, lambdas, penalties_blocks, cached_xtwx, family, y_original,
-        enable_sigma_chain, mp, None,
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        family,
+        y_original,
+        y_original_weights,
+        enable_sigma_chain,
+        mp,
+        None,
     )
 }
 
@@ -1819,6 +1831,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
     enable_sigma_chain: bool,
     mp: usize,
     beta_provided: Option<&Array1<f64>>,
@@ -1872,7 +1885,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
             .sum(),
         (fam, Some(y_orig)) => {
             let mu: Array1<f64> = fitted.iter().map(|&eta| fam.inverse_link(eta)).collect();
-            glm_deviance(y_orig, &mu, fam)
+            glm_deviance_weighted(y_orig, &mu, fam, y_original_weights)
         }
     };
     let a_inv = inverse(&a)?;
@@ -1963,7 +1976,8 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
     }
 
     // ∂D/∂β at current (β,μ)
-    let dev_grad_beta = compute_dev_grad_beta(y, x, w, &beta, family, y_original);
+    let dev_grad_beta =
+        compute_dev_grad_beta(y, x, w, &beta, family, y_original, y_original_weights);
 
     // ΣλSβ = Σ_j λ_j S_j β  (gathered as a length-p vector)
     let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
@@ -2067,6 +2081,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
                 cached_xtwx,
                 family,
                 y_original,
+                y_original_weights,
                 mp,
             )?;
             let s2_minus = compute_sigma2_at(
@@ -2078,6 +2093,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
                 cached_xtwx,
                 family,
                 y_original,
+                y_original_weights,
                 mp,
             )?;
             let dsig2_drho = (s2_plus - s2_minus) / (2.0 * eps);
@@ -2102,6 +2118,7 @@ pub fn reml_gradient_mgcv_exact_ift(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
 ) -> Result<Array1<f64>> {
     let enable_sigma_chain = std::env::var("MGCV_SIGMA_CHAIN").is_ok();
     // Mp = 1 (intercept) + Σ null-space dims per penalty (matches lib.rs:1131-1144)
@@ -2135,7 +2152,11 @@ pub fn reml_gradient_mgcv_exact_ift(
         Some((x_rot, pens_rot)) => (x_rot, pens_rot.as_slice()),
         None => (x, penalties_blocks),
     };
-    let cached_xtwx_use = if rot_state.is_some() { None } else { cached_xtwx };
+    let cached_xtwx_use = if rot_state.is_some() {
+        None
+    } else {
+        cached_xtwx
+    };
     reml_gradient_mgcv_exact_ift_inner(
         y,
         x_use,
@@ -2145,6 +2166,7 @@ pub fn reml_gradient_mgcv_exact_ift(
         cached_xtwx_use,
         family,
         y_original,
+        y_original_weights,
         enable_sigma_chain,
         mp,
     )
@@ -2258,8 +2280,7 @@ pub fn reml_gradient_mgcv_exact_ift_newton_at_beta(
         }
     }
 
-    let dev_grad_beta =
-        compute_dev_grad_beta(y_raw, x, &w_newton, beta, family, Some(y_raw));
+    let dev_grad_beta = compute_dev_grad_beta(y_raw, x, &w_newton, beta, family, Some(y_raw), None);
 
     let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
     for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
@@ -2485,7 +2506,7 @@ pub fn reml_hessian_mgcv_exact_ift(
     }
 
     // ∂D/∂β at current β
-    let dev_grad_beta = compute_dev_grad_beta(y, x, w, &beta, family, y_original);
+    let dev_grad_beta = compute_dev_grad_beta(y, x, w, &beta, family, y_original, None);
     // ∂²D/∂β² b1[:,k] = 2 X'WX b1[:,k]  (Fisher form, exact for canonical link)
     // We compute (∂²D/∂β² b1)[:,k] = 2 X'WX b1[:,k] for each k.
     let mut d2dev_b1 = Array2::<f64>::zeros((p, m));
@@ -6083,21 +6104,14 @@ mod tests {
             mp,
             family,
             Some(&y_orig),
+            None,
         )
         .expect("reference REML failed");
 
         // Cached path.
-        let cache = OuterLinearCache::build(
-            &y_orig,
-            &x,
-            &w,
-            &xtwx,
-            &lambdas,
-            &penalties,
-            mp,
-            &y_orig,
-        )
-        .expect("cache build failed");
+        let cache =
+            OuterLinearCache::build(&y_orig, &x, &w, &xtwx, &lambdas, &penalties, mp, &y_orig)
+                .expect("cache build failed");
         let cached_center = cache.score_at_p(p_tweedie).expect("cached score failed");
 
         let rel = (ref_center - cached_center).abs() / ref_center.abs().max(1.0);
@@ -6138,6 +6152,7 @@ mod tests {
                     mp,
                     fam_p,
                     Some(&y_orig),
+                    None,
                 )
                 .expect("ref score failed");
                 let r_cached = cache.score_at_p(p).expect("cached score failed");
@@ -6241,6 +6256,7 @@ mod tests {
                 mp,
                 fam,
                 Some(&y_orig),
+                None,
             )
             .expect("dispatch failed")
         };
@@ -6250,20 +6266,11 @@ mod tests {
         let grad_fd = (rp_fd - rm_fd) / (2.0 * h);
         let hess_fd = (rp_fd - 2.0 * rc_fd + rm_fd) / (h * h);
 
-        let cache = OuterLinearCache::build(
-            &y_orig,
-            &x,
-            &w,
-            &xtwx,
-            &lambdas,
-            &penalties,
-            mp,
-            &y_orig,
-        )
-        .expect("cache build failed");
-        let (rc_c, grad_c, hess_c) =
-            tweedie_theta_derivatives_cached(&cache, theta, h, theta_to_p)
-                .expect("cached FD failed");
+        let cache =
+            OuterLinearCache::build(&y_orig, &x, &w, &xtwx, &lambdas, &penalties, mp, &y_orig)
+                .expect("cache build failed");
+        let (rc_c, grad_c, hess_c) = tweedie_theta_derivatives_cached(&cache, theta, h, theta_to_p)
+            .expect("cached FD failed");
 
         // Center scores should be ~bit-identical.
         let rel_center = (rc_fd - rc_c).abs() / rc_fd.abs().max(1.0);

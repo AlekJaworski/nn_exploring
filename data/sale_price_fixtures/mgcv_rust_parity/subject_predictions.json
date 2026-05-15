@@ -1,0 +1,95 @@
+{
+  "split_0": {
+    "subject_features": {
+      "current_list_price": 925000.0,
+      "price_change_pct_from_original": -1.015228426395939,
+      "cum_dom_before_current_regime": 0.0,
+      "days_in_current_price_regime": 21.0,
+      "monthly_index": -8.0,
+      "at_least_1_price_drop": 0.0,
+      "at_least_2_price_drops": 0.0,
+      "at_least_3_price_drops": 0.0
+    },
+    "mean_gam_prod": 0.9496107108262689,
+    "mean_gam_no_param": 0.9476499121841229
+  },
+  "split_1": {
+    "subject_features": {
+      "current_list_price": 925000.0,
+      "price_change_pct_from_original": -1.0649740678814472,
+      "cum_dom_before_current_regime": 0.0,
+      "days_in_current_price_regime": 21.0,
+      "monthly_index": -8.0,
+      "at_least_1_price_drop": 0.0,
+      "at_least_2_price_drops": 0.0,
+      "at_least_3_price_drops": 0.0
+    },
+    "mean_gam_prod": 0.9533653784117989,
+    "mean_gam_no_param": 0.9494375040686864
+  },
+  "split_2": {
+    "subject_features": {
+      "current_list_price": 929900.0,
+      "price_change_pct_from_original": -0.9389671361502347,
+      "cum_dom_before_current_regime": 0.0,
+      "days_in_current_price_regime": 21.0,
+      "monthly_index": -8.0,
+      "at_least_1_price_drop": 0.0,
+      "at_least_2_price_drops": 0.0,
+      "at_least_3_price_drops": 0.0
+    },
+    "mean_gam_prod": 0.9515350538896421,
+    "mean_gam_no_param": 0.9502486161569608
+  },
+  "split_3": {
+    "subject_features": {
+      "current_list_price": 925000.0,
+      "price_change_pct_from_original": -0.9544513457556936,
+      "cum_dom_before_current_regime": 0.0,
+      "days_in_current_price_regime": 21.0,
+      "monthly_index": -8.0,
+      "at_least_1_price_drop": 0.0,
+      "at_least_2_price_drops": 0.0,
+      "at_least_3_price_drops": 0.0
+    },
+    "mean_gam_prod": 0.9566940799903858,
+    "mean_gam_no_param": 0.953195216969496
+  },
+  "split_4": {
+    "subject_features": {
+      "current_list_price": 930000.0,
+      "price_change_pct_from_original": -1.015228426395939,
+      "cum_dom_before_current_regime": 0.0,
+      "days_in_current_price_regime": 21.0,
+      "monthly_index": -8.0,
+      "at_least_1_price_drop": 0.0,
+      "at_least_2_price_drops": 0.0,
+      "at_least_3_price_drops": 0.0
+    },
+    "mean_gam_prod": 0.9525983501774324,
+    "mean_gam_no_param": 0.9518983715414319
+  },
+  "entire_dataset": {
+    "subject_features": {
+      "current_list_price": 925000.0,
+      "price_change_pct_from_original": -1.001001001001001,
+      "cum_dom_before_current_regime": 0.0,
+      "days_in_current_price_regime": 21.0,
+      "monthly_index": -8.0,
+      "at_least_1_price_drop": 0.0,
+      "at_least_2_price_drops": 0.0,
+      "at_least_3_price_drops": 0.0
+    },
+    "mean_gam_prod": 0.9512288023487907,
+    "mean_gam_no_param": 0.9499145609124884
+  },
+  "qgam_q95_entire_dataset": {
+    "subject_features": {
+      "days_in_current_price_regime": 21.0,
+      "cum_dom_before_current_regime": 0.0,
+      "price_change_pct_from_original": -1.001001001001001,
+      "monthly_index": -8.0
+    },
+    "qgam_q95_pred": 0.04137170850168501
+  }
+}

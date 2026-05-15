@@ -771,6 +771,7 @@ name = "mgcv_rust"
 version = "0.16.0"
 dependencies = [
  "approx",
+ "lapack-sys",
  "ndarray",
  "ndarray-linalg",
  "ndarray-rand",

@@ -113,10 +113,7 @@ pub fn gam_reparam_core(
     // shrinks to (Q - r) × (Q - r) when its term is moved to the
     // sub-dominant set `gamma1`. We allocate fresh `Array2<f64>` each
     // iter to side-step C's in-place storage shrinkage trick.
-    let mut si: Vec<Array2<f64>> = rs
-        .iter()
-        .map(|r| r.dot(&r.t()))
-        .collect();
+    let mut si: Vec<Array2<f64>> = rs.iter().map(|r| r.dot(&r.t())).collect();
 
     // Active-set bookkeeping.
     let mut gamma = vec![true; mf]; // terms still to deal with
@@ -249,8 +246,7 @@ pub fn gam_reparam_core(
             s.slice_mut(s![0..k, k..k + q_active]).assign(&b_block);
             // Symmetric mirror: S[K..K+Q, 0..K] = B'  (mgcv writes both
             // halves explicitly at gdi.c:718).
-            s.slice_mut(s![k..k + q_active, 0..k])
-                .assign(&b_block.t());
+            s.slice_mut(s![k..k + q_active, 0..k]).assign(&b_block.t());
         }
 
         // 2.9 — Lower-right Q × Q block: C = U' · Sg · U + diag(ev[:r])
@@ -272,16 +268,14 @@ pub fn gam_reparam_core(
             }
             let ncols = rs_ncol[kk];
             // Extract the Q × ncols submatrix at rows K..K+Q.
-            let sub = rs_work[kk]
-                .slice(s![k..k + q_active, 0..ncols])
-                .to_owned();
+            let sub = rs_work[kk].slice(s![k..k + q_active, 0..ncols]).to_owned();
             if alpha[kk] {
                 // B = U' · sub, keeping only the first r rows (the
                 // dominant subspace). Then rows K..K+r get B; rows
                 // K+r..K+Q get zeroed.
                 let b = u_desc.t().dot(&sub); // Q × ncols
-                // Write back: rows K..K+r = first r rows of b; trailing
-                // rows zero.
+                                              // Write back: rows K..K+r = first r rows of b; trailing
+                                              // rows zero.
                 rs_work[kk]
                     .slice_mut(s![k..k + r, 0..ncols])
                     .assign(&b.slice(s![0..r, 0..ncols]));
@@ -606,9 +600,7 @@ pub fn apply_reparam(
     let mut rs_rot: Vec<Array2<f64>> = Vec::with_capacity(m);
     for rs_core in &core.rs {
         let mut padded = Array2::<f64>::zeros((p, rs_core.ncols()));
-        padded
-            .slice_mut(s![..q_range, ..])
-            .assign(rs_core);
+        padded.slice_mut(s![..q_range, ..]).assign(rs_core);
         rs_rot.push(padded);
     }
 
@@ -652,8 +644,7 @@ fn flip_columns(a: &Array2<f64>) -> Array2<f64> {
     let n = a.ncols();
     let mut out = Array2::<f64>::zeros((a.nrows(), n));
     for j in 0..n {
-        out.column_mut(j)
-            .assign(&a.column(n - 1 - j));
+        out.column_mut(j).assign(&a.column(n - 1 - j));
     }
     out
 }
@@ -746,11 +737,7 @@ mod tests {
         // det1[1] = sp_2 · tr(S^{-1} · S_2) = sp_2 · (q-1) · sp_2^{-1} = q - 1
         let d1 = out.det1.unwrap();
         assert!((d1[0] - 1.0).abs() < 1e-10, "d1[0]={}", d1[0]);
-        assert!(
-            (d1[1] - ((q - 1) as f64)).abs() < 1e-10,
-            "d1[1]={}",
-            d1[1]
-        );
+        assert!((d1[1] - ((q - 1) as f64)).abs() < 1e-10, "d1[1]={}", d1[1]);
     }
 
     /// Reconstruction check: qs' · S₀ · qs ≈ s, on a small problem with
@@ -776,8 +763,7 @@ mod tests {
         let rs = vec![rs0.clone(), rs1.clone()];
         let sp = vec![3.0_f64, 0.2_f64];
 
-        let s0: Array2<f64> =
-            sp[0] * rs[0].dot(&rs[0].t()) + sp[1] * rs[1].dot(&rs[1].t());
+        let s0: Array2<f64> = sp[0] * rs[0].dot(&rs[0].t()) + sp[1] * rs[1].dot(&rs[1].t());
         let s0 = symmetrise(&s0);
 
         let (d_tol, r_tol) = default_tolerances();
@@ -793,11 +779,7 @@ mod tests {
                 }
             }
         }
-        assert!(
-            max_diff < 1e-10,
-            "qs' S0 qs ≠ s, max diff = {}",
-            max_diff
-        );
+        assert!(max_diff < 1e-10, "qs' S0 qs ≠ s, max diff = {}", max_diff);
     }
 
     #[test]
@@ -846,7 +828,9 @@ mod tests {
         // Two smooth-like blocks: just put non-zero values where smooths live.
         let mut seed = 1_u64;
         let mut rand = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 32) as f64 / u32::MAX as f64) - 0.5
         };
         for i in 0..n {
@@ -896,7 +880,11 @@ mod tests {
                 }
             }
         }
-        assert!(max_off < 1e-12, "U1 not orthogonal, max off-diag = {}", max_off);
+        assert!(
+            max_off < 1e-12,
+            "U1 not orthogonal, max off-diag = {}",
+            max_off
+        );
         assert!(
             max_diag_err < 1e-12,
             "U1 columns not unit-norm, max diag err = {}",
@@ -931,11 +919,7 @@ mod tests {
                 max_x_err = max_x_err.max((rot.x_rot[[i, j]] - x_check[[i, j]]).abs());
             }
         }
-        assert!(
-            max_x_err < 1e-12,
-            "x_rot != x · T, max err = {}",
-            max_x_err
-        );
+        assert!(max_x_err < 1e-12, "x_rot != x · T, max err = {}", max_x_err);
 
         // For each smooth, rs_rot[i] · rs_rot[i]' must equal T' · S_i · T.
         for (i, pen) in pens.iter().enumerate() {
@@ -946,14 +930,17 @@ mod tests {
             let mut max_si_err = 0.0_f64;
             for r in 0..p {
                 for c in 0..p {
-                    max_si_err = max_si_err
-                        .max((s_i_rot_actual[[r, c]] - s_i_rot_expected[[r, c]]).abs());
+                    max_si_err =
+                        max_si_err.max((s_i_rot_actual[[r, c]] - s_i_rot_expected[[r, c]]).abs());
                 }
             }
             assert!(
                 max_si_err < 1e-10,
                 "rs_rot[{}]·rs_rot[{}]' != T'·S_{}·T, max err = {}",
-                i, i, i, max_si_err
+                i,
+                i,
+                i,
+                max_si_err
             );
         }
 
@@ -970,11 +957,7 @@ mod tests {
         let (evs, _) = s_block.eigh(UPLO::Lower).unwrap();
         let max_ev = evs.iter().fold(0.0_f64, |a, &b| a.max(b));
         let thresh = max_ev * 1e-14;
-        let det_check: f64 = evs
-            .iter()
-            .filter(|&&x| x > thresh)
-            .map(|x| x.ln())
-            .sum();
+        let det_check: f64 = evs.iter().filter(|&&x| x > thresh).map(|x| x.ln()).sum();
         assert!(
             (rot.det - det_check).abs() < 1e-10,
             "det = {}, expected = {}",

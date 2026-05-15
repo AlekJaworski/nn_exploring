@@ -31,8 +31,8 @@ when `phi_fixed = true`). For Poisson/Binomial mgcv hard-pins
 `(rss1+bSb1)/(φ·γ)` were shifted by ~y_var·0.05 relative to mgcv,
 moving the λ optimum the same amount. R6 pins `log_phi = 0` in the
 `phi_fixed = true` branch and both fixtures now hit byte-level β/λ.
-Only the scat-weighted xfail remains, with the pivoted-Cholesky
-follow-up tracked separately.
+The scat-weighted fREML gap is closed: scat is treated as fixed-φ and its
+own family σ carries the scale, matching mgcv's `scat()` (`fit$sig2 = 1`).
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ ro.r("options(warn = -1)")
 # ---- Fixture slice -------------------------------------------------------
 
 # Representative slice spanning Gaussian (canonical baseline), Gaussian
-# weighted (probes the EDF off-by-one), scat (B5 family-θ),
+# weighted (probes the EDF off-by-one), scat (family θ + fixed-φ scale),
 # Poisson/Binomial/Gamma (exp_family_irls_step path under fREML).
 _B7_FIXTURES = [
     "1d_gaussian_smooth_n500_k10_cr",
@@ -79,9 +79,8 @@ _B7_FIXTURES = [
     "2d_gamma_log_n200_k10_cr",
 ]
 
-# Per-fixture tolerance overrides for cases where exp-family fREML is
-# known to regress vs mgcv (B5 follow-up; see module docstring). We
-# still RUN these as xfail, recording the gap in parity_results.
+# Per-fixture tolerance overrides for cases where fREML is known to regress
+# vs mgcv. Keep this table empty when the focused slice is clean.
 #
 # **R6 (commit on `worktree-agent-…`) closed the Poisson/Binomial gap**:
 # the bug was in `fit_pirls_fastreml`'s log_phi seed. Known-φ families
@@ -95,28 +94,7 @@ _B7_FIXTURES = [
 # λ optimum by the same factor. Pre-fix on the B7 fixtures: Poisson(log)
 # rust λ=95 vs mgcv 160 (41% rel gap); Binomial(logit) ~100× rel gap.
 # Post-fix: β max_abs ≤ 5e-3 on both. xfail mark dropped — see commit log.
-_SCAT_WEIGHTED_REASON = (
-    "scat-weighted under fREML: R7 closed the (df, σ²) gap to <0.2% rel by "
-    "(a) bumping family_theta min_df 2→3 to match mgcv's scat(min.df=3) "
-    "default (efam.r:3552) — without this the outer θ Newton's step clamp "
-    "/ PSD threshold / convergence test all act on different curvature and "
-    "the Newton lands at a different (ν, σ²); (b) wiring tdist_profile "
-    "through correctly so the 2-D Newton actually runs (the previous "
-    "guard `fixed_df_for_scat.is_none()` was always false ⇒ df stayed at "
-    "the seed); (c) switching `fastreml_irls_step` for TDist from the EM "
-    "weight to the bgam.fitd-style Fisher (expected-info) weight "
-    "`EDmu2/2 = (ν+1)/(σ²(ν+3))` per bam.r:638-640. λ remains ~23% rel off "
-    "mgcv (rust ~168, mgcv ~137) and predictions ~4.6e-3 vs tol 1e-3. "
-    "Closing the residual λ gap requires using mgcv's exact `rho==0` "
-    "observed-info weight `Dmu2/2`, which goes negative on moderate outliers "
-    "and breaks our `compute_sl_fitchol_step`'s plain LU solve. mgcv "
-    "tolerates this via pivoted Cholesky in `Sl.fitChol`; we'd need the "
-    "same fallback in the ridge solver to ship byte-parity. Track as R-task "
-    "`fastreml-pivoted-chol-for-indefinite-xtwx`."
-)
-_KNOWN_FREML_GAPS = {
-    "1d_scat_weighted_n300_k10_cr": _SCAT_WEIGHTED_REASON,
-}
+_KNOWN_FREML_GAPS = {}
 
 
 # ---- mgcv reference fitter -----------------------------------------------

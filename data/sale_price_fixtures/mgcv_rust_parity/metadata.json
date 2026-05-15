@@ -1,0 +1,118 @@
+{
+  "rpy2_version": "unknown",
+  "R_version": "R version 4.6.0 (2026-04-24)",
+  "mgcv_version": "1.9.4",
+  "qgam_version": "2.0.0",
+  "fixture_dir": "/home/alex/vibe_coding/nn_exploring/data/sale_price_fixtures",
+  "fixtures": {
+    "split_0": {
+      "source": "split_0_train.parquet",
+      "n_rows": 5157,
+      "k_mean_gam": {
+        "current_list_price": 7,
+        "price_change_pct_from_original": 7,
+        "cum_dom_before_current_regime": 7,
+        "days_in_current_price_regime": 7,
+        "monthly_index": 5
+      },
+      "fit_time_prod_s": 0.43900729599408805,
+      "fit_time_no_param_s": 0.17212406898033805,
+      "subject_pred_prod": 0.9496107108262689,
+      "subject_pred_no_param": 0.9476499121841229,
+      "mean_gam_output_sha256_16": "5b52eb524b0c7b5c"
+    },
+    "split_1": {
+      "source": "split_1_train.parquet",
+      "n_rows": 5071,
+      "k_mean_gam": {
+        "current_list_price": 7,
+        "price_change_pct_from_original": 7,
+        "cum_dom_before_current_regime": 7,
+        "days_in_current_price_regime": 7,
+        "monthly_index": 5
+      },
+      "fit_time_prod_s": 0.17987347600865178,
+      "fit_time_no_param_s": 0.5050993519835174,
+      "subject_pred_prod": 0.9533653784117989,
+      "subject_pred_no_param": 0.9494375040686864,
+      "mean_gam_output_sha256_16": "34d5eff9f1435005"
+    },
+    "split_2": {
+      "source": "split_2_train.parquet",
+      "n_rows": 5059,
+      "k_mean_gam": {
+        "current_list_price": 7,
+        "price_change_pct_from_original": 7,
+        "cum_dom_before_current_regime": 7,
+        "days_in_current_price_regime": 7,
+        "monthly_index": 5
+      },
+      "fit_time_prod_s": 0.20698173900018446,
+      "fit_time_no_param_s": 0.21666824497515336,
+      "subject_pred_prod": 0.9515350538896421,
+      "subject_pred_no_param": 0.9502486161569608,
+      "mean_gam_output_sha256_16": "e8f3acb4925dda28"
+    },
+    "split_3": {
+      "source": "split_3_train.parquet",
+      "n_rows": 5072,
+      "k_mean_gam": {
+        "current_list_price": 7,
+        "price_change_pct_from_original": 7,
+        "cum_dom_before_current_regime": 7,
+        "days_in_current_price_regime": 7,
+        "monthly_index": 5
+      },
+      "fit_time_prod_s": 0.1992291210044641,
+      "fit_time_no_param_s": 0.2647835959796794,
+      "subject_pred_prod": 0.9566940799903858,
+      "subject_pred_no_param": 0.953195216969496,
+      "mean_gam_output_sha256_16": "de84f436e7ff2542"
+    },
+    "split_4": {
+      "source": "split_4_train.parquet",
+      "n_rows": 5241,
+      "k_mean_gam": {
+        "current_list_price": 7,
+        "price_change_pct_from_original": 7,
+        "cum_dom_before_current_regime": 7,
+        "days_in_current_price_regime": 7,
+        "monthly_index": 5
+      },
+      "fit_time_prod_s": 0.20146218599984422,
+      "fit_time_no_param_s": 0.2158745330234524,
+      "subject_pred_prod": 0.9525983501774324,
+      "subject_pred_no_param": 0.9518983715414319,
+      "mean_gam_output_sha256_16": "26633b6c270ff1e0"
+    },
+    "entire_dataset": {
+      "source": "entire_dataset_train.parquet",
+      "n_rows": 6400,
+      "k_mean_gam": {
+        "current_list_price": 7,
+        "price_change_pct_from_original": 7,
+        "cum_dom_before_current_regime": 7,
+        "days_in_current_price_regime": 7,
+        "monthly_index": 5
+      },
+      "fit_time_prod_s": 0.22454495998681523,
+      "fit_time_no_param_s": 0.47018880999530666,
+      "subject_pred_prod": 0.9512288023487907,
+      "subject_pred_no_param": 0.9499145609124884,
+      "mean_gam_output_sha256_16": "6ade93307b4a0e37"
+    },
+    "qgam_q95": {
+      "source": "entire_dataset_train.parquet",
+      "n_rows": 6400,
+      "k_qgam": {
+        "days_in_current_price_regime": 5,
+        "cum_dom_before_current_regime": 5,
+        "price_change_pct_from_original": 5,
+        "monthly_index": 5
+      },
+      "fit_time_s": 7.161114232992986,
+      "subject_q95_pred": 0.04137170850168501,
+      "output_sha256_16": "93c62ec3153c8037"
+    }
+  }
+}

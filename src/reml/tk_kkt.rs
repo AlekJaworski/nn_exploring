@@ -7,9 +7,7 @@
 //!   `∂log|H|/∂ρ_k = tr(Tk·KK') + λ_k · tr(A⁻¹·S_k)`
 //! and its derivative.
 
-use super::{
-    assemble_reml_system, compute_b1_ift, compute_xtwx_dispatch, compute_xtwy_dispatch,
-};
+use super::{assemble_reml_system, compute_b1_ift, compute_xtwx_dispatch, compute_xtwy_dispatch};
 use crate::block_penalty::BlockPenalty;
 use crate::linalg::{inverse, solve};
 use crate::Result;
@@ -298,8 +296,8 @@ pub fn tk_kkt_hessian_analytical(
                 // xx = V2 − V1² + g3 − g2²
                 let xx = v2n - v1n * v1n + g3n - g2n * g2n;
                 // xx2 = V3 − 3·V1·V2 + 2·V1³ + g4 − 3·g3·g2 + 2·g2³
-                let xx2 = v3n - 3.0 * v1n * v2n + 2.0 * v1n * v1n * v1n
-                    + g4n - 3.0 * g3n * g2n + 2.0 * g2n * g2n * g2n;
+                let xx2 = v3n - 3.0 * v1n * v2n + 2.0 * v1n * v1n * v1n + g4n - 3.0 * g3n * g2n
+                    + 2.0 * g2n * g2n * g2n;
                 let alpha1 = (-(v1n + g2n) + c_resid * xx) / alpha;
                 let alpha2 = (-2.0 * xx + c_resid * xx2) / alpha;
                 a1[i] = w[i] * (alpha1 - v1n - 2.0 * g2n) / g1;
@@ -310,8 +308,8 @@ pub fn tk_kkt_hessian_analytical(
                 a2[i] = a1[i] * a1[i] / w[i]
                     - a1[i] * (g2n / g1)
                     - w[i]
-                        * (alpha1 * alpha1 - alpha2 + v2n - v1n * v1n
-                            + 2.0 * g3n - 2.0 * g2n * g2n)
+                        * (alpha1 * alpha1 - alpha2 + v2n - v1n * v1n + 2.0 * g3n
+                            - 2.0 * g2n * g2n)
                         / (g1 * g1);
             }
         }
@@ -460,8 +458,7 @@ pub fn tk_kkt_hessian_analytical(
             let eta2_kj = &eta2_cols[pair_idx(lo, hi)];
             let mut tkm_piece = 0.0;
             for i in 0..n {
-                let tkm_ikj = a2[i] * eta1[[i, k]] * eta1[[i, j]]
-                    + a1[i] * eta2_kj[i];
+                let tkm_ikj = a2[i] * eta1[[i, k]] * eta1[[i, j]] + a1[i] * eta2_kj[i];
                 tkm_piece += tkm_ikj * w[i].signum() * lev_uw[i];
             }
             hess_tk[[k, j]] = trace_piece + term4 + term5 + tkm_piece;

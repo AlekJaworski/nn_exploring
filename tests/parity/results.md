@@ -21,8 +21,8 @@ Bar A is `ok` flag from `predict()` agreement at the given tolerance (rtol/atol 
 | 1d_gaussian_weighted_n300_k10_cr | ✓ | ✓ | ✓ | 6.99e-10 | 3.70e-07 | 1.81e-09 | 5.41e-10 | 1.99e-01 | 7.52e-08 |
 | 1d_gaussian_wiggly_n500_k20_cr | ✓ | ✓ | ✓ | 3.85e-10 | 8.18e-08 | 1.68e-09 | 4.09e-10 | 3.40e-11 | 5.52e-08 |
 | 1d_poisson_log_n500_k10_cr | ✓ | ✓ | ✓ | 7.23e-06 | 1.79e-06 | 1.68e-05 | 1.85e-06 | 4.14e+00 | 4.77e-05 |
-| 1d_poisson_weighted_n500_k10_cr | ✗ | ✗ | ✓ | 1.24e-02 | 1.83e-03 | 3.57e-02 | 2.02e-03 | 3.18e+00 | 7.26e-02 |
-| 1d_scat_weighted_n300_k10_cr | ✓ | ✓ | ✓ | 1.42e-03 | 4.48e-02 | 4.46e-03 | 1.29e-03 | 9.63e-01 | 9.24e-03 |
+| 1d_poisson_weighted_n500_k10_cr | ✓ | ✓ | ✓ | 1.10e-05 | 1.63e-06 | 3.11e-05 | 1.79e-06 | 3.18e+00 | 6.25e-05 |
+| 1d_scat_weighted_n300_k10_cr | ✗ | ✗ | ✓ | 4.42e-03 | 1.47e-01 | 1.35e-02 | 3.94e-03 | 9.63e-01 | 4.63e-03 |
 | 1d_tw_log_n400_k20_cr | ✓ | ✓ | ✓ | 2.51e-04 | 1.02e-04 | 2.56e-04 | 1.06e-04 | 9.99e-01 | 1.34e-03 |
 | 1d_tweedie_log_n400_k20_cr_p15 | ✓ | ✓ | ✓ | 2.28e-06 | 1.42e-06 | 4.20e-06 | 1.57e-06 | 1.04e+00 | 2.37e-05 |
 | 2d_binomial_logit_n1000_k10_cr | ✓ | ✓ | ✓ | 3.08e-05 | 8.83e-05 | 4.49e-05 | 1.18e-04 | 8.37e-01 | 1.74e-03 |
@@ -74,10 +74,10 @@ Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. Bar at 1e
 | 1d_gaussian_smooth_n50_k10_cr | 5.09e-09 | 5.08e+00 | 5.08e+00 | 1.00e+00 |
 | 1d_gaussian_sparse_edges_n400_k10_cr | 5.95e-10 | 9.95e+00 | 9.95e+00 | 1.00e+00 |
 | 1d_gaussian_step_n500_k10_cr | 2.57e-08 | 6.51e-01 | 6.51e-01 | 1.00e+00 |
-| 1d_gaussian_weighted_n300_k10_cr | 1.80e-03 | 4.93e+00 | 6.14e+00 | 1.25e+00 |
+| 1d_gaussian_weighted_n300_k10_cr | 6.99e-10 | 6.14e+00 | 6.14e+00 | 1.00e+00 |
 | 1d_gaussian_wiggly_n500_k20_cr | 3.85e-10 | 4.15e-01 | 4.15e-01 | 1.00e+00 |
 | 1d_poisson_log_n500_k10_cr | 7.23e-06 | 1.60e+02 | 1.60e+02 | 1.00e+00 |
-| 1d_poisson_weighted_n500_k10_cr | 5.30e-02 | 9.88e+01 | 9.52e+01 | 9.63e-01 |
+| 1d_poisson_weighted_n500_k10_cr | 1.10e-05 | 9.52e+01 | 9.52e+01 | 1.00e+00 |
 | 1d_tw_log_n400_k20_cr | 2.51e-04 | 1.28e+03 | 1.28e+03 | 1.00e+00 |
 | 1d_tweedie_log_n400_k20_cr_p15 | 2.28e-06 | 1.21e+03 | 1.21e+03 | 1.00e+00 |
 | 2d_binomial_logit_n1000_k10_cr | 3.08e-05 | 2.37e+01 | 2.37e+01 | 1.00e+00 |
@@ -133,7 +133,7 @@ First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's 
 | 1d_gaussian_wiggly_n500_k20_cr | 5 | 6 | — | -1.74e+02 | -1.74e+02 |
 | 1d_poisson_log_n500_k10_cr | 4 | 3 | 1 | 1.10e+03 | 1.10e+03 |
 | 1d_poisson_weighted_n500_k10_cr | 5 | 4 | 1 | 1.11e+03 | 1.38e+03 |
-| 1d_scat_weighted_n300_k10_cr | 9 | 9 | 1 | 1.58e+01 | 1.45e+01 |
+| 1d_scat_weighted_n300_k10_cr | 7 | 9 | 1 | 1.58e+01 | 1.45e+01 |
 | 1d_tw_log_n400_k20_cr | 6 | 7 | 1 | 6.51e+02 | 6.51e+02 |
 | 1d_tweedie_log_n400_k20_cr_p15 | 6 | 6 | — | 6.51e+02 | 6.53e+02 |
 | 2d_binomial_logit_n1000_k10_cr | 7 | 4 | 1 | 5.23e+02 | 5.23e+02 |

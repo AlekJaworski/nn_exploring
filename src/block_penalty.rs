@@ -933,7 +933,10 @@ mod tests {
                 rt = rt.max((xx_back[[i, j]] - xx_orig[[i, j]]).abs());
             }
         }
-        eprintln!("[repara_round_trip_xx] Di'·(D'XX·D)·Di = XX max |diff| = {:.2e}", rt);
+        eprintln!(
+            "[repara_round_trip_xx] Di'·(D'XX·D)·Di = XX max |diff| = {:.2e}",
+            rt
+        );
         assert!(
             rt < 1e-10,
             "Genuine XX round-trip Di'·rotated·Di failed: {:.2e}",
@@ -996,7 +999,10 @@ mod tests {
         for i in 0..p {
             max_diff = max_diff.max((beta_rot[i] - beta_orig[i]).abs());
         }
-        eprintln!("[repara_round_trip_vectors] β round-trip max |diff| = {:.2e}", max_diff);
+        eprintln!(
+            "[repara_round_trip_vectors] β round-trip max |diff| = {:.2e}",
+            max_diff
+        );
         assert!(
             max_diff < 1e-12,
             "β round-trip max diff {:.2e} exceeds 1e-12",
@@ -1021,7 +1027,10 @@ mod tests {
         for i in 0..p {
             max_diff_f = max_diff_f.max((f_back[i] - f_orig[i]).abs());
         }
-        eprintln!("[repara_round_trip_vectors] f round-trip max |diff| = {:.2e}", max_diff_f);
+        eprintln!(
+            "[repara_round_trip_vectors] f round-trip max |diff| = {:.2e}",
+            max_diff_f
+        );
         assert!(
             max_diff_f < 1e-12,
             "f round-trip max diff {:.2e} exceeds 1e-12",
@@ -1036,9 +1045,11 @@ mod tests {
     #[test]
     fn repara_yields_partial_identity_S() {
         // Eigen branch: dense block.
-        let block_dense =
-            Array2::from_shape_vec((3, 3), vec![4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0])
-                .unwrap();
+        let block_dense = Array2::from_shape_vec(
+            (3, 3),
+            vec![4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0],
+        )
+        .unwrap();
         let mut bp = BlockPenalty::new(block_dense.clone(), 0, 3);
         bp.setup_initial_repara();
         let repara = bp.repara.as_ref().unwrap();

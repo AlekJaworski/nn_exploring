@@ -472,9 +472,7 @@ pub fn log_abs_det_symmetric(a: &Array2<f64>) -> Result<f64> {
             "Matrix must be square".to_string(),
         ));
     }
-    let (eigvals, _) = a
-        .eigh(UPLO::Upper)
-        .map_err(|_| GAMError::SingularMatrix)?;
+    let (eigvals, _) = a.eigh(UPLO::Upper).map_err(|_| GAMError::SingularMatrix)?;
     let max_abs = eigvals.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
     let zero_thresh = max_abs * 1e-14;
     let mut log_abs_det = 0.0;

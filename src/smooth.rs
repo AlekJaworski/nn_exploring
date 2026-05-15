@@ -84,6 +84,7 @@ fn dispatch_reml_score(
             sp.mp,
             sp.family,
             sp.y_original.as_ref(),
+            sp.y_original_weights.as_ref(),
         )
     } else {
         reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
@@ -117,6 +118,7 @@ fn dispatch_reml_score_with_family(
             sp.mp,
             family,
             sp.y_original.as_ref(),
+            sp.y_original_weights.as_ref(),
         )
     } else {
         reml_criterion_multi_cached(y, x, w, lambdas, penalties, None, cached_xtwx)
@@ -551,6 +553,10 @@ pub struct SmoothingParameter {
     /// (always inner-loop converged) β. None ⟹ fall back to working-RSS
     /// deviance (≡ envelope at converged β).
     pub y_original: Option<Array1<f64>>,
+    /// Prior/sample weights corresponding to `y_original`. mgcv multiplies GLM
+    /// deviance residuals by user `weights=` even though PIRLS working weights
+    /// also include family curvature, so the REML score needs these separately.
+    pub y_original_weights: Option<Array1<f64>>,
     /// Profile-p mode for Tweedie family (mgcv's `tw()` function).
     ///
     /// When `true`, the outer Newton loop optimises θ (the working parameter
@@ -588,8 +594,8 @@ pub struct SmoothingParameter {
     /// Newton). Set true when the user passed df=0 sentinel (the
     /// default for `mr.GAM("t-dist")`).
     pub tdist_profile: bool,
-    /// Current mgcv scat theta1 = log(df - 2) for TDist profile-df.
-    /// Updated each outer Newton iteration. Initial value: log(5 - 2).
+    /// Current mgcv scat theta1 = log(df - min.df) for TDist profile-df.
+    /// Updated each outer Newton iteration. mgcv scat defaults min.df to 3.
     pub tdist_log_df: f64,
     /// Current log(σ²) for TDist outer σ² Newton (gam.fit5-style LAML
     /// profiling). Updated each outer Newton iteration when
@@ -675,6 +681,7 @@ impl SmoothingParameter {
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
             y_original: None,
+            y_original_weights: None,
             tweedie_profile: false,
             tweedie_theta: 0.0,
             negbin_profile: false,
@@ -682,7 +689,7 @@ impl SmoothingParameter {
             quantile_profile: false,
             quantile_log_sigma: 0.0,
             tdist_profile: false,
-            tdist_log_df: (5.0_f64 - 2.0).ln(),
+            tdist_log_df: (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
             tdist_log_sigma2_lo: f64::NEG_INFINITY,
             tdist_log_sigma2_hi: f64::INFINITY,
@@ -708,6 +715,7 @@ impl SmoothingParameter {
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
             y_original: None,
+            y_original_weights: None,
             tweedie_profile: false,
             tweedie_theta: 0.0,
             negbin_profile: false,
@@ -715,7 +723,7 @@ impl SmoothingParameter {
             quantile_profile: false,
             quantile_log_sigma: 0.0,
             tdist_profile: false,
-            tdist_log_df: (5.0_f64 - 2.0).ln(),
+            tdist_log_df: (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
             tdist_log_sigma2_lo: f64::NEG_INFINITY,
             tdist_log_sigma2_hi: f64::INFINITY,
@@ -741,6 +749,7 @@ impl SmoothingParameter {
             phi_fixed: None,
             family: crate::pirls::Family::Gaussian,
             y_original: None,
+            y_original_weights: None,
             tweedie_profile: false,
             tweedie_theta: 0.0,
             negbin_profile: false,
@@ -748,7 +757,7 @@ impl SmoothingParameter {
             quantile_profile: false,
             quantile_log_sigma: 0.0,
             tdist_profile: false,
-            tdist_log_df: (5.0_f64 - 2.0).ln(),
+            tdist_log_df: (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
             tdist_log_sigma2_lo: f64::NEG_INFINITY,
             tdist_log_sigma2_hi: f64::INFINITY,
@@ -800,7 +809,7 @@ impl SmoothingParameter {
                 kind: ExtraKind::TDistLogDfM2,
                 value: self.tdist_log_df,
                 lo: 1e-8_f64.ln(),
-                hi: (100.0_f64 - 2.0).ln(),
+                hi: (100.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
                 step_cap: 1.0,
             });
         }
@@ -820,7 +829,9 @@ impl SmoothingParameter {
             match extra.kind {
                 ExtraKind::TweedieTheta => {
                     self.tweedie_theta = extra.value;
-                    let new_p = tweedie_theta_to_p(extra.value).max(1.001_f64).min(1.999_f64);
+                    let new_p = tweedie_theta_to_p(extra.value)
+                        .max(1.001_f64)
+                        .min(1.999_f64);
                     if new_p > 1.97 {
                         self.tweedie_profile = false;
                     }
@@ -837,7 +848,9 @@ impl SmoothingParameter {
         }
         if self.tdist_profile {
             self.family = crate::pirls::Family::TDist {
-                df: (self.tdist_log_df.exp() + 2.0).max(2.0_f64).min(100.0_f64),
+                df: (self.tdist_log_df.exp() + crate::family_theta::DEFAULT_MIN_DF)
+                    .max(crate::family_theta::DEFAULT_MIN_DF)
+                    .min(100.0_f64),
                 sigma2: self.tdist_log_sigma2.exp().max(1e-8_f64).min(1e8_f64),
             };
         }
@@ -1305,7 +1318,9 @@ impl SmoothingParameter {
                         sigma2_v = extras[k].exp().max(1e-8_f64).min(1e8_f64);
                     }
                     ExtraKind::TDistLogDfM2 => {
-                        df_v = (extras[k].exp() + 2.0).max(2.0_f64).min(100.0_f64);
+                        df_v = (extras[k].exp() + crate::family_theta::DEFAULT_MIN_DF)
+                            .max(crate::family_theta::DEFAULT_MIN_DF)
+                            .min(100.0_f64);
                     }
                     // Tweedie / NegBin not yet on the joint path.
                     _ => {}
@@ -1417,6 +1432,7 @@ impl SmoothingParameter {
                     &y_local,
                     x,
                     &w_local,
+                    self.y_original_weights.as_ref(),
                     &lambdas,
                     penalties,
                     Some(&xtwx_local),
@@ -1434,6 +1450,7 @@ impl SmoothingParameter {
                         &y_local,
                         x,
                         &w_local,
+                        self.y_original_weights.as_ref(),
                         &lambdas,
                         penalties,
                         Some(&xtwx_local),
@@ -1493,6 +1510,7 @@ impl SmoothingParameter {
                             Some(&xtwx_local),
                             self.family,
                             self.y_original.as_ref(),
+                            self.y_original_weights.as_ref(),
                         )?
                     }
                 } else {
@@ -1532,6 +1550,7 @@ impl SmoothingParameter {
                         &y_local,
                         x,
                         &w_local,
+                        self.y_original_weights.as_ref(),
                         &lambdas,
                         penalties,
                         Some(&xtwx_local),
@@ -2353,9 +2372,9 @@ impl SmoothingParameter {
             // -----------------------------------------------------------------------
             if self.tweedie_profile {
                 let mut sv = self.build_outer_search_vector(&log_lambda);
-                let idx = sv.find_kind(ExtraKind::TweedieTheta).expect(
-                    "tweedie_profile=true but no TweedieTheta extra in OuterSearchVector",
-                );
+                let idx = sv
+                    .find_kind(ExtraKind::TweedieTheta)
+                    .expect("tweedie_profile=true but no TweedieTheta extra in OuterSearchVector");
                 let theta = sv.extras[idx].value;
                 let step_cap = sv.extras[idx].step_cap;
                 let h_th: f64 = 1e-3;
@@ -2439,9 +2458,8 @@ impl SmoothingParameter {
                             tw_eval_fd!(th_trial)
                         }
                     };
-                    let accepted_theta = newton_1d_with_halving(
-                        theta, dlr_dth, d2lr_dth2, rc, step_cap, eval_at,
-                    );
+                    let accepted_theta =
+                        newton_1d_with_halving(theta, dlr_dth, d2lr_dth2, rc, step_cap, eval_at);
 
                     sv.extras[idx].value = accepted_theta;
                     self.commit_outer_search_vector(&sv);
@@ -2454,7 +2472,11 @@ impl SmoothingParameter {
                             accepted_theta,
                             new_p,
                             dlr_dth,
-                            if use_fd_legacy { " [FD-legacy]" } else { " [analytical-cached]" }
+                            if use_fd_legacy {
+                                " [FD-legacy]"
+                            } else {
+                                " [analytical-cached]"
+                            }
                         );
                     }
                 }
@@ -2468,9 +2490,9 @@ impl SmoothingParameter {
             // -----------------------------------------------------------------------
             if self.negbin_profile {
                 let mut sv = self.build_outer_search_vector(&log_lambda);
-                let idx = sv.find_kind(ExtraKind::NegBinLogTheta).expect(
-                    "negbin_profile=true but no NegBinLogTheta extra in OuterSearchVector",
-                );
+                let idx = sv
+                    .find_kind(ExtraKind::NegBinLogTheta)
+                    .expect("negbin_profile=true but no NegBinLogTheta extra in OuterSearchVector");
                 let log_theta = sv.extras[idx].value;
                 let step_cap = sv.extras[idx].step_cap;
                 let h_th: f64 = 1e-3;

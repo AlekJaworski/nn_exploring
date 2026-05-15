@@ -92,6 +92,30 @@ pub fn estimate_scat_theta_outer(
     max_iters: usize,
     tol: f64,
 ) -> ThetaNewtonStep {
+    estimate_scat_theta_outer_with_scale(
+        y,
+        eta,
+        prior_weights,
+        log_sigma2_init,
+        log_df_minus2_init,
+        1.0,
+        max_iters,
+        tol,
+    )
+}
+
+/// 2-D outer Newton with explicit mgcv scale. `scale` enters mgcv's
+/// `estimate.theta` as `dev/(2*scale) - ls`; fREML passes `exp(log.phi)`.
+pub fn estimate_scat_theta_outer_with_scale(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
+    log_sigma2_init: f64,
+    log_df_minus2_init: f64,
+    scale: f64,
+    max_iters: usize,
+    tol: f64,
+) -> ThetaNewtonStep {
     estimate_scat_theta_outer_with_min_df(
         y,
         eta,
@@ -99,6 +123,7 @@ pub fn estimate_scat_theta_outer(
         log_sigma2_init,
         log_df_minus2_init,
         DEFAULT_MIN_DF,
+        scale,
         max_iters,
         tol,
     )
@@ -116,11 +141,35 @@ pub fn estimate_scat_log_sigma2_outer(
     max_iters: usize,
     tol: f64,
 ) -> ThetaNewtonStep {
+    estimate_scat_log_sigma2_outer_with_scale(
+        y,
+        eta,
+        prior_weights,
+        log_sigma2_init,
+        log_df_minus2_fixed,
+        1.0,
+        max_iters,
+        tol,
+    )
+}
+
+/// 1-D log-σ² Newton with explicit mgcv scale.
+pub fn estimate_scat_log_sigma2_outer_with_scale(
+    y: &Array1<f64>,
+    eta: &Array1<f64>,
+    prior_weights: Option<&Array1<f64>>,
+    log_sigma2_init: f64,
+    log_df_minus2_fixed: f64,
+    scale: f64,
+    max_iters: usize,
+    tol: f64,
+) -> ThetaNewtonStep {
     let min_df = DEFAULT_MIN_DF;
+    let scale = scale.max(1e-300);
     let mut log_s2 = log_sigma2_init;
     let log_d = log_df_minus2_fixed;
 
-    let mut state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df);
+    let mut state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df, scale);
     let mut iters_used = 0usize;
     let mut converged_flag = false;
     let mut grad_inf = state.g[0].abs();
@@ -145,7 +194,7 @@ pub fn estimate_scat_log_sigma2_outer(
 
         // Step halving (Armijo) — mgcv efam.r:73-82.
         let mut s = step;
-        let mut trial_state = nlogl_full(y, eta, prior_weights, log_s2 + s, log_d, min_df);
+        let mut trial_state = nlogl_full(y, eta, prior_weights, log_s2 + s, log_d, min_df, scale);
         let mut step_failed = false;
         let mut inner = 0usize;
         while trial_state.nll - state.nll > f64::EPSILON.powf(0.75) * state.nll.abs() {
@@ -157,7 +206,7 @@ pub fn estimate_scat_log_sigma2_outer(
             }
             // Only nll is needed for the Armijo test; derivs recomputed on accept.
             let nll_only =
-                nlogl_value_only(y, eta, prior_weights, log_s2 + s, log_d, min_df);
+                nlogl_value_only(y, eta, prior_weights, log_s2 + s, log_d, min_df, scale);
             trial_state.nll = nll_only;
         }
         if step_failed {
@@ -167,7 +216,7 @@ pub fn estimate_scat_log_sigma2_outer(
         }
         log_s2 += s;
         // Refresh gradient/Hessian at accepted step.
-        state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df);
+        state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df, scale);
         grad_inf = state.g[0].abs();
         iters_used = it + 1;
         if state.g[0].abs() <= tol * (state.nll.abs() + 1.0) {
@@ -195,13 +244,15 @@ pub fn estimate_scat_theta_outer_with_min_df(
     log_sigma2_init: f64,
     log_df_minus2_init: f64,
     min_df: f64,
+    scale: f64,
     max_iters: usize,
     tol: f64,
 ) -> ThetaNewtonStep {
+    let scale = scale.max(1e-300);
     let mut log_s2 = log_sigma2_init;
     let mut log_d = log_df_minus2_init;
 
-    let mut state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df);
+    let mut state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df, scale);
     let mut iters_used = 0usize;
     let mut converged_flag = false;
     let mut grad_inf = state.g.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
@@ -270,8 +321,7 @@ pub fn estimate_scat_theta_outer_with_min_df(
         let mut inner = 0usize;
         let mut cand_s2 = log_s2 + step0;
         let mut cand_d = log_d + step1;
-        let mut trial_nll =
-            nlogl_value_only(y, eta, prior_weights, cand_s2, cand_d, min_df);
+        let mut trial_nll = nlogl_value_only(y, eta, prior_weights, cand_s2, cand_d, min_df, scale);
         // mgcv tests `nll1 - nll > eps^.75 · |nll|`, halving until it
         // doesn't (i.e. until the step is non-degrading within tolerance).
         while trial_nll - state.nll > f64::EPSILON.powf(0.75) * state.nll.abs() {
@@ -283,7 +333,7 @@ pub fn estimate_scat_theta_outer_with_min_df(
                 step_failed = true;
                 break;
             }
-            trial_nll = nlogl_value_only(y, eta, prior_weights, cand_s2, cand_d, min_df);
+            trial_nll = nlogl_value_only(y, eta, prior_weights, cand_s2, cand_d, min_df, scale);
         }
         if step_failed {
             iters_used = it + 1;
@@ -293,7 +343,7 @@ pub fn estimate_scat_theta_outer_with_min_df(
         log_d = cand_d;
 
         // Refresh gradient/Hessian at the accepted point.
-        state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df);
+        state = nlogl_full(y, eta, prior_weights, log_s2, log_d, min_df, scale);
         grad_inf = state.g.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
         iters_used = it + 1;
         if state.g[0].abs() <= tol * (state.nll.abs() + 1.0)
@@ -352,6 +402,7 @@ fn nlogl_full(
     log_s2: f64,
     log_d: f64,
     min_df: f64,
+    scale: f64,
 ) -> NlogLState {
     let n = y.len();
     debug_assert_eq!(eta.len(), n);
@@ -411,10 +462,7 @@ fn nlogl_full(
         // Dth2[,1] = ∂²D/∂θ1² (efam.r:3665).
         let dth2_11 = w_i
             * (nu2 * log_a
-                + nu2nu
-                    * ym
-                    * ym
-                    * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym)
+                + nu2nu * ym * ym * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym)
                     / nu_sig2_a);
         // Dth2[,2] = ∂²D/∂θ1∂θ2 (efam.r:3667).
         let dth2_12 = 2.0 * w_i * (fym - ym * ymsig2a - fymf1ym) * nu2nu;
@@ -429,8 +477,9 @@ fn nlogl_full(
     // term_per = lgamma((ν+1)/2) - lgamma(ν/2) - log(σ·(π·ν)^.5).
     let half_nu1 = (nu + 1.0) * 0.5;
     let half_nu = nu * 0.5;
-    let term_ls =
-        log_gamma(half_nu1) - log_gamma(half_nu) - (sigma * (std::f64::consts::PI * nu).sqrt()).ln();
+    let term_ls = log_gamma(half_nu1)
+        - log_gamma(half_nu)
+        - (sigma * (std::f64::consts::PI * nu).sqrt()).ln();
     let ls = sum_w * term_ls;
 
     // First deriv of per-row term wrt θ_mgcv:
@@ -456,14 +505,15 @@ fn nlogl_full(
     let lsth2_11 = sum_w * lsth2_per_11;
 
     // ── Assemble nll, g, H in mgcv coords θ_mgcv = (log(ν-min_df), log σ). ──
-    let nll = 0.5 * dev - ls;
+    let dev_scale = 0.5 / scale.max(1e-300);
+    let nll = dev_scale * dev - ls;
     let g_mgcv = [
-        0.5 * sum_dth[0] - lsth1[0], // wrt log(ν - min_df)
-        0.5 * sum_dth[1] - lsth1[1], // wrt log σ
+        dev_scale * sum_dth[0] - lsth1[0], // wrt log(ν - min_df)
+        dev_scale * sum_dth[1] - lsth1[1], // wrt log σ
     ];
-    let h_mgcv_11 = 0.5 * sum_dth2[0] - lsth2_11; // ∂²/∂θ1²
-    let h_mgcv_12 = 0.5 * sum_dth2[1]; // ∂²/∂θ1∂θ2 (ls cross is 0)
-    let h_mgcv_22 = 0.5 * sum_dth2[2]; // ∂²/∂θ2²
+    let h_mgcv_11 = dev_scale * sum_dth2[0] - lsth2_11; // ∂²/∂θ1²
+    let h_mgcv_12 = dev_scale * sum_dth2[1]; // ∂²/∂θ1∂θ2 (ls cross is 0)
+    let h_mgcv_22 = dev_scale * sum_dth2[2]; // ∂²/∂θ2²
 
     // ── Chain-rule to user coords θ_user = (log σ², log(ν - min_df)). ──
     // θ_user_0 = log σ² = 2·θ_mgcv_2  →  ∂/∂θ_user_0 = (1/2)·∂/∂θ_mgcv_2
@@ -493,6 +543,7 @@ fn nlogl_value_only(
     log_s2: f64,
     log_d: f64,
     min_df: f64,
+    scale: f64,
 ) -> f64 {
     let n = y.len();
     debug_assert_eq!(eta.len(), n);
@@ -517,10 +568,11 @@ fn nlogl_value_only(
     }
     let half_nu1 = (nu + 1.0) * 0.5;
     let half_nu = nu * 0.5;
-    let term_ls =
-        log_gamma(half_nu1) - log_gamma(half_nu) - (sigma * (std::f64::consts::PI * nu).sqrt()).ln();
+    let term_ls = log_gamma(half_nu1)
+        - log_gamma(half_nu)
+        - (sigma * (std::f64::consts::PI * nu).sqrt()).ln();
     let ls = sum_w * term_ls;
-    0.5 * dev - ls
+    0.5 * dev / scale.max(1e-300) - ls
 }
 
 /// Symmetric 2×2 eigendecomposition. Returns `(λ1, λ2, c, s)` where
@@ -571,16 +623,16 @@ mod tests {
         let log_d = 0.5_f64;
         let min_df = DEFAULT_MIN_DF;
 
-        let state = nlogl_full(&y, &eta, None, log_s2, log_d, min_df);
+        let state = nlogl_full(&y, &eta, None, log_s2, log_d, min_df, 1.0);
 
         let h = 1e-5_f64;
         // g[0]
-        let f_plus = nlogl_value_only(&y, &eta, None, log_s2 + h, log_d, min_df);
-        let f_minus = nlogl_value_only(&y, &eta, None, log_s2 - h, log_d, min_df);
+        let f_plus = nlogl_value_only(&y, &eta, None, log_s2 + h, log_d, min_df, 1.0);
+        let f_minus = nlogl_value_only(&y, &eta, None, log_s2 - h, log_d, min_df, 1.0);
         let fd_g0 = (f_plus - f_minus) / (2.0 * h);
         // g[1]
-        let f_plus = nlogl_value_only(&y, &eta, None, log_s2, log_d + h, min_df);
-        let f_minus = nlogl_value_only(&y, &eta, None, log_s2, log_d - h, min_df);
+        let f_plus = nlogl_value_only(&y, &eta, None, log_s2, log_d + h, min_df, 1.0);
+        let f_minus = nlogl_value_only(&y, &eta, None, log_s2, log_d - h, min_df, 1.0);
         let fd_g1 = (f_plus - f_minus) / (2.0 * h);
         assert!(
             (state.g[0] - fd_g0).abs() < 5e-6,
@@ -597,10 +649,10 @@ mod tests {
 
         // Hessian via central differences on gradient components.
         let hh = 1e-4_f64;
-        let gp_s2 = nlogl_full(&y, &eta, None, log_s2 + hh, log_d, min_df).g;
-        let gm_s2 = nlogl_full(&y, &eta, None, log_s2 - hh, log_d, min_df).g;
-        let gp_d = nlogl_full(&y, &eta, None, log_s2, log_d + hh, min_df).g;
-        let gm_d = nlogl_full(&y, &eta, None, log_s2, log_d - hh, min_df).g;
+        let gp_s2 = nlogl_full(&y, &eta, None, log_s2 + hh, log_d, min_df, 1.0).g;
+        let gm_s2 = nlogl_full(&y, &eta, None, log_s2 - hh, log_d, min_df, 1.0).g;
+        let gp_d = nlogl_full(&y, &eta, None, log_s2, log_d + hh, min_df, 1.0).g;
+        let gm_d = nlogl_full(&y, &eta, None, log_s2, log_d - hh, min_df, 1.0).g;
 
         let fd_h00 = (gp_s2[0] - gm_s2[0]) / (2.0 * hh);
         let fd_h11 = (gp_d[1] - gm_d[1]) / (2.0 * hh);

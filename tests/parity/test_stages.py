@@ -180,7 +180,10 @@ def _fit_mgcv_rust(fix: Fixture):
         g = mgcv_rust.GAM() if rust_fam == "gaussian" else mgcv_rust.GAM(rust_fam, **kwargs)
     except Exception as exc:
         pytest.skip(f"GAM({rust_fam!r}, {kwargs}) unavailable: {exc}")
-    g.fit(x, y, k=list(inp.k), method=inp.method, bs=inp.bs[0])
+    fit_kwargs = {"k": list(inp.k), "method": inp.method, "bs": inp.bs[0]}
+    if inp.weights is not None:
+        fit_kwargs["weights"] = np.asarray(inp.weights, dtype=float)
+    g.fit(x, y, **fit_kwargs)
     return g
 
 
@@ -289,7 +292,10 @@ def test_mgcv_exact_predictions(
     except Exception as exc:
         pytest.skip(f"GAM({rust_fam!r}, {kwargs}) unavailable: {exc}")
     try:
-        g.fit(x_train, y_train, k=list(inp.k), method=inp.method, bs=inp.bs[0])
+        fit_kwargs = {"k": list(inp.k), "method": inp.method, "bs": inp.bs[0]}
+        if inp.weights is not None:
+            fit_kwargs["weights"] = np.asarray(inp.weights, dtype=float)
+        g.fit(x_train, y_train, **fit_kwargs)
     except Exception as exc:
         pytest.skip(f"mgcv_exact fit raised: {exc}")
 
@@ -381,10 +387,13 @@ def test_mgcv_exact_predictions_link_scale(
     except Exception as exc:
         pytest.skip(f"GAM({rust_fam!r}, {kwargs}) unavailable: {exc}")
     try:
+        fit_kwargs = {"k": list(inp.k), "method": inp.method, "bs": inp.bs[0]}
+        if inp.weights is not None:
+            fit_kwargs["weights"] = np.asarray(inp.weights, dtype=float)
         g.fit(
             np.asarray(inp.x_train, dtype=float),
             np.asarray(inp.y_train, dtype=float),
-            k=list(inp.k), method=inp.method, bs=inp.bs[0],
+            **fit_kwargs,
         )
     except Exception as exc:
         pytest.skip(f"mgcv_exact fit raised: {exc}")

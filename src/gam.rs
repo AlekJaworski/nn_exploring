@@ -228,10 +228,7 @@ impl SmoothTerm {
     /// on the *uncentred* basis and penalty, then sets `S_norm = S_raw / maS`
     /// before passing to absorb.cons. Our default mode does this *after*
     /// Z, which gives a different scale factor.
-    pub fn apply_mgcv_normalisation_then_centring(
-        &mut self,
-        x_data: &Array1<f64>,
-    ) -> Result<()> {
+    pub fn apply_mgcv_normalisation_then_centring(&mut self, x_data: &Array1<f64>) -> Result<()> {
         if self.constraint_matrix.is_some() {
             return Ok(());
         }
@@ -296,10 +293,7 @@ impl SmoothTerm {
     /// type=2, unit.fnorm=FALSE). mgcv only invokes nat.param when
     /// `diagonal.penalty=TRUE` is requested — which gam()/bam() do NOT
     /// use by default. Kept here for future experimentation.
-    pub fn apply_sum_to_zero_centering_mgcv_exact(
-        &mut self,
-        x_data: &Array1<f64>,
-    ) -> Result<()> {
+    pub fn apply_sum_to_zero_centering_mgcv_exact(&mut self, x_data: &Array1<f64>) -> Result<()> {
         if self.constraint_matrix.is_some() {
             return Ok(());
         }

@@ -591,7 +591,11 @@ impl BSplineBasis {
             let xl = x_data.iter().cloned().fold(f64::INFINITY, f64::min);
             let xu = x_data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let knots = Array1::linspace(xl, xu, num_basis + order);
-            return Self { knots, num_basis, order };
+            return Self {
+                knots,
+                num_basis,
+                order,
+            };
         }
         let mut xl = x_data.iter().cloned().fold(f64::INFINITY, f64::min);
         let mut xu = x_data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -604,7 +608,11 @@ impl BSplineBasis {
         let lo = xl - dx * (m1 as f64);
         let hi = xu + dx * (m1 as f64);
         let knots = Array1::linspace(lo, hi, total);
-        Self { knots, num_basis, order }
+        Self {
+            knots,
+            num_basis,
+            order,
+        }
     }
 
     /// Evaluate the d-th derivative of every B-spline basis function at
@@ -669,8 +677,16 @@ impl BSplineBasis {
                 for j in 0..(p + order - next_order) {
                     let denom1 = self.knots[j + next_order - 1] - self.knots[j];
                     let denom2 = self.knots[j + next_order] - self.knots[j + 1];
-                    let t1 = if denom1.abs() > 1e-15 { b[j] / denom1 } else { 0.0 };
-                    let t2 = if denom2.abs() > 1e-15 { b[j + 1] / denom2 } else { 0.0 };
+                    let t1 = if denom1.abs() > 1e-15 {
+                        b[j] / denom1
+                    } else {
+                        0.0
+                    };
+                    let t2 = if denom2.abs() > 1e-15 {
+                        b[j + 1] / denom2
+                    } else {
+                        0.0
+                    };
                     nb[j] = mult * (t1 - t2);
                 }
                 b = nb;
@@ -965,9 +981,9 @@ impl RandomEffectBasis {
         let mut z = Array2::<f64>::zeros((n, p));
         for (i, &xi) in x.iter().enumerate() {
             // Binary search on sorted levels for an exact bit match.
-            let pos = self
-                .levels
-                .partition_point(|&lv| lv.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less) == std::cmp::Ordering::Less);
+            let pos = self.levels.partition_point(|&lv| {
+                lv.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less) == std::cmp::Ordering::Less
+            });
             if pos < p && self.levels[pos].to_bits() == xi.to_bits() {
                 z[[i, pos]] = 1.0;
             }

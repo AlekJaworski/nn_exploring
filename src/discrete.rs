@@ -193,10 +193,7 @@ pub fn compress_1d(x_col: &Array1<f64>, max_bins: usize) -> (Vec<u32>, Vec<f64>)
         let kx_f = ((v - x_min) / dx).round();
         // Clamp to the valid range for safety against floating-point
         // boundary slop. kx ∈ {0..max_bins} is the natural mgcv range.
-        let kx = kx_f
-            .max(0.0)
-            .min(max_bins as f64)
-            .min(u32::MAX as f64) as u32;
+        let kx = kx_f.max(0.0).min(max_bins as f64).min(u32::MAX as f64) as u32;
         match snap_to_bin.get(&kx) {
             Some(&bin) => snap_indices.push(bin),
             None => {
@@ -822,7 +819,9 @@ mod tests {
         // Reconstruct full X[i, :] = x_d[indices[i], :].
         let full = disc.to_full_matrix();
         // Weight vector with structure.
-        let w: Array1<f64> = (0..n).map(|i| 1.0 + (i as f64 * 0.07).sin().abs()).collect();
+        let w: Array1<f64> = (0..n)
+            .map(|i| 1.0 + (i as f64 * 0.07).sin().abs())
+            .collect();
         let xtwx_full = crate::reml::compute_xtwx(&full, &w);
         let xtwx_disc = compute_xtwx_discrete(&disc, &w);
         let err = approx_max_abs(&xtwx_full, &xtwx_disc);
@@ -841,11 +840,9 @@ mod tests {
         // Marginal A: nr=4, p=2.
         let nr_a = 4usize;
         let p_a = 2usize;
-        let x_d_a = Array2::from_shape_vec(
-            (nr_a, p_a),
-            vec![1.0, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.5],
-        )
-        .unwrap();
+        let x_d_a =
+            Array2::from_shape_vec((nr_a, p_a), vec![1.0, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.5])
+                .unwrap();
         let idx_a: Vec<u32> = (0..n).map(|i| (i % nr_a) as u32).collect();
         // Marginal B: nr=3, p=3.
         let nr_b = 3usize;
@@ -879,7 +876,9 @@ mod tests {
         };
 
         let full = disc.to_full_matrix();
-        let w: Array1<f64> = (0..n).map(|i| 0.5 + 0.5 * ((i as f64) * 0.13).cos().abs()).collect();
+        let w: Array1<f64> = (0..n)
+            .map(|i| 0.5 + 0.5 * ((i as f64) * 0.13).cos().abs())
+            .collect();
         let xtwx_full = crate::reml::compute_xtwx(&full, &w);
         let xtwx_disc = compute_xtwx_discrete(&disc, &w);
         let err = approx_max_abs(&xtwx_full, &xtwx_disc);
@@ -969,7 +968,9 @@ mod tests {
             n,
         };
         let full = disc.to_full_matrix();
-        let w: Array1<f64> = (0..n).map(|i| 1.0 + 0.5 * ((i as f64) * 0.03).sin()).collect();
+        let w: Array1<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * ((i as f64) * 0.03).sin())
+            .collect();
         let y: Array1<f64> = (0..n).map(|i| (i as f64) * 0.17 - 3.0).collect();
 
         let xtwy_full = crate::reml::compute_xtwy(&full, &w, &y);
@@ -1034,7 +1035,9 @@ mod tests {
             n,
         };
         let full = disc.to_full_matrix();
-        let w: Array1<f64> = (0..n).map(|i| 0.4 + 0.6 * ((i as f64) * 0.05).cos().abs()).collect();
+        let w: Array1<f64> = (0..n)
+            .map(|i| 0.4 + 0.6 * ((i as f64) * 0.05).cos().abs())
+            .collect();
         let y: Array1<f64> = (0..n).map(|i| ((i as f64) * 0.11).sin()).collect();
         let xtwy_full = crate::reml::compute_xtwy(&full, &w, &y);
         let xtwy_disc = compute_xtwy_discrete(&disc, &w, &y);
@@ -1100,9 +1103,7 @@ mod tests {
         // with duplicates, and check that the resulting design matrix
         // matches `smooth.evaluate(x_col)` row-for-row.
         use crate::gam::SmoothTerm;
-        let x_col = Array1::from(vec![
-            0.1, 0.5, 0.9, 0.1, 0.5, 0.5, 0.3, 0.7, 0.9, 0.3,
-        ]);
+        let x_col = Array1::from(vec![0.1, 0.5, 0.9, 0.1, 0.5, 0.5, 0.3, 0.7, 0.9, 0.3]);
         let n = x_col.len();
         let mut smooth = SmoothTerm::cr_spline_quantile(
             "x".to_string(),
@@ -1163,9 +1164,7 @@ mod tests {
         let n = 300usize;
         // Repeat a small set of unique x values to force pure-dedup.
         let unique_vals = [0.0_f64, 0.2, 0.4, 0.6, 0.8, 1.0];
-        let x_col: Array1<f64> = (0..n)
-            .map(|i| unique_vals[i % unique_vals.len()])
-            .collect();
+        let x_col: Array1<f64> = (0..n).map(|i| unique_vals[i % unique_vals.len()]).collect();
         let mut smooth = SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
         smooth.apply_sum_to_zero_centering(&x_col).unwrap();
 
@@ -1213,8 +1212,7 @@ mod tests {
         // 50 unique values (every row distinct), forcing skip mode.
         let n = 100usize;
         let x_col: Array1<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
-        let mut smooth =
-            SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
+        let mut smooth = SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
         smooth.apply_sum_to_zero_centering(&x_col).unwrap();
 
         let mut x_mat = Array2::<f64>::zeros((n, 1));
@@ -1258,8 +1256,7 @@ mod tests {
         use crate::gam::SmoothTerm;
         let n = 100usize;
         let x_col: Array1<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
-        let mut smooth =
-            SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
+        let mut smooth = SmoothTerm::cr_spline_quantile("x".to_string(), 6, &x_col).unwrap();
         smooth.apply_sum_to_zero_centering(&x_col).unwrap();
 
         let mut x_mat = Array2::<f64>::zeros((n, 1));
@@ -1292,11 +1289,9 @@ mod tests {
         // Column B: all distinct values → will hit skip mode at ratio=8 (m=n=240 > 30).
         let x_b: Array1<f64> = (0..n).map(|i| (i as f64) * 0.013 - 1.0).collect();
 
-        let mut smooth_a =
-            SmoothTerm::cr_spline_quantile("a".to_string(), 6, &x_a).unwrap();
+        let mut smooth_a = SmoothTerm::cr_spline_quantile("a".to_string(), 6, &x_a).unwrap();
         smooth_a.apply_sum_to_zero_centering(&x_a).unwrap();
-        let mut smooth_b =
-            SmoothTerm::cr_spline_quantile("b".to_string(), 8, &x_b).unwrap();
+        let mut smooth_b = SmoothTerm::cr_spline_quantile("b".to_string(), 8, &x_b).unwrap();
         smooth_b.apply_sum_to_zero_centering(&x_b).unwrap();
 
         // Pre-compute the full design (intercept + a + b columns).
@@ -1385,8 +1380,7 @@ mod tests {
         use crate::gam::SmoothTerm;
         let n = 180usize;
         let x_col: Array1<f64> = (0..n).map(|i| (i as f64) * 0.011 - 0.5).collect();
-        let mut smooth =
-            SmoothTerm::cr_spline_quantile("x".to_string(), 7, &x_col).unwrap();
+        let mut smooth = SmoothTerm::cr_spline_quantile("x".to_string(), 7, &x_col).unwrap();
         smooth.apply_sum_to_zero_centering(&x_col).unwrap();
         let basis = smooth.evaluate(&x_col).unwrap();
         let p = basis.ncols();
@@ -1415,7 +1409,9 @@ mod tests {
         // Confirm we are in skip mode for the smooth.
         assert_eq!(disc.marginals[1].nr, n, "smooth marginal must be skipped");
 
-        let w: Array1<f64> = (0..n).map(|i| 1.0 + 0.5 * ((i as f64) * 0.07).sin()).collect();
+        let w: Array1<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * ((i as f64) * 0.07).sin())
+            .collect();
         let xtwx_full = crate::reml::compute_xtwx(&full, &w);
         let xtwx_disc = compute_xtwx_discrete(&disc, &w);
         let err = approx_max_abs(&xtwx_full, &xtwx_disc);

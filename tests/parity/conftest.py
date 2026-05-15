@@ -80,9 +80,12 @@ _NB_PROFILE_V1_REASON = (
 )
 _KNOWN_FEATURE_GAPS: dict[str, dict[str, str]] = {
     "test_parity": {
-        # 1d_scat_weighted_n300_k10_cr: previously xfailed with the
-        # profile-σ²/df-inside-PIRLS gap; joint outer Newton actuation
-        # (commit 03e8d7f) closes it. Lifted 2026-05-14.
+        "1d_scat_weighted_n300_k10_cr": (
+            "weighted scat remains a small profile-shape parity residual: "
+            "prior weights are now threaded through Dd/ls, but Bar A still "
+            "lands at ~4e-3 max abs vs mgcv pending a full gam.fit5 scat "
+            "substep match"
+        ),
     },
 }
 

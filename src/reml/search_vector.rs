@@ -15,7 +15,7 @@ pub enum ExtraKind {
     NegBinLogTheta,
     /// TDist `log σ²` — paired with `TDistLogDfM2` for 2-D joint Newton.
     TDistLogSigma2,
-    /// TDist `log(df - 2)` (mgcv `scat$theta1`).
+    /// TDist `log(df - min.df)` (mgcv `scat$theta1`).
     TDistLogDfM2,
 }
 

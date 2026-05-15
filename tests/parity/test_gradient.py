@@ -63,6 +63,13 @@ def _gaussian_fixtures():
     return out
 
 
+def _fit_kwargs(inp: dict) -> dict:
+    kwargs = {"k": list(inp["k"]), "method": inp["method"], "bs": inp["bs"][0]}
+    if inp.get("weights") is not None:
+        kwargs["weights"] = np.asarray(inp["weights"], dtype=float)
+    return kwargs
+
+
 @pytest.mark.parametrize(
     "fix_path,fix_data",
     _gaussian_fixtures(),
@@ -85,7 +92,7 @@ def test_closed_form_matches_finite_diff_at_optimum(fix_path, fix_data) -> None:
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     lam = list(out["lambda"])  # mgcv's converged optimum
     # FD gradient breaks down at extreme λ via catastrophic cancellation
@@ -133,7 +140,7 @@ def test_gradient_zero_at_mgcv_optimum(fix_path, fix_data) -> None:
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     grad_at_mgcv_lam = np.asarray(
         g.evaluate_reml_gradient_closed_form(y, list(out["lambda"])),
@@ -200,7 +207,7 @@ def test_closed_form_hessian_matches_fd(fix_path, fix_data) -> None:
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     lam = list(out["lambda"])
     cf = np.asarray(g.evaluate_reml_hessian_closed_form(y, lam), dtype=float)
@@ -233,9 +240,7 @@ def test_closed_form_hessian_symmetric(fix_path, fix_data) -> None:
     g.fit(
         np.asarray(inp["x_train"], dtype=float),
         np.asarray(inp["y_train"], dtype=float),
-        k=list(inp["k"]),
-        method=inp["method"],
-        bs=inp["bs"][0],
+        **_fit_kwargs(inp),
     )
     H = np.asarray(
         g.evaluate_reml_hessian_closed_form(
@@ -280,7 +285,7 @@ def test_closed_form_matches_mgcv_reported_gradient(fix_path, fix_data) -> None:
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     cf = np.asarray(
         g.evaluate_reml_gradient_closed_form(y, list(out["lambda"])),
@@ -347,7 +352,7 @@ def test_ift_gradient_matches_envelope_at_converged_beta(fix_path, fix_data) -> 
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     lam = list(out["lambda"])
     env = np.asarray(g.evaluate_reml_gradient_closed_form(y, lam), dtype=float)
@@ -384,7 +389,7 @@ def test_ift_hessian_matches_envelope_at_converged_beta(fix_path, fix_data) -> N
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     lam = list(out["lambda"])
     env = np.asarray(g.evaluate_reml_hessian_closed_form(y, lam), dtype=float)
@@ -413,7 +418,7 @@ def test_ift_hessian_symmetric(fix_path, fix_data) -> None:
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     H = np.asarray(g.evaluate_reml_hessian_ift(y, list(out["lambda"]), None), dtype=float)
     asym = np.abs(H - H.T).max()
@@ -438,7 +443,7 @@ def test_ift_gradient_matches_envelope_off_optimum(fix_path, fix_data) -> None:
     x = np.asarray(inp["x_train"], dtype=float)
     y = np.asarray(inp["y_train"], dtype=float)
     g = mgcv_rust.GAM(mgcv_exact=True)
-    g.fit(x, y, k=list(inp["k"]), method=inp["method"], bs=inp["bs"][0])
+    g.fit(x, y, **_fit_kwargs(inp))
 
     lam_opt = np.asarray(out["lambda"], dtype=float)
     # Probe at 10x mgcv's optimum (well off-optimum — non-trivial gradient)

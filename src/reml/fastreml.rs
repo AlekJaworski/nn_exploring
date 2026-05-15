@@ -240,39 +240,42 @@ pub fn compute_sl_fitchol_step(
         pen.scaled_add_to(&mut a, *lambda);
     }
 
-    // ===== 2) Pivoted-Chol solve for β and PP = A⁻¹  =====
+    // ===== 2) Fast LU solve for β and PP = A⁻¹, with pivoted-Chol fallback =====
     //
-    // Mirrors mgcv `Sl.fitChol` (R/fast-REML.r:1601-1626):
-    //
-    //   1. Diagonal preconditioner `d[i] = sqrt(A[i,i])` (1 where A[i,i] ≤ 0).
-    //   2. Pivoted Chol of `A_p = D⁻¹·A·D⁻¹` via LAPACK `dpstrf`.
-    //   3. Drop rank-deficient trailing columns (mgcv lines 1610-1613).
-    //   4. `β[piv] = R⁻¹·(R'⁻¹·(f[piv]/d[piv]))/d[piv]` (line 1615).
-    //   5. `PP[piv, piv] = chol2inv(R)`, then `PP = D⁻¹·PP·D⁻¹` (lines 1623-1626).
-    //   6. `ldet_xxs = 2·Σ(log R_kk + log d_piv_k)` (line 1627).
-    //
-    // The preconditioner brings the spectrum of `A_p` closer to 1, which is
-    // what makes pivoted Chol numerically stable on the `(X'WX + S)` block-
-    // diagonal structure (the penalty's null-space directions live on a few
-    // rows, so the rank-revealing pivot pulls them to the tail).
-    //
-    // If `try_pivoted_chol_solve` returns `None` (rank == 0, or LAPACK
-    // failure — never seen in practice for `S(ρ) > 0`), we fall back to the
-    // plain LU + ridge solve to keep the outer Newton stepping.
-    let pchol = try_pivoted_chol_solve(&a, &f_view.to_owned());
-    let (beta, pp, ldet_xxs) = match pchol {
+    // The common production path is well-conditioned once the singleton
+    // penalties have been reparameterised, and the old LU + tiny-ridge solve is
+    // much cheaper than running LAPACK `dpstrf` on every outer iteration. Try
+    // that path first and accept it only if every downstream quantity is finite.
+    // Pathological observed-info systems still fall through to the mgcv-style
+    // pivoted Cholesky kernel below.
+    let (beta, pp, ldet_xxs) = match try_lu_ridge_solve(&a, &f_view.to_owned()) {
         Some(out) => (out.beta, out.pp, out.ldet_xxs),
         None => {
-            let mut a_solve = a.clone();
-            let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
-            let solve_ridge = 1e-12 * max_diag;
-            for i in 0..p {
-                a_solve[[i, i]] += solve_ridge;
+            // Mirrors mgcv `Sl.fitChol` (R/fast-REML.r:1601-1626):
+            //
+            //   1. Diagonal preconditioner `d[i] = sqrt(A[i,i])` (1 where A[i,i] ≤ 0).
+            //   2. Pivoted Chol of `A_p = D⁻¹·A·D⁻¹` via LAPACK `dpstrf`.
+            //   3. Drop rank-deficient trailing columns (mgcv lines 1610-1613).
+            //   4. `β[piv] = R⁻¹·(R'⁻¹·(f[piv]/d[piv]))/d[piv]` (line 1615).
+            //   5. `PP[piv, piv] = chol2inv(R)`, then `PP = D⁻¹·PP·D⁻¹` (lines 1623-1626).
+            //   6. `ldet_xxs = 2·Σ(log R_kk + log d_piv_k)` (line 1627).
+            //
+            // The preconditioner brings the spectrum of `A_p` closer to 1, which is
+            // what makes pivoted Chol numerically stable on the `(X'WX + S)` block-
+            // diagonal structure (the penalty's null-space directions live on a few
+            // rows, so the rank-revealing pivot pulls them to the tail).
+            //
+            // If `try_pivoted_chol_solve` returns `None` (rank == 0, or LAPACK
+            // failure — never seen in practice for `S(ρ) > 0`), fall back to the
+            // LU path even if it produced non-finite diagnostics so the caller's
+            // candidate-rejection ladder can surface a precise failure.
+            match try_pivoted_chol_solve(&a, &f_view.to_owned()) {
+                Some(out) => (out.beta, out.pp, out.ldet_xxs),
+                None => {
+                    let out = lu_ridge_solve(&a, &f_view.to_owned())?;
+                    (out.beta, out.pp, out.ldet_xxs)
+                }
             }
-            let beta = solve(a_solve, f_view.to_owned())?;
-            let pp = inverse(&a)?;
-            let ldet_xxs = crate::linalg::determinant(&a)?.ln();
-            (beta, pp, ldet_xxs)
         }
     };
 
@@ -657,6 +660,44 @@ struct PivotedCholFitOut {
     ldet_xxs: f64,
 }
 
+fn try_lu_ridge_solve(a: &Array2<f64>, f: &Array1<f64>) -> Option<PivotedCholFitOut> {
+    match lu_ridge_solve(a, f) {
+        Ok(out) if fit_out_is_finite(&out) && lu_ridge_is_well_conditioned(a, &out) => Some(out),
+        _ => None,
+    }
+}
+
+fn lu_ridge_solve(a: &Array2<f64>, f: &Array1<f64>) -> Result<PivotedCholFitOut> {
+    let p = a.nrows();
+    let mut a_solve = a.clone();
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let solve_ridge = 1e-12 * max_diag;
+    for i in 0..p {
+        a_solve[[i, i]] += solve_ridge;
+    }
+
+    let beta = solve(a_solve.clone(), f.to_owned())?;
+    let pp = inverse(&a_solve)?;
+    let ldet_xxs = crate::linalg::determinant(&a_solve)?.ln();
+    Ok(PivotedCholFitOut { beta, pp, ldet_xxs })
+}
+
+fn fit_out_is_finite(out: &PivotedCholFitOut) -> bool {
+    out.beta.iter().all(|x| x.is_finite())
+        && out.pp.iter().all(|x| x.is_finite())
+        && out.ldet_xxs.is_finite()
+}
+
+fn lu_ridge_is_well_conditioned(a: &Array2<f64>, out: &PivotedCholFitOut) -> bool {
+    let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
+    let max_pp = out.pp.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+    // Conservative cheap proxy for rank trouble. mgcv's reference path uses
+    // pivoted Chol plus Rrank(); if the LU inverse is this large relative to
+    // the Hessian diagonal, tiny pivots can perturb rho/grad enough to move the
+    // outer fREML solution. Use the mgcv-style kernel for those cases.
+    max_diag * max_pp < 1.0e10
+}
+
 /// Mgcv's `Sl.fitChol` numerical kernel (R/fast-REML.r:1601-1627), ported
 /// straight to LAPACK `dpstrf`.
 ///
@@ -801,11 +842,7 @@ fn try_pivoted_chol_solve(a: &Array2<f64>, f: &Array1<f64>) -> Option<PivotedCho
     }
     let ldet_xxs = 2.0 * ldet;
 
-    Some(PivotedCholFitOut {
-        beta,
-        pp,
-        ldet_xxs,
-    })
+    Some(PivotedCholFitOut { beta, pp, ldet_xxs })
 }
 
 /// Inline upper-triangular inverse via back-substitution. Mirrors
@@ -865,7 +902,10 @@ fn clamped_newton_step(grad: &Array1<f64>, hess: &Array2<f64>) -> Result<Array1<
     })?;
     let max_abs = eigvals.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
     let me = max_abs * f64::EPSILON.sqrt();
-    let abs_eig: Vec<f64> = eigvals.iter().map(|v| v.abs().max(me).max(1e-300)).collect();
+    let abs_eig: Vec<f64> = eigvals
+        .iter()
+        .map(|v| v.abs().max(me).max(1e-300))
+        .collect();
 
     // step = -V · (V'·g / |Λ|)
     let qt_g = eigvecs.t().dot(grad);
@@ -913,7 +953,81 @@ mod internal_tests {
         assert_eq!(d1.len(), 1);
         assert_eq!(d2.dim(), (1, 1));
         // tr(λ S · I) = λ · tr(S) = 1.5 · 8 = 12 > 0.
-        assert!((d1[0] - 12.0).abs() < 1e-12, "tr expected 12, got {}", d1[0]);
+        assert!(
+            (d1[0] - 12.0).abs() < 1e-12,
+            "tr expected 12, got {}",
+            d1[0]
+        );
+    }
+
+    #[test]
+    fn lu_fast_path_matches_pivoted_chol_substeps_when_well_conditioned() {
+        let p = 4;
+        let block = Array2::from_shape_vec(
+            (3, 3),
+            vec![2.0, -1.0, 0.0, -1.0, 2.0, -1.0, 0.0, -1.0, 2.0],
+        )
+        .unwrap();
+        let sl = vec![BlockPenalty::new(block, 1, p)];
+        let rho = Array1::from_vec(vec![2.0_f64.ln()]);
+        let lambda = rho[0].exp();
+        assert!((lambda - 2.0).abs() < 1e-15);
+
+        let xx = Array2::from_shape_vec(
+            (p, p),
+            vec![
+                8.0, 0.2, 0.1, 0.0, 0.2, 7.0, 0.3, 0.1, 0.1, 0.3, 6.0, 0.2, 0.0, 0.1, 0.2, 5.0,
+            ],
+        )
+        .unwrap();
+        let f = Array1::from_vec(vec![1.0, 0.5, -0.25, 0.75]);
+        let mut a = xx.clone();
+        sl[0].scaled_add_to(&mut a, lambda);
+
+        let lu = try_lu_ridge_solve(&a, &f).expect("well-conditioned LU fast path");
+        let pchol = try_pivoted_chol_solve(&a, &f).expect("pivoted Chol reference");
+
+        let beta_diff = (&lu.beta - &pchol.beta)
+            .iter()
+            .map(|x| x.abs())
+            .fold(0.0_f64, f64::max);
+        let pp_diff = (&lu.pp - &pchol.pp)
+            .iter()
+            .map(|x| x.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(beta_diff < 1e-11, "beta diff {beta_diff:.3e}");
+        assert!(pp_diff < 1e-11, "PP diff {pp_diff:.3e}");
+        assert!((lu.ldet_xxs - pchol.ldet_xxs).abs() < 1e-10);
+
+        let (dxxs_d1, _) = compute_d_det_xxs(&sl, &lu.pp, &[lambda]);
+        let manual_trace = lambda * sl[0].trace_product(&lu.pp);
+        assert!((dxxs_d1[0] - manual_trace).abs() < 1e-12);
+
+        let out = compute_sl_fitchol_step(
+            &sl,
+            xx.view(),
+            f.view(),
+            rho.view(),
+            3.0,
+            0.0,
+            true,
+            10.0,
+            1,
+            1.0,
+        )
+        .unwrap();
+        assert!(out.grad.iter().all(|g| g.is_finite()));
+        assert!((out.ldet_xxs - lu.ldet_xxs).abs() < 1e-10);
+    }
+
+    #[test]
+    fn lu_fast_path_rejects_rank_risky_scaled_inverse() {
+        let a = Array2::from_diag(&Array1::from_vec(vec![1.0e13, 1.0, 2.0]));
+        let f = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        let out = lu_ridge_solve(&a, &f).unwrap();
+        assert!(fit_out_is_finite(&out));
+        assert!(!lu_ridge_is_well_conditioned(&a, &out));
+        assert!(try_lu_ridge_solve(&a, &f).is_none());
     }
 
     /// `IftCholResult::rss1` is identically zero — guards against accidental
