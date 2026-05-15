@@ -32,6 +32,30 @@ def test_quantile_elf_parts_match_qgam_scalar_contract() -> None:
         assert rust["EDmu2"] == pytest.approx(row["EDmu2"], rel=1e-10, abs=1e-10)
 
 
+def test_quantile_elf_higher_derivatives_match_qgam_scalar_contract() -> None:
+    payload = _fixture()
+    p = payload["params"]
+    fields = [
+        "Dth",
+        "Dmuth",
+        "Dmu3",
+        "Dmu2th",
+        "Dmu4",
+        "Dth2",
+        "Dmuth2",
+        "Dmu2th2",
+        "Dmu3th",
+    ]
+
+    for row in payload["rows"]:
+        rust = quantile_elf_parts_py(row["y"], row["mu"], p["tau"], p["sigma"], p["co"])
+        for field in fields:
+            assert rust[field] == pytest.approx(row[field], rel=1e-10, abs=1e-10), (
+                row["name"],
+                field,
+            )
+
+
 def test_quantile_elf_saturated_loglik_matches_qgam_ls_value() -> None:
     payload = _fixture()
     p = payload["params"]

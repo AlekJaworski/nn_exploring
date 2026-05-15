@@ -2582,6 +2582,24 @@ pub(crate) struct QuantileElfParts {
     pub dmu: f64,
     /// Second derivative of negative log-likelihood with respect to μ.
     pub dmu2: f64,
+    /// qgam `Dd(level=1)$Dth`: deviance derivative with respect to theta.
+    pub dth: f64,
+    /// qgam `Dd(level=1)$Dmuth`: mixed deviance derivative.
+    pub dmuth: f64,
+    /// qgam `Dd(level=1)$Dmu3`: third mu deviance derivative.
+    pub dmu3: f64,
+    /// qgam `Dd(level=1)$Dmu2th`: mixed second-mu/theta derivative.
+    pub dmu2th: f64,
+    /// qgam `Dd(level=2)$Dmu4`: fourth mu deviance derivative.
+    pub dmu4: f64,
+    /// qgam `Dd(level=2)$Dth2`: second theta deviance derivative.
+    pub dth2: f64,
+    /// qgam `Dd(level=2)$Dmuth2`: Dmu-theta-theta derivative.
+    pub dmuth2: f64,
+    /// qgam `Dd(level=2)$Dmu2th2`: Dmu2-theta-theta derivative.
+    pub dmu2th2: f64,
+    /// qgam `Dd(level=2)$Dmu3th`: Dmu3-theta derivative.
+    pub dmu3th: f64,
     /// Logistic CDF term `s = sigmoid((y - μ) / lambda)`.
     pub sigmoid: f64,
 }
@@ -2615,12 +2633,27 @@ pub(crate) fn quantile_elf_parts(
     let u = r / lambda;
     let s = sigmoid_stable(u);
     let softplus = softplus_stable(u);
+    let dl = s * (1.0 - s) / lambda;
+    let sigmoid_d2 = s * (1.0 - s) * (1.0 - 2.0 * s);
+    let sigmoid_d3 = sigmoid_d2 * (1.0 - 2.0 * s) - 2.0 * s * s * (1.0 - s) * (1.0 - s);
     let t = (1.0 - tau) * lambda * (1.0 - tau).ln() + lambda * tau * tau.ln() - (1.0 - tau) * r
         + lambda * softplus;
+    let dmu_qgam = -2.0 * (s - 1.0 + tau) / sigma;
+    let dmu2_qgam = 2.0 * dl / sigma;
+    let dmu3_qgam = -(2.0 * sigmoid_d2) / (sigma * lambda * lambda);
     QuantileElfParts {
         deviance: 2.0 * t / sigma,
-        dmu: ((1.0 - tau) - s) / sigma,
-        dmu2: s * (1.0 - s) / (sigma * lambda),
+        dmu: 0.5 * dmu_qgam,
+        dmu2: 0.5 * dmu2_qgam,
+        dth: -2.0 * t / sigma,
+        dmuth: -dmu_qgam,
+        dmu3: dmu3_qgam,
+        dmu2th: -dmu2_qgam,
+        dmu4: (2.0 * sigmoid_d3) / (sigma * lambda * lambda * lambda),
+        dth2: 2.0 * t / sigma,
+        dmuth2: dmu_qgam,
+        dmu2th2: dmu2_qgam,
+        dmu3th: -dmu3_qgam,
         sigmoid: s,
     }
 }
