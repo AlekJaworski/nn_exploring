@@ -2793,18 +2793,19 @@ pub fn fit_pirls_quantile(
     // Sharper, properly-calibrated σ remains a deferred followup.
     let (sigma, lambda_elf) = if sigma_user > 0.0 {
         let lambda_elf = if lambda_user > 0.0 {
-            lambda_user
+            lambda_user  // caller supplied explicit co (calibrate_pin via Python, fixed-sp tests)
         } else {
-            sigma_user
+            sigma_user   // default: lambda_elf = sigma (original behaviour)
         };
         (sigma_user, lambda_elf)
     } else {
+        // AUTO mode: sigma = co · tail_scale so extreme-τ weights stay nonzero.
         let err = 0.05_f64;
         let sigma2_floor = sigma2_hat.max(1e-6);
-        let co_default =
+        let co_auto =
             err * (2.0 * std::f64::consts::PI * sigma2_floor).sqrt() / (2.0 * 2.0_f64.ln());
         let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
-        let sigma_auto = co_default * tail_scale;
+        let sigma_auto = co_auto * tail_scale;
         let lambda_auto = if lambda_user > 0.0 {
             lambda_user
         } else {
@@ -2812,6 +2813,26 @@ pub fn fit_pirls_quantile(
         };
         (sigma_auto, lambda_auto)
     };
+    // Penalised ELF deviance: Σ_i deviance_i(β) + β'·S_total·β.
+    // Used by the Armijo backtracking guard below to prevent the diverge-
+    // to-extreme failure mode when σ is sharp (most weights ≈ 0) and the
+    // full Newton step overshoots.
+    let elf_pen_deviance = |b: &Array1<f64>| -> f64 {
+        let eta_t = x.dot(b);
+        let mut total = 0.0_f64;
+        for i in 0..n {
+            let d = quantile_elf_parts(y[i], eta_t[i], tau, sigma, lambda_elf).deviance;
+            if !d.is_finite() {
+                return f64::INFINITY;
+            }
+            total += d;
+        }
+        let sb = penalty_total.dot(b);
+        let pen: f64 = b.iter().zip(sb.iter()).map(|(&a, &v)| a * v).sum();
+        total + pen
+    };
+
+    let mut obj_cur = elf_pen_deviance(&beta);
     let mut converged = false;
     let mut iter = 0;
 
@@ -2860,14 +2881,45 @@ pub fn fit_pirls_quantile(
             .collect();
         let xt_rhs = x.t().dot(&weta_plus_g);
 
-        let beta_old = beta.clone();
-        beta = solve(a, xt_rhs)?;
+        let beta_proposed = solve(a, xt_rhs)?;
 
-        let max_change = beta
+        // Armijo backtracking: accept the step only if penalised ELF deviance
+        // decreases.  At sharp σ the full Newton step often overshoots (weights
+        // collapse at the new η, β blows up on the next iteration); halving up
+        // to 20 times keeps the trajectory on the descent path.
+        let direction: Vec<f64> = beta_proposed
             .iter()
-            .zip(beta_old.iter())
+            .zip(beta.iter())
+            .map(|(&bn, &bo)| bn - bo)
+            .collect();
+        let mut alpha = 1.0_f64;
+        let mut accepted = false;
+        let mut beta_new = beta.clone();
+        let mut obj_new = obj_cur;
+        for _ in 0..20 {
+            for j in 0..p {
+                beta_new[j] = beta[j] + alpha * direction[j];
+            }
+            obj_new = elf_pen_deviance(&beta_new);
+            if obj_new.is_finite() && obj_new <= obj_cur + 1e-10 {
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if !accepted {
+            // No descending step found — stagnation, declare convergence.
+            converged = true;
+            break;
+        }
+
+        let max_change = beta_new
+            .iter()
+            .zip(beta.iter())
             .map(|(b, b_old)| (b - b_old).abs())
             .fold(0.0f64, f64::max);
+        beta = beta_new;
+        obj_cur = obj_new;
 
         if max_change < tolerance {
             converged = true;

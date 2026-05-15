@@ -465,6 +465,41 @@ impl GAM {
         )
     }
 
+    /// Run ELF PIRLS at caller-supplied fixed smoothing parameters (no outer
+    /// REML/FS loop).  Used for staged parity contracts where we want to
+    /// verify PIRLS convergence in isolation from lambda optimization.
+    pub fn fit_fixed_sp_quantile(
+        &mut self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sp: &[f64],
+        tau: f64,
+        sigma: f64,
+        co: f64,
+        max_iter: usize,
+        tol: f64,
+    ) -> Result<crate::pirls::PiRLSResult> {
+        let mut cache = FitCache::new(x, &mut self.smooth_terms, self.mgcv_exact, false)?;
+        if sp.len() != cache.penalties.len() {
+            return Err(GAMError::DimensionMismatch(format!(
+                "sp length ({}) must match number of smooths ({})",
+                sp.len(),
+                cache.penalties.len()
+            )));
+        }
+        crate::pirls::fit_pirls_quantile(
+            y,
+            &cache.design_matrix,
+            sp,
+            &cache.penalties,
+            tau,
+            sigma,
+            co,
+            max_iter,
+            tol,
+        )
+    }
+
     #[cfg(feature = "blas")]
     pub fn fit_optimized_with_scale_method(
         &mut self,

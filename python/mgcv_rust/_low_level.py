@@ -175,6 +175,35 @@ class GAM:
         x_arr = _ensure_2d_float64(x)
         return self._native.evaluate_lpmatrix(x_arr)
 
+    def fit_quantile_fixed_sp(
+        self,
+        x: Any,
+        y: Any,
+        k: Union[int, Iterable[int]],
+        sp: Any,
+        tau: float,
+        sigma: float,
+        co: float,
+        bs: Optional[str] = None,
+        bs_list: Any = None,
+        max_iter: Optional[int] = None,
+        tol: Optional[float] = None,
+    ) -> dict:
+        """Run ELF PIRLS at fixed smoothing parameters (no REML outer loop).
+
+        Used for staged parity contracts: verifies PIRLS convergence at
+        R-derived (co, sigma, sp) before touching lambda optimization.
+        """
+        x_arr = _ensure_2d_float64(x)
+        y_arr = _ensure_1d_float64(y)
+        ks = _ensure_k_list(k, x_arr.shape[1])
+        sp_arr = list(float(v) for v in sp)
+        return self._native.fit_quantile_fixed_sp(
+            x_arr, y_arr, ks, sp_arr, float(tau), float(sigma), float(co),
+            bs=bs, bs_list=bs_list,
+            max_iter=max_iter, tol=tol,
+        )
+
     # --- Forwarding ---------------------------------------------------- #
 
     def __getattr__(self, name: str) -> Any:

@@ -703,6 +703,100 @@ impl PyGAM {
         Ok(result.into())
     }
 
+    /// Run ELF PIRLS at caller-supplied fixed smoothing parameters.
+    ///
+    /// Does NOT run the outer REML/FS optimization loop — sp values are held
+    /// fixed. This is the step-6 contract hook: verify PIRLS convergence at
+    /// R-derived (co, sigma, sp) before touching lambda optimization.
+    ///
+    /// Args:
+    ///     x: Raw covariates (n × d).
+    ///     y: Response (n).
+    ///     k: Basis sizes per smooth (length d).
+    ///     sp: Fixed smoothing parameters (length d).
+    ///     tau: Quantile level.
+    ///     sigma: ELF sigma = exp(lsig).
+    ///     co: ELF logistic-width = err * sqrt(2π*varHat) / (2*log2).
+    ///     bs: Basis type ("cr" default, "bs").
+    ///     bs_list: Per-smooth basis overrides.
+    ///     max_iter: PIRLS iterations (default 200).
+    ///     tol: PIRLS convergence tolerance (default 1e-6).
+    ///
+    /// Returns dict with: coef, fitted_values, deviance, converged, iterations.
+    fn fit_quantile_fixed_sp<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+        y: PyReadonlyArray1<f64>,
+        k: Vec<usize>,
+        sp: Vec<f64>,
+        tau: f64,
+        sigma: f64,
+        co: f64,
+        bs: Option<&str>,
+        bs_list: Option<Vec<Option<String>>>,
+        max_iter: Option<usize>,
+        tol: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::gam_optimized::*;
+
+        let x_array = x.as_array().to_owned();
+        let y_array = y.as_array().to_owned();
+        let (_n, d) = x_array.dim();
+
+        if k.len() != d {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "k length ({}) must match columns ({})", k.len(), d
+            )));
+        }
+        if sp.len() != d {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "sp length ({}) must match columns ({})", sp.len(), d
+            )));
+        }
+
+        let default_bs = bs.unwrap_or("cr");
+        self.inner.smooth_terms.clear();
+
+        for (i, &num_basis) in k.iter().enumerate() {
+            let col = x_array.column(i).to_owned();
+            let term_bs: &str = bs_list
+                .as_ref()
+                .and_then(|v| v.get(i))
+                .and_then(|opt| opt.as_deref())
+                .unwrap_or(default_bs);
+            let smooth = match term_bs {
+                "cr" => SmoothTerm::cr_spline_quantile(format!("x{}", i), num_basis, &col)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?,
+                "bs" => SmoothTerm::cubic_spline_quantile(format!("x{}", i), num_basis, &col)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?,
+                _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                    "bs must be 'cr' or 'bs'"
+                )),
+            };
+            self.inner.add_smooth(smooth);
+        }
+
+        let pirls_result = self.inner.fit_fixed_sp_quantile(
+            &x_array,
+            &y_array,
+            &sp,
+            tau,
+            sigma,
+            co,
+            max_iter.unwrap_or(200),
+            tol.unwrap_or(1e-6),
+        ).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?;
+
+        let result = pyo3::types::PyDict::new(py);
+        result.set_item("coef", PyArray1::from_vec(py, pirls_result.coefficients.to_vec()))?;
+        result.set_item("fitted_values", PyArray1::from_vec(py, pirls_result.fitted_values.to_vec()))?;
+        result.set_item("deviance", pirls_result.deviance)?;
+        result.set_item("converged", pirls_result.converged)?;
+        result.set_item("iterations", pirls_result.iterations)?;
+        Ok(result.into())
+    }
+
     /// Fit GAM with formula-like syntax (mgcv-style)
     ///
     /// Args:
