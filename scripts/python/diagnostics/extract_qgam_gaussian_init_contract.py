@@ -16,6 +16,8 @@ import rpy2.robjects as ro
 from rpy2.robjects import pandas2ri
 from rpy2.robjects.packages import importr
 
+from mgcv_rust import Gam
+
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "data" / "sale_price_fixtures"
@@ -44,13 +46,16 @@ def _summary(x: np.ndarray) -> list[float]:
     return [float(v) for v in qs]
 
 
+def _max_abs(x: np.ndarray, y: np.ndarray) -> float:
+    return float(np.max(np.abs(np.asarray(x, dtype=float) - np.asarray(y, dtype=float))))
+
+
 def main() -> None:
     mgcv = importr("mgcv")
     qgam = importr("qgam")
-    base = importr("base")
 
     df = pd.read_parquet(FIXTURE_DIR / "entire_dataset_train.parquet")
-    mean_ref = pd.read_parquet(REFERENCE_DIR / "expected" / "mean_gam_entire_dataset.parquet")
+    mean_ref = pd.read_parquet(REFERENCE_DIR / "mean_gam_entire_dataset.parquet")
     qdf = df.copy()
     qdf["resid"] = df[TARGET].to_numpy() - mean_ref["pred_prod"].to_numpy()
 
@@ -63,7 +68,7 @@ def main() -> None:
         r_qdf = ro.conversion.get_conversion().py2rpy(qdf)
 
     init_gauss = ro.r("qgam:::.init_gauss_fit")
-    ctrl = qgam.qgam_control()
+    ctrl = ro.ListVector({"link": "identity"})
     arg_gam = ro.ListVector({"method": "REML", "nthreads": 1})
     init = init_gauss(ro.Formula(formula), r_qdf, ctrl, arg_gam, ro.FloatVector([0.95]), False)
 
@@ -77,12 +82,30 @@ def main() -> None:
     var_hat = float(init.rx2("varHat")[0])
     resid = qdf["resid"].to_numpy(dtype=float)
 
+    rust_g = Gam(
+        predictors=QGAM_SMOOTHS,
+        family="gaussian",
+        method="REML",
+        term_k_mapping=k_q,
+        predictor_basis_map={c: "cr" for c in QGAM_SMOOTHS},
+    )
+    rust_g.fit(qdf[QGAM_SMOOTHS], resid)
+    rust_fitted = np.asarray(rust_g.predict(qdf[QGAM_SMOOTHS]), dtype=float)
+    rust_coef = np.asarray(rust_g.get_coefficients(), dtype=float)
+    rust_sp = np.asarray(rust_g.get_lambdas(), dtype=float)
+    rust_summary = rust_g.summary()
+
+    rust_mustart = rust_fitted + (mustart - fitted)
+    rust_coefstart = rust_coef.copy()
+    if rust_coefstart.size:
+        rust_coefstart[0] += float(np.mean(rust_mustart - rust_fitted))
+
     payload = {
         "source": "qgam:::.init_gauss_fit production entire_dataset",
         "versions": {
-            "qgam": str(base.packageVersion("qgam")),
-            "mgcv": str(base.packageVersion("mgcv")),
-            "R": str(ro.r("getRversion()")),
+            "qgam": str(ro.r("as.character(packageVersion('qgam'))")[0]),
+            "mgcv": str(ro.r("as.character(packageVersion('mgcv'))")[0]),
+            "R": str(ro.r("as.character(getRversion())")[0]),
         },
         "formula": formula,
         "n": int(len(qdf)),
@@ -96,6 +119,17 @@ def main() -> None:
         "init_mustart_summary": _summary(mustart),
         "intercept_shift": float(coefstart[0] - coef[0]),
         "mean_mustart_minus_fitted": float(np.mean(mustart - fitted)),
+        "rust_gaussian": {
+            "sp": [float(v) for v in rust_sp],
+            "coef": [float(v) for v in rust_coef],
+            "coefstart": [float(v) for v in rust_coefstart],
+            "scale": float(rust_summary.scale),
+            "deviance": float(rust_summary.deviance),
+            "fitted_summary": _summary(rust_fitted),
+            "mustart_summary": _summary(rust_mustart),
+            "max_abs_fitted_vs_qgam_gaussian": _max_abs(rust_fitted, fitted),
+            "max_abs_mustart_vs_qgam_init": _max_abs(rust_mustart, mustart),
+        },
     }
 
     OUT.parent.mkdir(parents=True, exist_ok=True)

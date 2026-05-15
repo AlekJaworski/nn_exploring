@@ -5,19 +5,35 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+import mgcv_rust
 from mgcv_rust import quantile_elf_parts_py, quantile_elf_saturated_loglik_py
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "test_data" / "qgam_elf_contracts.json"
+GAUSSIAN_INIT_FIXTURE = ROOT / "test_data" / "qgam_gaussian_init_contract.json"
+SALE_FIXTURE_DIR = ROOT / "data" / "sale_price_fixtures"
+QGAM_SMOOTHS = [
+    "days_in_current_price_regime",
+    "cum_dom_before_current_regime",
+    "price_change_pct_from_original",
+    "monthly_index",
+]
 
 
 def _fixture() -> dict:
     if not FIXTURE.exists():
         pytest.skip(f"missing qgam ELF fixture: {FIXTURE}")
     return json.loads(FIXTURE.read_text())
+
+
+def _gaussian_init_fixture() -> dict:
+    if not GAUSSIAN_INIT_FIXTURE.exists():
+        pytest.skip(f"missing qgam Gaussian-init fixture: {GAUSSIAN_INIT_FIXTURE}")
+    return json.loads(GAUSSIAN_INIT_FIXTURE.read_text())
 
 
 def test_quantile_elf_parts_match_qgam_scalar_contract() -> None:
@@ -107,3 +123,37 @@ def test_quantile_elf_saturated_loglik_matches_qgam_ls_value() -> None:
 
     rust_ls = quantile_elf_saturated_loglik_py(p["tau"], p["sigma"], p["co"], n=n)
     assert rust_ls == pytest.approx(payload["ls"]["value"], abs=1e-10)
+
+
+def test_qgam_gaussian_init_stage_matches_rust_gaussian_reml() -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    payload = _gaussian_init_fixture()
+    train_path = SALE_FIXTURE_DIR / "entire_dataset_train.parquet"
+    mean_path = SALE_FIXTURE_DIR / "mgcv_rust_parity" / "mean_gam_entire_dataset.parquet"
+    if not train_path.exists() or not mean_path.exists():
+        pytest.skip("missing sale-price fixture data for qgam Gaussian-init contract")
+
+    df = pd.read_parquet(train_path)
+    mean_ref = pd.read_parquet(mean_path)
+    resid = mean_ref["y"].to_numpy(dtype=float) - mean_ref["pred_prod"].to_numpy(dtype=float)
+    k_map = payload["k"]
+
+    rust_g = mgcv_rust.Gam(
+        predictors=QGAM_SMOOTHS,
+        family="gaussian",
+        method="REML",
+        term_k_mapping=k_map,
+        predictor_basis_map={c: "cr" for c in QGAM_SMOOTHS},
+    )
+    rust_g.fit(df[QGAM_SMOOTHS], resid)
+    fitted = np.asarray(rust_g.predict(df[QGAM_SMOOTHS]), dtype=float)
+    summary = rust_g.summary()
+    fitted_summary = np.quantile(fitted, [0.0, 0.25, 0.5, 0.75, 1.0])
+
+    assert summary.scale == pytest.approx(payload["varHat"], rel=1e-6)
+    assert rust_g.get_lambdas() == pytest.approx(payload["gaussian_sp"], rel=6e-3)
+    assert rust_g.get_coefficients() == pytest.approx(payload["gaussian_coef"], abs=5e-6)
+    assert fitted_summary == pytest.approx(payload["gaussian_fitted_summary"], abs=6e-6)
+    assert payload["rust_gaussian"]["max_abs_fitted_vs_qgam_gaussian"] < 1e-5
+    assert payload["intercept_shift"] == pytest.approx(0.07386184188909634, abs=1e-12)
