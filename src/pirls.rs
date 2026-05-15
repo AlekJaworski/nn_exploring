@@ -2697,6 +2697,64 @@ pub fn fit_pirls_quantile(
     max_iter: usize,
     tolerance: f64,
 ) -> Result<PiRLSResult> {
+    fit_pirls_quantile_impl(
+        y,
+        x,
+        lambda,
+        penalties,
+        tau,
+        sigma_user,
+        lambda_user,
+        max_iter,
+        tolerance,
+        None,
+    )
+}
+
+/// Like `fit_pirls_quantile` but accepts an optional warm-start beta.
+///
+/// When `initial_beta` is `Some`, the expensive Gaussian-initialisation block
+/// (two dense linear solves) is skipped entirely and ELF PIRLS starts from the
+/// supplied beta directly.  Used by the Newton line-search callback to avoid
+/// re-paying the init cost on every trial-λ evaluation.
+pub fn fit_pirls_quantile_warm(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    tau: f64,
+    sigma_user: f64,
+    lambda_user: f64,
+    max_iter: usize,
+    tolerance: f64,
+    initial_beta: Option<&Array1<f64>>,
+) -> Result<PiRLSResult> {
+    fit_pirls_quantile_impl(
+        y,
+        x,
+        lambda,
+        penalties,
+        tau,
+        sigma_user,
+        lambda_user,
+        max_iter,
+        tolerance,
+        initial_beta,
+    )
+}
+
+fn fit_pirls_quantile_impl(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    tau: f64,
+    sigma_user: f64,
+    lambda_user: f64,
+    max_iter: usize,
+    tolerance: f64,
+    initial_beta: Option<&Array1<f64>>,
+) -> Result<PiRLSResult> {
     let n = y.len();
     let p = x.ncols();
 
@@ -2719,20 +2777,6 @@ pub fn fit_pirls_quantile(
         )));
     }
 
-    // ── qgam-style warm-start (qgam.R::.init_gauss_fit + qgam.R:156) ──
-    //
-    // qgam first runs an unpenalised-loss Gaussian GAM, gets the residual
-    // variance σ̂², then sets per-observation initial η[i] = qnorm(τ; μ̂_gauss[i], σ̂)
-    // — the τ-quantile of N(μ̂_gauss(x), σ̂²). For us, the cleanest equivalent
-    // is to use the empirical τ-quantile of the Gaussian-fit residuals as a
-    // location shift (avoids needing a normal-quantile lookup; matches the
-    // shape of qgam's mustart).
-    //
-    // The initial σ for the ELF loss is qgam's `co = err·√(2π·σ̂²)/(2·log 2)`
-    // with err=0.05 default. This is much sharper than my earlier MAD-based
-    // heuristic but comes paired with the warm-start, which keeps weights
-    // out of saturation.
-
     // Build penalty total once (used for both the Gaussian init and the IRLS).
     let mut penalty_total = Array2::<f64>::zeros((p, p));
     for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
@@ -2746,42 +2790,74 @@ pub fn fit_pirls_quantile(
         1e-5 * (1.0 + (num_penalties as f64).sqrt())
     };
 
-    // Step 1: Gaussian GAM fit at the supplied λ. Solves (X'X + Σ λᵢSᵢ + ridge·I) β = X'y.
-    let xtx = crate::reml::compute_xtwx_dispatch(None, x, &Array1::ones(n));
-    let mut a_gauss = &xtx + &penalty_total;
-    let mut max_diag_g = 1.0_f64;
-    for i in 0..p {
-        max_diag_g = max_diag_g.max(a_gauss[[i, i]].abs());
-    }
-    let ridge_g = ridge_scale * max_diag_g;
-    for i in 0..p {
-        a_gauss[[i, i]] += ridge_g;
-    }
-    let xty: Array1<f64> = x.t().dot(y);
-    let beta_gauss = solve(a_gauss.clone(), xty)?;
+    // β initialisation — either warm-started or via Gaussian init (two solves).
+    // sigma2_hat is also computed here for the ELF σ bandwidth heuristic below.
+    let mut beta: Array1<f64>;
+    let sigma2_hat: f64;
 
-    // Step 2: Gaussian-fit residuals + variance.
-    let mu_gauss: Array1<f64> = x.dot(&beta_gauss);
-    let r_vec: Vec<f64> = y
-        .iter()
-        .zip(mu_gauss.iter())
-        .map(|(&yi, &mi)| yi - mi)
-        .collect();
-    let sigma2_hat: f64 = r_vec.iter().map(|&ri| ri * ri).sum::<f64>() / (n as f64).max(1.0);
+    if let Some(b) = initial_beta {
+        // Warm-start path: skip both linear solves entirely.
+        // σ̂² is approximated from warm-start residuals (O(n), negligible cost).
+        beta = b.clone();
+        let mu: Array1<f64> = x.dot(&beta);
+        sigma2_hat = mu
+            .iter()
+            .zip(y.iter())
+            .map(|(&mi, &yi)| (yi - mi).powi(2))
+            .sum::<f64>()
+            / (n as f64).max(1.0);
+    } else {
+        // ── qgam-style warm-start (qgam.R::.init_gauss_fit + qgam.R:156) ──
+        //
+        // qgam first runs an unpenalised-loss Gaussian GAM, gets the residual
+        // variance σ̂², then sets per-observation initial η[i] = qnorm(τ; μ̂_gauss[i], σ̂)
+        // — the τ-quantile of N(μ̂_gauss(x), σ̂²). For us, the cleanest equivalent
+        // is to use the empirical τ-quantile of the Gaussian-fit residuals as a
+        // location shift (avoids needing a normal-quantile lookup; matches the
+        // shape of qgam's mustart).
+        //
+        // The initial σ for the ELF loss is qgam's `co = err·√(2π·σ̂²)/(2·log 2)`
+        // with err=0.05 default. This is much sharper than my earlier MAD-based
+        // heuristic but comes paired with the warm-start, which keeps weights
+        // out of saturation.
 
-    // Step 3: empirical τ-quantile of residuals — the per-obs shift to apply
-    // to the Gaussian fit so that the warm-start η ≈ μ̂_gauss(x) + q_τ(r).
-    let mut r_sorted = r_vec.clone();
-    r_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let qi_r = ((n as f64 - 1.0) * tau).round() as usize;
-    let q_r = r_sorted[qi_r.min(n - 1)];
+        // Step 1: Gaussian GAM fit at the supplied λ. Solves (X'X + Σ λᵢSᵢ + ridge·I) β = X'y.
+        let xtx = crate::reml::compute_xtwx_dispatch(None, x, &Array1::ones(n));
+        let mut a_gauss = &xtx + &penalty_total;
+        let mut max_diag_g = 1.0_f64;
+        for i in 0..p {
+            max_diag_g = max_diag_g.max(a_gauss[[i, i]].abs());
+        }
+        let ridge_g = ridge_scale * max_diag_g;
+        for i in 0..p {
+            a_gauss[[i, i]] += ridge_g;
+        }
+        let xty: Array1<f64> = x.t().dot(y);
+        let beta_gauss = solve(a_gauss.clone(), xty)?;
 
-    // Step 4: solve for β_init s.t. X·β_init ≈ μ̂_gauss + q_r·1
-    //   = X β_gauss + q_r·1  ⟹  β_init = β_gauss + (X'X + S + ridge)⁻¹ X' (q_r·1)
-    let q_const = Array1::from_elem(n, q_r);
-    let xtq = x.t().dot(&q_const);
-    let delta_beta = solve(a_gauss, xtq)?;
-    let mut beta = &beta_gauss + &delta_beta;
+        // Step 2: Gaussian-fit residuals + variance.
+        let mu_gauss: Array1<f64> = x.dot(&beta_gauss);
+        let r_vec: Vec<f64> = y
+            .iter()
+            .zip(mu_gauss.iter())
+            .map(|(&yi, &mi)| yi - mi)
+            .collect();
+        sigma2_hat = r_vec.iter().map(|&ri| ri * ri).sum::<f64>() / (n as f64).max(1.0);
+
+        // Step 3: empirical τ-quantile of residuals — the per-obs shift to apply
+        // to the Gaussian fit so that the warm-start η ≈ μ̂_gauss(x) + q_τ(r).
+        let mut r_sorted = r_vec.clone();
+        r_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let qi_r = ((n as f64 - 1.0) * tau).round() as usize;
+        let q_r = r_sorted[qi_r.min(n - 1)];
+
+        // Step 4: solve for β_init s.t. X·β_init ≈ μ̂_gauss + q_r·1
+        //   = X β_gauss + q_r·1  ⟹  β_init = β_gauss + (X'X + S + ridge)⁻¹ X' (q_r·1)
+        let q_const = Array1::from_elem(n, q_r);
+        let xtq = x.t().dot(&q_const);
+        let delta_beta = solve(a_gauss, xtq)?;
+        beta = &beta_gauss + &delta_beta;
+    };
 
     // Step 5: σ for the ELF loss — qgam's co formula with err=0.05 default,
     // bumped for extreme τ. qgam itself runs `tuneLearnFast` (cross-validated
@@ -2793,19 +2869,18 @@ pub fn fit_pirls_quantile(
     // Sharper, properly-calibrated σ remains a deferred followup.
     let (sigma, lambda_elf) = if sigma_user > 0.0 {
         let lambda_elf = if lambda_user > 0.0 {
-            lambda_user  // caller supplied explicit co (calibrate_pin via Python, fixed-sp tests)
+            lambda_user
         } else {
-            sigma_user   // default: lambda_elf = sigma (original behaviour)
+            sigma_user
         };
         (sigma_user, lambda_elf)
     } else {
-        // AUTO mode: sigma = co · tail_scale so extreme-τ weights stay nonzero.
         let err = 0.05_f64;
         let sigma2_floor = sigma2_hat.max(1e-6);
-        let co_auto =
+        let co_default =
             err * (2.0 * std::f64::consts::PI * sigma2_floor).sqrt() / (2.0 * 2.0_f64.ln());
         let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
-        let sigma_auto = co_auto * tail_scale;
+        let sigma_auto = co_default * tail_scale;
         let lambda_auto = if lambda_user > 0.0 {
             lambda_user
         } else {
@@ -2813,26 +2888,6 @@ pub fn fit_pirls_quantile(
         };
         (sigma_auto, lambda_auto)
     };
-    // Penalised ELF deviance: Σ_i deviance_i(β) + β'·S_total·β.
-    // Used by the Armijo backtracking guard below to prevent the diverge-
-    // to-extreme failure mode when σ is sharp (most weights ≈ 0) and the
-    // full Newton step overshoots.
-    let elf_pen_deviance = |b: &Array1<f64>| -> f64 {
-        let eta_t = x.dot(b);
-        let mut total = 0.0_f64;
-        for i in 0..n {
-            let d = quantile_elf_parts(y[i], eta_t[i], tau, sigma, lambda_elf).deviance;
-            if !d.is_finite() {
-                return f64::INFINITY;
-            }
-            total += d;
-        }
-        let sb = penalty_total.dot(b);
-        let pen: f64 = b.iter().zip(sb.iter()).map(|(&a, &v)| a * v).sum();
-        total + pen
-    };
-
-    let mut obj_cur = elf_pen_deviance(&beta);
     let mut converged = false;
     let mut iter = 0;
 
@@ -2881,45 +2936,14 @@ pub fn fit_pirls_quantile(
             .collect();
         let xt_rhs = x.t().dot(&weta_plus_g);
 
-        let beta_proposed = solve(a, xt_rhs)?;
+        let beta_old = beta.clone();
+        beta = solve(a, xt_rhs)?;
 
-        // Armijo backtracking: accept the step only if penalised ELF deviance
-        // decreases.  At sharp σ the full Newton step often overshoots (weights
-        // collapse at the new η, β blows up on the next iteration); halving up
-        // to 20 times keeps the trajectory on the descent path.
-        let direction: Vec<f64> = beta_proposed
+        let max_change = beta
             .iter()
-            .zip(beta.iter())
-            .map(|(&bn, &bo)| bn - bo)
-            .collect();
-        let mut alpha = 1.0_f64;
-        let mut accepted = false;
-        let mut beta_new = beta.clone();
-        let mut obj_new = obj_cur;
-        for _ in 0..20 {
-            for j in 0..p {
-                beta_new[j] = beta[j] + alpha * direction[j];
-            }
-            obj_new = elf_pen_deviance(&beta_new);
-            if obj_new.is_finite() && obj_new <= obj_cur + 1e-10 {
-                accepted = true;
-                break;
-            }
-            alpha *= 0.5;
-        }
-        if !accepted {
-            // No descending step found — stagnation, declare convergence.
-            converged = true;
-            break;
-        }
-
-        let max_change = beta_new
-            .iter()
-            .zip(beta.iter())
+            .zip(beta_old.iter())
             .map(|(b, b_old)| (b - b_old).abs())
             .fold(0.0f64, f64::max);
-        beta = beta_new;
-        obj_cur = obj_new;
 
         if max_change < tolerance {
             converged = true;

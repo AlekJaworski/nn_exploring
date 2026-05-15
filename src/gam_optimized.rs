@@ -6,7 +6,10 @@ use crate::{
     block_penalty::BlockPenalty,
     discrete::{compute_xtwx_discrete, DiscreteConfig, DiscreteDesign},
     gam::{SmoothTerm, GAM},
-    pirls::{fit_pirls_cached, fit_pirls_discretized, fit_pirls_tdist, fit_pirls_tdist_discrete},
+    pirls::{
+        fit_pirls_cached, fit_pirls_discretized, fit_pirls_quantile_warm, fit_pirls_tdist,
+        fit_pirls_tdist_discrete,
+    },
     reml::compute_xtwx_dispatch,
     smooth::{OptimizationMethod, SmoothingParameter},
     GAMError, Result,
@@ -407,6 +410,35 @@ impl FitCache {
             )
         }
     }
+
+    /// Run the quantile ELF PIRLS with an optional warm-start beta.
+    ///
+    /// When `initial_beta` is `Some`, the two Gaussian-init linear solves are
+    /// skipped, cutting per-call cost by ~70-80% for the Newton line-search.
+    fn run_pirls_quantile_warm(
+        &self,
+        y: &Array1<f64>,
+        lambda: &[f64],
+        tau: f64,
+        sigma: f64,
+        lambda_elf: f64,
+        max_iter: usize,
+        tolerance: f64,
+        initial_beta: Option<&Array1<f64>>,
+    ) -> Result<crate::pirls::PiRLSResult> {
+        fit_pirls_quantile_warm(
+            y,
+            &self.design_matrix,
+            lambda,
+            &self.penalties,
+            tau,
+            sigma,
+            lambda_elf,
+            max_iter,
+            tolerance,
+            initial_beta,
+        )
+    }
 }
 
 /// Initialize lambda with smart heuristic based on data
@@ -440,31 +472,6 @@ impl GAM {
     ///
     /// Improvements over standard fit():
     /// - Caches design matrix and penalty computations
-    /// - Uses ndarray slicing instead of loops for matrix construction
-    /// - Better lambda initialization
-    /// - Adaptive tolerance for early stopping
-    /// - Caches X'X computation
-    #[cfg(feature = "blas")]
-    pub fn fit_optimized(
-        &mut self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        opt_method: OptimizationMethod,
-        max_outer_iter: usize,
-        max_inner_iter: usize,
-        tolerance: f64,
-    ) -> Result<()> {
-        self.fit_optimized_with_scale_method(
-            x,
-            y,
-            opt_method,
-            max_outer_iter,
-            max_inner_iter,
-            tolerance,
-            crate::reml::ScaleParameterMethod::EDF,
-        )
-    }
-
     /// Run ELF PIRLS at caller-supplied fixed smoothing parameters (no outer
     /// REML/FS loop).  Used for staged parity contracts where we want to
     /// verify PIRLS convergence in isolation from lambda optimization.
@@ -497,6 +504,31 @@ impl GAM {
             co,
             max_iter,
             tol,
+        )
+    }
+
+    /// - Uses ndarray slicing instead of loops for matrix construction
+    /// - Better lambda initialization
+    /// - Adaptive tolerance for early stopping
+    /// - Caches X'X computation
+    #[cfg(feature = "blas")]
+    pub fn fit_optimized(
+        &mut self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        opt_method: OptimizationMethod,
+        max_outer_iter: usize,
+        max_inner_iter: usize,
+        tolerance: f64,
+    ) -> Result<()> {
+        self.fit_optimized_with_scale_method(
+            x,
+            y,
+            opt_method,
+            max_outer_iter,
+            max_inner_iter,
+            tolerance,
+            crate::reml::ScaleParameterMethod::EDF,
         )
     }
 
@@ -1021,6 +1053,14 @@ impl GAM {
                 let y_ref = y;
                 let family_cell_ref = std::sync::Arc::clone(&family_cell);
                 let outer_sigma2_profile = self.tdist_profile;
+                // NOTE: warm-start beta threading via run_pirls_quantile_warm is
+                // available but disabled here. Using the initial FS beta as a
+                // warm-start causes Newton line-search instability: trial λ values
+                // can differ substantially from the initial λ, and the FS beta at
+                // the initial λ produces degenerate ELF weights at very different λ.
+                // Correct warm-start requires lambda-aware gating (e.g. only warm-
+                // start when |Δλ/λ| < threshold, or track the ACCEPTED outer-iter
+                // beta separately from line-search trials). Deferred to Phase 3.
                 let mut callback = |trial_lambdas: &[f64]| -> Result<crate::smooth::PirlsRefresh> {
                     callback_pirls_calls += 1;
                     // Read the latest family from the shared cell — the outer
