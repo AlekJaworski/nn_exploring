@@ -30,5 +30,5 @@ from ._quantile import tune_quantile_sigma, fit_quantile, fit_quantile_lss, Quan
 __all__ = [
     "Gam", "GAMFitter", "GAM", "TermContributions", "GamSummary", "GamPredictor",
     "tune_quantile_sigma", "fit_quantile",
-    "fit_quantile_lss", "QuantileLSSFit",
+    "fit_quantile_lss", "QuantileLSSFit", "fellner_schall_step_terms",
 ]

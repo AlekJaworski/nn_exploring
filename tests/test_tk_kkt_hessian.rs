@@ -50,9 +50,7 @@ fn build_gamma_log_1smooth() -> (
     }
     let y = Array1::from(y_vec);
 
-    let knots_interior: Vec<f64> = (1..k - 1)
-        .map(|i| i as f64 / (k as f64 - 1.0))
-        .collect();
+    let knots_interior: Vec<f64> = (1..k - 1).map(|i| i as f64 / (k as f64 - 1.0)).collect();
     let mut x_mat = Array2::<f64>::zeros((n, p));
     for (i, &xi) in xs.iter().enumerate() {
         x_mat[[i, 0]] = 1.0;
@@ -97,28 +95,20 @@ fn build_gamma_log_2smooth() -> (
     let k2 = 5usize;
     let p = 1 + k1 + k2;
     let xs: Vec<f64> = (0..n).map(|i| (i as f64 + 0.5) / n as f64).collect();
-    let zs: Vec<f64> = (0..n)
-        .map(|i| ((i as f64 * 0.79_f64).fract()))
-        .collect();
+    let zs: Vec<f64> = (0..n).map(|i| ((i as f64 * 0.79_f64).fract())).collect();
     let mut y_vec: Vec<f64> = Vec::with_capacity(n);
     for i in 0..n {
         // Keep η in roughly [-1, 2] so μ stays in [0.4, 7] — well away from
         // saturation. Big-η blows up the Gamma deviance gradient and trashes
         // the FD signal-to-noise ratio.
-        let lmu = 0.5
-            + 0.8 * (2.0 * std::f64::consts::PI * xs[i]).sin()
-            + 0.4 * zs[i];
+        let lmu = 0.5 + 0.8 * (2.0 * std::f64::consts::PI * xs[i]).sin() + 0.4 * zs[i];
         let noise = 0.12 * (std::f64::consts::PI * (2 * i + 1) as f64 / n as f64).cos();
         y_vec.push((lmu + noise).exp().max(1e-6));
     }
     let y = Array1::from(y_vec);
 
-    let kn1: Vec<f64> = (1..k1 - 1)
-        .map(|i| i as f64 / (k1 as f64 - 1.0))
-        .collect();
-    let kn2: Vec<f64> = (1..k2 - 1)
-        .map(|i| i as f64 / (k2 as f64 - 1.0))
-        .collect();
+    let kn1: Vec<f64> = (1..k1 - 1).map(|i| i as f64 / (k1 as f64 - 1.0)).collect();
+    let kn2: Vec<f64> = (1..k2 - 1).map(|i| i as f64 / (k2 as f64 - 1.0)).collect();
     let mut x_mat = Array2::<f64>::zeros((n, p));
     for i in 0..n {
         x_mat[[i, 0]] = 1.0;
@@ -194,12 +184,12 @@ fn tk_kkt_at_lambdas(
     let saved = std::env::var("MGCV_TK_GRAD").ok();
     std::env::set_var("MGCV_TK_GRAD", "1");
     let g_with = reml_gradient_mgcv_exact_ift_inner(
-        y, x, w, lambdas, penalties, None, family, y_original, false, mp,
+        y, x, w, lambdas, penalties, None, family, y_original, None, false, mp,
     )
     .unwrap();
     std::env::remove_var("MGCV_TK_GRAD");
     let g_without = reml_gradient_mgcv_exact_ift_inner(
-        y, x, w, lambdas, penalties, None, family, y_original, false, mp,
+        y, x, w, lambdas, penalties, None, family, y_original, None, false, mp,
     )
     .unwrap();
     // restore
@@ -238,10 +228,8 @@ fn fd_tk_kkt_brute(
         lm[j] -= h;
         let lam_plus: Vec<f64> = lp.iter().map(|l| l.exp()).collect();
         let lam_minus: Vec<f64> = lm.iter().map(|l| l.exp()).collect();
-        let tk_plus =
-            tk_kkt_at_lambdas(y, x, w, &lam_plus, penalties, family, y_original, mp);
-        let tk_minus =
-            tk_kkt_at_lambdas(y, x, w, &lam_minus, penalties, family, y_original, mp);
+        let tk_plus = tk_kkt_at_lambdas(y, x, w, &lam_plus, penalties, family, y_original, mp);
+        let tk_minus = tk_kkt_at_lambdas(y, x, w, &lam_minus, penalties, family, y_original, mp);
         for k in 0..m {
             out[[k, j]] = (tk_plus[k] - tk_minus[k]) / (2.0 * h);
         }
@@ -261,32 +249,15 @@ fn run_test_case(
     mp: usize,
 ) {
     // Helper under test (uses h=1e-4 internally)
-    let h_helper = tk_kkt_hessian_fd(
-        y,
-        x,
-        w,
-        lambdas,
-        penalties,
-        None,
-        family,
-        y_original,
-    )
-    .unwrap();
-    // Brute-force reference uses h_ref=1e-6 — two orders below the helper's
+    let h_helper =
+        tk_kkt_hessian_fd(y, x, w, lambdas, penalties, None, family, y_original).unwrap();
+    // Brute-force reference uses h_ref=1e-5 — one order below the helper's
     // h=1e-4. Same-h reference only proves implementation consistency, not
-    // FD-convergence rigor. With h_ref << h_helper, the helper's O(h²)
-    // truncation dominates the disagreement, so a small max-rel proves the
-    // helper's h is small enough.
+    // FD-convergence rigor, while h_ref=1e-6 is too small for the 1D fixture:
+    // it subtracts nearly identical full-gradient values and finite-precision
+    // cancellation dominates the ~1e-4 Tk signal.
     let h_ref = fd_tk_kkt_brute(
-        y,
-        x,
-        w,
-        lambdas,
-        penalties,
-        family,
-        y_original,
-        mp,
-        1.0e-6_f64,
+        y, x, w, lambdas, penalties, family, y_original, mp, 1.0e-5_f64,
     );
 
     let m = lambdas.len();
@@ -295,9 +266,7 @@ fn run_test_case(
     let mut max_mag = 0.0_f64;
     for k in 0..m {
         for j in 0..m {
-            max_mag = max_mag
-                .max(h_helper[[k, j]].abs())
-                .max(h_ref[[k, j]].abs());
+            max_mag = max_mag.max(h_helper[[k, j]].abs()).max(h_ref[[k, j]].abs());
         }
     }
     for k in 0..m {

@@ -674,12 +674,15 @@ def fit_quantile(
     seed: int = 0,
     loss: str = "pin",
     n_bootstrap: int = 20,
+    final_algorithm: Optional[str] = None,
 ) -> tuple[GAM, float, Optional[dict[str, Any]]]:
     """Fit ELF GAM, optionally with calibrated σ.
 
     - `calibrate=True`: run `tune_quantile_sigma` first.
     - `sigma=` provided: fit at that σ.
     - `co=` provided: use qgam's logistic-width parameter separately from σ.
+    - `final_algorithm="newton"`: use the Newton REML optimizer for the final
+      fixed-σ fit. Calibration folds still use the default fast path.
     - Otherwise: fall back to the rust-side heuristic σ.
 
     `loss` chooses the calibration objective when `calibrate=True`:
@@ -706,12 +709,12 @@ def fit_quantile(
         if co is not None:
             kwargs["co"] = float(co)
         g = GAM("quantile", **kwargs)
-        g.fit(X, y, k=list(k), method=method, bs=bs)
+        g.fit(X, y, k=list(k), method=method, bs=bs, algorithm=final_algorithm)
         return g, float(sigma), info
 
     if co is not None:
         g = GAM("quantile", tau=tau, co=float(co))
     else:
         g = GAM("quantile", tau=tau)
-    g.fit(X, y, k=list(k), method=method, bs=bs)
+    g.fit(X, y, k=list(k), method=method, bs=bs, algorithm=final_algorithm)
     return g, 0.0, None  # sigma=0 sentinel = rust heuristic

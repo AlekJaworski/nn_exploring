@@ -746,12 +746,16 @@ impl PyGAM {
 
         if k.len() != d {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "k length ({}) must match columns ({})", k.len(), d
+                "k length ({}) must match columns ({})",
+                k.len(),
+                d
             )));
         }
         if sp.len() != d {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "sp length ({}) must match columns ({})", sp.len(), d
+                "sp length ({}) must match columns ({})",
+                sp.len(),
+                d
             )));
         }
 
@@ -770,27 +774,38 @@ impl PyGAM {
                     .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?,
                 "bs" => SmoothTerm::cubic_spline_quantile(format!("x{}", i), num_basis, &col)
                     .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?,
-                _ => return Err(pyo3::exceptions::PyValueError::new_err(
-                    "bs must be 'cr' or 'bs'"
-                )),
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "bs must be 'cr' or 'bs'",
+                    ))
+                }
             };
             self.inner.add_smooth(smooth);
         }
 
-        let pirls_result = self.inner.fit_fixed_sp_quantile(
-            &x_array,
-            &y_array,
-            &sp,
-            tau,
-            sigma,
-            co,
-            max_iter.unwrap_or(200),
-            tol.unwrap_or(1e-6),
-        ).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?;
+        let pirls_result = self
+            .inner
+            .fit_fixed_sp_quantile(
+                &x_array,
+                &y_array,
+                &sp,
+                tau,
+                sigma,
+                co,
+                max_iter.unwrap_or(200),
+                tol.unwrap_or(1e-6),
+            )
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?;
 
         let result = pyo3::types::PyDict::new(py);
-        result.set_item("coef", PyArray1::from_vec(py, pirls_result.coefficients.to_vec()))?;
-        result.set_item("fitted_values", PyArray1::from_vec(py, pirls_result.fitted_values.to_vec()))?;
+        result.set_item(
+            "coef",
+            PyArray1::from_vec(py, pirls_result.coefficients.to_vec()),
+        )?;
+        result.set_item(
+            "fitted_values",
+            PyArray1::from_vec(py, pirls_result.fitted_values.to_vec()),
+        )?;
         result.set_item("deviance", pirls_result.deviance)?;
         result.set_item("converged", pirls_result.converged)?;
         result.set_item("iterations", pirls_result.iterations)?;
@@ -2316,6 +2331,114 @@ fn fit_quantile_lss_retune_py<'py>(
     Ok(result.into())
 }
 
+/// Diagnostic hook for one Fellner-Schall update. This intentionally does not
+/// fit a model; callers pass the fixed β, A⁻¹, λ, ranks, and per-smooth
+/// penalties so Rust's update terms can be compared directly with R/qgam.
+#[cfg(feature = "python")]
+#[pyfunction(name = "fellner_schall_step_terms")]
+#[pyo3(signature = (penalty_blocks, penalty_ranks, lambdas, a_inv, beta, phi=1.0, log_step_clamp=3.0, lambda_min=1e-9, lambda_max=1e7))]
+fn fellner_schall_step_terms_py<'py>(
+    py: Python<'py>,
+    penalty_blocks: Vec<PyReadonlyArray2<f64>>,
+    penalty_ranks: PyReadonlyArray1<f64>,
+    lambdas: PyReadonlyArray1<f64>,
+    a_inv: PyReadonlyArray2<f64>,
+    beta: PyReadonlyArray1<f64>,
+    phi: f64,
+    log_step_clamp: f64,
+    lambda_min: f64,
+    lambda_max: f64,
+) -> PyResult<Py<PyAny>> {
+    use crate::block_penalty::BlockPenalty;
+    use pyo3::types::PyList;
+
+    let a_inv_arr = a_inv.as_array().to_owned();
+    let beta_arr = beta.as_array().to_owned();
+    let penalty_ranks_vec: Vec<f64> = penalty_ranks.as_array().iter().copied().collect();
+    let lambdas_vec: Vec<f64> = lambdas.as_array().iter().copied().collect();
+    let p = beta_arr.len();
+
+    if a_inv_arr.nrows() != p || a_inv_arr.ncols() != p {
+        return Err(PyValueError::new_err(format!(
+            "a_inv has shape ({}, {}); expected ({}, {})",
+            a_inv_arr.nrows(),
+            a_inv_arr.ncols(),
+            p,
+            p
+        )));
+    }
+    if penalty_blocks.len() != penalty_ranks_vec.len() || penalty_blocks.len() != lambdas_vec.len()
+    {
+        return Err(PyValueError::new_err(format!(
+            "penalty_blocks ({}) must match penalty_ranks ({}) and lambdas ({})",
+            penalty_blocks.len(),
+            penalty_ranks_vec.len(),
+            lambdas_vec.len()
+        )));
+    }
+
+    let mut block_penalties = Vec::with_capacity(penalty_blocks.len());
+    for pen_full in &penalty_blocks {
+        let arr = pen_full.as_array();
+        if arr.nrows() != p || arr.ncols() != p {
+            return Err(PyValueError::new_err(format!(
+                "penalty block has shape ({}, {}); expected ({}, {})",
+                arr.nrows(),
+                arr.ncols(),
+                p,
+                p
+            )));
+        }
+        let mut lo = p;
+        let mut hi = 0usize;
+        for i in 0..p {
+            for j in 0..p {
+                if arr[[i, j]].abs() > 0.0 {
+                    lo = lo.min(i).min(j);
+                    hi = hi.max(i).max(j);
+                }
+            }
+        }
+        if lo > hi {
+            block_penalties.push(BlockPenalty::new(
+                ndarray::Array2::<f64>::zeros((1, 1)),
+                0,
+                p,
+            ));
+        } else {
+            let block = arr.slice(ndarray::s![lo..=hi, lo..=hi]).to_owned();
+            block_penalties.push(BlockPenalty::new(block, lo, p));
+        }
+    }
+
+    let terms = crate::smooth::fellner_schall_step_terms(
+        &block_penalties,
+        &penalty_ranks_vec,
+        &lambdas_vec,
+        &a_inv_arr,
+        &beta_arr,
+        phi,
+        log_step_clamp,
+        (lambda_min, lambda_max),
+    );
+
+    let out = PyList::empty(py);
+    for term in terms {
+        let item = pyo3::types::PyDict::new(py);
+        item.set_item("lambda_old", term.lambda_old)?;
+        item.set_item("lambda_new", term.lambda_new)?;
+        item.set_item("rank", term.rank)?;
+        item.set_item("trace_a_inv_s", term.trace_a_inv_s)?;
+        item.set_item("beta_s_beta", term.beta_s_beta)?;
+        item.set_item("numerator_raw", term.numerator_raw)?;
+        item.set_item("numerator", term.numerator)?;
+        item.set_item("log_ratio_raw", term.log_ratio_raw)?;
+        item.set_item("log_ratio", term.log_ratio)?;
+        out.append(item)?;
+    }
+    Ok(out.into())
+}
+
 #[cfg(feature = "python")]
 /// Validation hook for `gam_reparam_core` — direct port of mgcv's
 /// `get_stableS` (gdi.c:550-792). Inputs match the R wrapper at
@@ -2437,6 +2560,7 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gam_reparam_core_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_raw_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_retune_py, m)?)?;
+    m.add_function(wrap_pyfunction!(fellner_schall_step_terms_py, m)?)?;
     m.add_function(wrap_pyfunction!(quantile_elf_parts_py, m)?)?;
     m.add_function(wrap_pyfunction!(quantile_elf_saturated_loglik_py, m)?)?;
     Ok(())

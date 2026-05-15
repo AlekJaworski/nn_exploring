@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "test_data" / "qgam_elf_contracts.json"
 GAUSSIAN_INIT_FIXTURE = ROOT / "test_data" / "qgam_gaussian_init_contract.json"
 ERR_CO_FIXTURE = ROOT / "test_data" / "qgam_err_co_contract.json"
+FIXED_ELF_FIT_FIXTURE = ROOT / "test_data" / "qgam_fixed_elf_fit_contract.json"
+FS_STEP_TERMS_FIXTURE = ROOT / "test_data" / "qgam_fs_step_terms_contract.json"
 SALE_FIXTURE_DIR = ROOT / "data" / "sale_price_fixtures"
 QGAM_SMOOTHS = [
     "days_in_current_price_regime",
@@ -178,6 +180,18 @@ def _err_co_fixture() -> dict:
     return json.loads(ERR_CO_FIXTURE.read_text())
 
 
+def _fixed_elf_fit_fixture() -> dict:
+    if not FIXED_ELF_FIT_FIXTURE.exists():
+        pytest.skip(f"missing qgam fixed-sp ELF fit fixture: {FIXED_ELF_FIT_FIXTURE}")
+    return json.loads(FIXED_ELF_FIT_FIXTURE.read_text())
+
+
+def _fs_step_terms_fixture() -> dict:
+    if not FS_STEP_TERMS_FIXTURE.exists():
+        pytest.skip(f"missing qgam FS step terms fixture: {FS_STEP_TERMS_FIXTURE}")
+    return json.loads(FS_STEP_TERMS_FIXTURE.read_text())
+
+
 def test_shash_loglik_at_fixture_parSH() -> None:
     """Verify SHASH log-density at qhat matches R's .llkShash(deriv=0)$l0."""
     payload = _err_co_fixture()
@@ -300,3 +314,71 @@ def test_compute_err_param_with_rust_gaussian_fit() -> None:
     err_py = compute_err_param(r, d, [0.95])
     # Require err within 5% of R's value; BFGS optima may differ slightly.
     assert err_py[0] == pytest.approx(err_r, rel=0.05)
+
+
+def test_fixed_sp_quantile_fit_matches_qgam_contract() -> None:
+    """Replay the production fixed-sp ELF contract before optimizer work.
+
+    This isolates PIRLS at qgam's final `(sp, sigma, co)` from the outer
+    smoothing-parameter optimizer. The remaining ~4e-3 coefficient/prediction
+    gap is the documented nat.param/coordinate-system follow-up, so this test
+    protects the current stable rung rather than asserting final 1e-4 parity.
+    """
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    payload = _fixed_elf_fit_fixture()
+    train_path = SALE_FIXTURE_DIR / "entire_dataset_train.parquet"
+    mean_path = SALE_FIXTURE_DIR / "mgcv_rust_parity" / "mean_gam_entire_dataset.parquet"
+    if not train_path.exists() or not mean_path.exists():
+        pytest.skip("missing sale-price fixture data for qgam fixed-sp ELF contract")
+
+    df = pd.read_parquet(train_path)
+    mean_ref = pd.read_parquet(mean_path)
+    resid = mean_ref["y"].to_numpy(dtype=float) - mean_ref["pred_prod"].to_numpy(dtype=float)
+    x = df[QGAM_SMOOTHS].to_numpy(dtype=float)
+
+    g = mgcv_rust.GAM(
+        "quantile",
+        tau=payload["tau"],
+        sigma=payload["sigma"],
+        co=payload["co"],
+    )
+    result = g.fit_quantile_fixed_sp(
+        x,
+        resid,
+        k=[5] * len(QGAM_SMOOTHS),
+        sp=payload["final_sp"],
+        tau=payload["tau"],
+        sigma=payload["sigma"],
+        co=payload["co"],
+        bs="cr",
+        max_iter=200,
+        tol=1e-6,
+    )
+
+    coef = np.asarray(result["coef"], dtype=float)
+    fitted = np.asarray(result["fitted_values"], dtype=float)
+    fitted_summary = np.quantile(fitted, [0.0, 0.25, 0.5, 0.75, 1.0])
+
+    assert result["converged"] is True
+    assert result["iterations"] <= 10
+    assert coef == pytest.approx(payload["r"]["coef"], abs=5e-3)
+    assert fitted_summary == pytest.approx(payload["r"]["fitted_summary"], abs=5e-3)
+    assert result["deviance"] == pytest.approx(payload["r"]["deviance"], rel=1e-5)
+
+
+def test_fellner_schall_step_terms_contract_is_self_consistent() -> None:
+    """Step 7 diagnostic fixture: Rust hook matches Python mirror algebra.
+
+    The fixture freezes R/qgam's fixed-sp ELF state, computes the FS-style
+    terms from those matrices in Python, and runs the same matrices through
+    Rust's diagnostic hook. This is not claiming qgam uses FS; it protects the
+    term-by-term comparison scaffold used before implementing LAML/Newton ELF.
+    """
+    payload = _fs_step_terms_fixture()
+    assert payload["max_abs_python_vs_rust"] < 1e-8
+    assert [row["rank"] for row in payload["terms_rust"]] == pytest.approx([3.0] * 4)
+    assert [row["lambda_new"] for row in payload["terms_rust"]] == pytest.approx(
+        [949035.0895336206, 115135.55365833364, 425.70615425964, 703049.1453679863],
+        rel=1e-12,
+    )

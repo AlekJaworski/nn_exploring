@@ -109,6 +109,7 @@ class GAM:
         bs: Optional[str] = None,
         max_iter: Optional[int] = None,
         use_edf: Optional[bool] = None,
+        algorithm: Optional[str] = None,
         pc_values: Any = None,
         bs_list: Any = None,
         weights: Any = None,
@@ -124,6 +125,13 @@ class GAM:
             if weights is not None
             else None
         )
+        if algorithm is not None:
+            return self._native.fit_auto_optimized(
+                x_arr, y_arr, ks, method,
+                bs=bs, max_iter=max_iter, use_edf=use_edf,
+                algorithm=algorithm, pc_values=pc_values, bs_list=bs_list,
+                weights=w_arr,
+            )
         return self._native.fit(
             x_arr, y_arr, ks, method,
             bs=bs, max_iter=max_iter, use_edf=use_edf,

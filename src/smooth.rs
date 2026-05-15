@@ -443,6 +443,69 @@ pub fn detect_saturating_smooths(grad: &Array1<f64>, hess: &Array2<f64>) -> Vec<
     out
 }
 
+/// Term-by-term diagnostics for one Fellner-Schall smoothing-parameter update.
+///
+/// Kept separate from [`fellner_schall_step`] so parity diagnostics can compare
+/// Rust and mgcv/qgam at the same fixed β, weights, penalties, and λ without
+/// changing production optimizer behaviour.
+#[derive(Debug, Clone)]
+pub struct FellnerSchallStepTerm {
+    pub lambda_old: f64,
+    pub lambda_new: f64,
+    pub rank: f64,
+    pub trace_a_inv_s: f64,
+    pub beta_s_beta: f64,
+    pub numerator_raw: f64,
+    pub numerator: f64,
+    pub log_ratio_raw: f64,
+    pub log_ratio: f64,
+}
+
+pub fn fellner_schall_step_terms(
+    penalties: &[BlockPenalty],
+    penalty_ranks: &[f64],
+    lambdas: &[f64],
+    a_inv: &Array2<f64>,
+    beta: &Array1<f64>,
+    phi: f64,
+    log_step_clamp: f64,
+    lambda_bounds: (f64, f64),
+) -> Vec<FellnerSchallStepTerm> {
+    debug_assert_eq!(penalties.len(), penalty_ranks.len());
+    debug_assert_eq!(penalties.len(), lambdas.len());
+    let tiny = 1e-10_f64;
+    let mut terms = Vec::with_capacity(penalties.len());
+    for i in 0..penalties.len() {
+        let pen = &penalties[i];
+        let rank_i = penalty_ranks[i];
+        let lambda_i = lambdas[i];
+
+        let trace_a_inv_s = pen.trace_product(a_inv);
+        let beta_s_beta_raw = pen.quadratic_form(beta);
+        let beta_s_beta = beta_s_beta_raw.max(tiny);
+        let numerator_raw = rank_i / lambda_i.max(1e-20) - trace_a_inv_s;
+        let numerator = numerator_raw.max(tiny);
+        let log_ratio_raw = (phi * numerator / beta_s_beta).ln();
+        let log_ratio = log_ratio_raw.clamp(-log_step_clamp, log_step_clamp);
+        let log_lambda_new = (lambda_i.ln() + log_ratio)
+            .max(lambda_bounds.0.ln())
+            .min(lambda_bounds.1.ln());
+
+        terms.push(FellnerSchallStepTerm {
+            lambda_old: lambda_i,
+            lambda_new: log_lambda_new.exp(),
+            rank: rank_i,
+            trace_a_inv_s,
+            beta_s_beta: beta_s_beta_raw,
+            numerator_raw,
+            numerator,
+            log_ratio_raw,
+            log_ratio,
+        });
+    }
+    terms
+}
+
 /// One Fellner-Schall update for the per-smooth penalty parameters.
 ///
 /// Wood & Fasiolo (2017): at the converged β,
@@ -469,28 +532,19 @@ pub fn fellner_schall_step(
     log_step_clamp: f64,
     lambda_bounds: (f64, f64),
 ) -> Vec<f64> {
-    debug_assert_eq!(penalties.len(), penalty_ranks.len());
-    debug_assert_eq!(penalties.len(), lambdas.len());
-    let tiny = 1e-10_f64;
-    let mut new_lambdas = Vec::with_capacity(penalties.len());
-    for i in 0..penalties.len() {
-        let pen = &penalties[i];
-        let rank_i = penalty_ranks[i];
-        let lambda_i = lambdas[i];
-
-        let tr_vs = pen.trace_product(a_inv);
-        let bsb = pen.quadratic_form(beta).max(tiny);
-        let numerator = (rank_i / lambda_i.max(1e-20) - tr_vs).max(tiny);
-
-        let log_ratio = (phi * numerator / bsb)
-            .ln()
-            .clamp(-log_step_clamp, log_step_clamp);
-        let log_lambda_new = (lambda_i.ln() + log_ratio)
-            .max(lambda_bounds.0.ln())
-            .min(lambda_bounds.1.ln());
-        new_lambdas.push(log_lambda_new.exp());
-    }
-    new_lambdas
+    fellner_schall_step_terms(
+        penalties,
+        penalty_ranks,
+        lambdas,
+        a_inv,
+        beta,
+        phi,
+        log_step_clamp,
+        lambda_bounds,
+    )
+    .into_iter()
+    .map(|term| term.lambda_new)
+    .collect()
 }
 
 /// Smoothing parameter optimization method
@@ -3059,6 +3113,46 @@ mod tests {
         let sp = SmoothingParameter::new(2, OptimizationMethod::REML);
         assert_eq!(sp.lambda.len(), 2);
         assert_eq!(sp.lambda[0], 0.1); // Updated to match current default
+    }
+
+    #[test]
+    fn test_fellner_schall_step_terms_match_step() {
+        use crate::block_penalty::BlockPenalty;
+
+        let penalty = BlockPenalty::new(Array2::eye(2), 0, 2);
+        let penalties = vec![penalty];
+        let ranks = vec![2.0];
+        let lambdas = vec![0.5];
+        let a_inv = Array2::from_diag(&Array1::from_vec(vec![0.25, 0.5]));
+        let beta = Array1::from_vec(vec![2.0, 1.0]);
+
+        let terms = fellner_schall_step_terms(
+            &penalties,
+            &ranks,
+            &lambdas,
+            &a_inv,
+            &beta,
+            1.0,
+            3.0,
+            (1e-9, 1e7),
+        );
+        let step = fellner_schall_step(
+            &penalties,
+            &ranks,
+            &lambdas,
+            &a_inv,
+            &beta,
+            1.0,
+            3.0,
+            (1e-9, 1e7),
+        );
+
+        assert_eq!(terms.len(), 1);
+        assert_eq!(step.len(), 1);
+        assert!((terms[0].trace_a_inv_s - 0.75).abs() < 1e-12);
+        assert!((terms[0].beta_s_beta - 5.0).abs() < 1e-12);
+        assert!((terms[0].numerator_raw - 3.25).abs() < 1e-12);
+        assert!((terms[0].lambda_new - step[0]).abs() < 1e-12);
     }
 
     #[test]
