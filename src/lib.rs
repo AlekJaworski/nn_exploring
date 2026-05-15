@@ -2315,6 +2315,10 @@ fn quantile_elf_parts_py<'py>(
     out.set_item("Dmu3th", parts.dmu3th)?;
     out.set_item("nll_dmu", parts.dmu)?;
     out.set_item("nll_dmu2", parts.dmu2)?;
+    out.set_item("w", parts.dmu2)?;
+    out.set_item("g", -parts.dmu)?;
+    out.set_item("z", mu - parts.dmu / parts.dmu2)?;
+    out.set_item("rhs_value", parts.dmu2 * mu - parts.dmu)?;
     out.set_item("sigmoid", parts.sigmoid)?;
     Ok(out.into())
 }
