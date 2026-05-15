@@ -151,7 +151,7 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None, tau=None, sigma=None))]
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None, tau=None, sigma=None, co=None))]
     fn new(
         family: Option<&str>,
         mgcv_exact: Option<bool>,
@@ -161,17 +161,20 @@ impl PyGAM {
         theta: Option<f64>,
         tau: Option<f64>,
         sigma: Option<f64>,
+        co: Option<f64>,
     ) -> PyResult<Self> {
         // Validate df early if provided
         if let Some(df_val) = df {
             if df_val < 2.0 {
                 return Err(PyValueError::new_err(format!(
-                    "t-dist df must be >= 2.0, got {}", df_val
+                    "t-dist df must be >= 2.0, got {}",
+                    df_val
                 )));
             }
             if df_val > 100.0 {
                 return Err(PyValueError::new_err(format!(
-                    "t-dist df must be <= 100.0, got {}. Use df ∈ [2, 100].", df_val
+                    "t-dist df must be <= 100.0, got {}. Use df ∈ [2, 100].",
+                    df_val
                 )));
             }
         }
@@ -228,9 +231,9 @@ impl PyGAM {
                 Family::NegBin { theta: 2.0 }
             }
             // Quantile (qgam-style): identity link only, ELF-smoothed pinball
-            // loss. Requires `tau` ∈ (0, 1); `sigma` controls smoothness
-            // (smaller σ → sharper quantile). Default σ = 0.0 is a sentinel
-            // meaning "calibrate from data" — actual σ is set in fit().
+            // loss. Requires `tau` ∈ (0, 1); `sigma` is qgam's exp(theta)
+            // scale and `co` is qgam's logistic width. Omitting `co` preserves
+            // the old one-parameter λ = σ behaviour.
             (Some("quantile"), None) | (Some("quantile"), Some("identity")) => {
                 let tau_val = tau.unwrap_or(0.5);
                 if tau_val <= 0.0 || tau_val >= 1.0 {
@@ -244,7 +247,14 @@ impl PyGAM {
                         "quantile sigma must be >= 0, got {}", sigma_val
                     )));
                 }
-                Family::Quantile { tau: tau_val, sigma: sigma_val }
+                let lambda_val = co.unwrap_or(sigma_val); // omitted co preserves old λ = σ behaviour
+                if lambda_val < 0.0 {
+                    return Err(PyValueError::new_err(format!(
+                        "quantile co must be >= 0, got {}",
+                        lambda_val
+                    )));
+                }
+                Family::Quantile { tau: tau_val, sigma: sigma_val, lambda: lambda_val }
             }
             (Some(f), Some(l)) => {
                 return Err(PyValueError::new_err(format!(
@@ -289,7 +299,10 @@ impl PyGAM {
         if matches!(fam, Family::TDist { .. }) && df.is_none() {
             g.tdist_profile = true;
         }
-        Ok(PyGAM { inner: g, mgcv_exact: exact })
+        Ok(PyGAM {
+            inner: g,
+            mgcv_exact: exact,
+        })
     }
 
     /// Whether this GAM is using the mgcv-exact code path.
@@ -347,7 +360,9 @@ impl PyGAM {
         discrete: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         // Route to the optimized implementation
-        self.fit_auto_optimized(py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list, weights, discrete)
+        self.fit_auto_optimized(
+            py, x, y, k, method, bs, max_iter, use_edf, None, pc_values, bs_list, weights, discrete,
+        )
     }
 
     /// Low-level fit method for users who manually configure smooths
@@ -369,7 +384,11 @@ impl PyGAM {
             "GCV" => OptimizationMethod::GCV,
             "REML" => OptimizationMethod::REML,
             "fREML" => OptimizationMethod::FastREML,
-            _ => return Err(PyValueError::new_err("method must be 'GCV', 'REML', or 'fREML'")),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "method must be 'GCV', 'REML', or 'fREML'",
+                ))
+            }
         };
 
         let max_outer = max_iter.unwrap_or(10);
@@ -583,7 +602,11 @@ impl PyGAM {
             "GCV" => OptimizationMethod::GCV,
             "REML" => OptimizationMethod::REML,
             "fREML" => OptimizationMethod::FastREML,
-            _ => return Err(PyValueError::new_err("method must be 'GCV', 'REML', or 'fREML'")),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "method must be 'GCV', 'REML', or 'fREML'",
+                ))
+            }
         };
 
         let max_outer = max_iter.unwrap_or(10);
@@ -844,9 +867,10 @@ impl PyGAM {
             Family::Tweedie { p } => {
                 dict.set_item("p", p)?;
             }
-            Family::Quantile { tau, sigma } => {
+            Family::Quantile { tau, sigma, lambda } => {
                 dict.set_item("tau", tau)?;
                 dict.set_item("sigma", sigma)?;
+                dict.set_item("co", lambda)?;
             }
             _ => {}
         }
@@ -938,10 +962,7 @@ impl PyGAM {
     /// the ergonomics wrapper for confidence intervals and posterior
     /// sampling.
     #[cfg(feature = "blas")]
-    fn get_vcov<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+    fn get_vcov<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
         use numpy::PyArray2;
         let design = self
             .inner
@@ -1185,9 +1206,13 @@ impl PyGAM {
     /// the result to `evaluate_reml_gradient_closed_form_fixed_sigma2` for FD
     /// Hessian verification.
     #[cfg(feature = "blas")]
-    fn evaluate_scale_at_lambdas(&self, y: PyReadonlyArray1<f64>, lambdas: Vec<f64>) -> PyResult<f64> {
+    fn evaluate_scale_at_lambdas(
+        &self,
+        y: PyReadonlyArray1<f64>,
+        lambdas: Vec<f64>,
+    ) -> PyResult<f64> {
+        use crate::linalg::{inverse, solve};
         use crate::reml::{compute_xtwx_dispatch, compute_xtwy_dispatch};
-        use crate::linalg::{solve, inverse};
         let design_matrix = self
             .inner
             .design_matrix
@@ -1223,17 +1248,21 @@ impl PyGAM {
         let xtwy = compute_xtwy_dispatch(None, design_matrix, weights, &y_array);
         let max_diag = a.diag().iter().map(|x| x.abs()).fold(1.0f64, f64::max);
         let mut a_solve = a.clone();
-        a_solve.diag_mut().iter_mut().for_each(|d| *d += 1e-12 * max_diag);
+        a_solve
+            .diag_mut()
+            .iter_mut()
+            .for_each(|d| *d += 1e-12 * max_diag);
         let beta = solve(a_solve, xtwy)
             .map_err(|e| PyValueError::new_err(format!("solve failed: {}", e)))?;
         let fitted = design_matrix.dot(&beta);
-        let rss: f64 = y_array.iter()
+        let rss: f64 = y_array
+            .iter()
             .zip(fitted.iter())
             .zip(weights.iter())
             .map(|((yi, fi), wi)| (yi - fi).powi(2) * wi)
             .sum();
-        let a_inv = inverse(&a)
-            .map_err(|e| PyValueError::new_err(format!("inverse failed: {}", e)))?;
+        let a_inv =
+            inverse(&a).map_err(|e| PyValueError::new_err(format!("inverse failed: {}", e)))?;
         let tr_a = (xtwx.dot(&a_inv)).diag().sum();
         Ok(rss / ((n as f64) - tr_a).max(1e-10))
     }
@@ -1286,6 +1315,7 @@ impl PyGAM {
             None,
             self.inner.family,
             y_orig_array.as_ref(),
+            self.inner.prior_weights.as_ref(),
         )
         .map_err(|e| PyValueError::new_err(format!("ift gradient failed: {}", e)))?;
         Ok(numpy::PyArray1::from_owned_array(py, grad))
@@ -1406,6 +1436,7 @@ impl PyGAM {
             mp,
             self.inner.family,
             Some(&y_raw),
+            self.inner.prior_weights.as_ref(),
         )
         .map_err(|e| PyValueError::new_err(format!("reml score failed: {}", e)))?;
 
@@ -1426,7 +1457,9 @@ impl PyGAM {
                 self.inner.family,
                 mp,
             )
-            .map_err(|e| PyValueError::new_err(format!("ift gradient (Newton-at-β) failed: {}", e)))?
+            .map_err(|e| {
+                PyValueError::new_err(format!("ift gradient (Newton-at-β) failed: {}", e))
+            })?
         } else {
             crate::reml::reml_gradient_mgcv_exact_ift(
                 z_fresh,
@@ -1437,6 +1470,7 @@ impl PyGAM {
                 None,
                 self.inner.family,
                 Some(&y_raw),
+                self.inner.prior_weights.as_ref(),
             )
             .map_err(|e| PyValueError::new_err(format!("ift gradient failed: {}", e)))?
         };
@@ -1485,7 +1519,10 @@ impl PyGAM {
     ) -> PyResult<Vec<Bound<'py, numpy::PyArray2<f64>>>> {
         let mut out = Vec::with_capacity(self.inner.smooth_terms.len());
         for smooth in &self.inner.smooth_terms {
-            out.push(numpy::PyArray2::from_owned_array(py, smooth.penalty.clone()));
+            out.push(numpy::PyArray2::from_owned_array(
+                py,
+                smooth.penalty.clone(),
+            ));
         }
         Ok(out)
     }
@@ -1520,7 +1557,11 @@ impl PyGAM {
             let inf_norm_s = (0..nb)
                 .map(|i| (0..nb).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
-            let sf = if inf_norm_s > 1e-10 { ma_xx / inf_norm_s } else { 1.0 };
+            let sf = if inf_norm_s > 1e-10 {
+                ma_xx / inf_norm_s
+            } else {
+                1.0
+            };
             scales.push(sf);
             col_offset += nb;
         }
@@ -1592,6 +1633,7 @@ impl PyGAM {
             mp,
             self.inner.family,
             None,
+            self.inner.prior_weights.as_ref(),
         )
         .map_err(|e| PyValueError::new_err(format!("REML evaluation failed: {}", e)))
     }
@@ -1669,7 +1711,11 @@ impl PyGAM {
             let inf_norm_s = (0..nb)
                 .map(|i| (0..nb).map(|j| smooth.penalty[[i, j]].abs()).sum::<f64>())
                 .fold(0.0f64, f64::max);
-            let scale_factor = if inf_norm_s > 1e-10 { ma_xx / inf_norm_s } else { 1.0 };
+            let scale_factor = if inf_norm_s > 1e-10 {
+                ma_xx / inf_norm_s
+            } else {
+                1.0
+            };
             let lam_i = if use_mgcv_coords {
                 lambdas[i]
             } else {
@@ -1742,8 +1788,9 @@ impl PyGAM {
         for i in 0..a.nrows() {
             a[[i, i]] += ridge;
         }
-        let a_inv = crate::linalg::inverse(&a)
-            .map_err(|e| PyValueError::new_err(format!("get_edf_per_smooth inverse failed: {}", e)))?;
+        let a_inv = crate::linalg::inverse(&a).map_err(|e| {
+            PyValueError::new_err(format!("get_edf_per_smooth inverse failed: {}", e))
+        })?;
 
         // diag(A⁻¹ · X'WX): element [i,i] = row i of a_inv dotted with col i of xtwx
         let a_inv_xtwx_diag: Vec<f64> = (0..total_cols)
@@ -2039,7 +2086,10 @@ fn fit_quantile_lss_raw_py<'py>(
     .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
     let result = pyo3::types::PyDict::new(py);
-    result.set_item("beta_loc", PyArray1::from_vec(py, res.coefficients_loc.to_vec()))?;
+    result.set_item(
+        "beta_loc",
+        PyArray1::from_vec(py, res.coefficients_loc.to_vec()),
+    )?;
     result.set_item("eta_loc", PyArray1::from_vec(py, res.eta_loc.to_vec()))?;
     result.set_item("sigma", PyArray1::from_vec(py, res.sigma.to_vec()))?;
     result.set_item("sigma_global", sigma_global_used)?;
@@ -2083,7 +2133,8 @@ fn fit_quantile_lss_retune_py<'py>(
     if penalty_blocks.len() != lambda_init_vec.len() {
         return Err(PyValueError::new_err(format!(
             "penalty_blocks has {} entries but lambda_init has {}",
-            penalty_blocks.len(), lambda_init_vec.len()
+            penalty_blocks.len(),
+            lambda_init_vec.len()
         )));
     }
 
@@ -2098,7 +2149,10 @@ fn fit_quantile_lss_retune_py<'py>(
         if arr.nrows() != p_loc || arr.ncols() != p_loc {
             return Err(PyValueError::new_err(format!(
                 "penalty block has shape ({}, {}); expected ({}, {})",
-                arr.nrows(), arr.ncols(), p_loc, p_loc
+                arr.nrows(),
+                arr.ncols(),
+                p_loc,
+                p_loc
             )));
         }
         // Find the bounding box of nonzeros.
@@ -2107,10 +2161,18 @@ fn fit_quantile_lss_retune_py<'py>(
         for i in 0..p_loc {
             for j in 0..p_loc {
                 if arr[[i, j]].abs() > 0.0 {
-                    if i < lo { lo = i; }
-                    if i > hi { hi = i; }
-                    if j < lo { lo = j; }
-                    if j > hi { hi = j; }
+                    if i < lo {
+                        lo = i;
+                    }
+                    if i > hi {
+                        hi = i;
+                    }
+                    if j < lo {
+                        lo = j;
+                    }
+                    if j > hi {
+                        hi = j;
+                    }
                 }
             }
         }
@@ -2119,7 +2181,9 @@ fn fit_quantile_lss_retune_py<'py>(
             // 1×1 zero block at offset 0 so trace_product/quadratic_form
             // contribute nothing.
             block_penalties.push(BlockPenalty::new(
-                ndarray::Array2::<f64>::zeros((1, 1)), 0, p_loc,
+                ndarray::Array2::<f64>::zeros((1, 1)),
+                0,
+                p_loc,
             ));
         } else {
             let k = hi - lo + 1;
@@ -2143,7 +2207,10 @@ fn fit_quantile_lss_retune_py<'py>(
     .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
     let result = pyo3::types::PyDict::new(py);
-    result.set_item("beta_loc", PyArray1::from_vec(py, res.coefficients_loc.to_vec()))?;
+    result.set_item(
+        "beta_loc",
+        PyArray1::from_vec(py, res.coefficients_loc.to_vec()),
+    )?;
     result.set_item("eta_loc", PyArray1::from_vec(py, res.eta_loc.to_vec()))?;
     result.set_item("sigma", PyArray1::from_vec(py, res.sigma.to_vec()))?;
     result.set_item("sigma_global", sigma_global_used)?;
@@ -2220,6 +2287,36 @@ fn gam_reparam_core_py<'py>(
     Ok(out.into())
 }
 
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (y, mu, tau, sigma, co))]
+fn quantile_elf_parts_py<'py>(
+    py: Python<'py>,
+    y: f64,
+    mu: f64,
+    tau: f64,
+    sigma: f64,
+    co: f64,
+) -> PyResult<Py<PyAny>> {
+    let parts = crate::pirls::quantile_elf_parts(y, mu, tau, sigma, co);
+    let out = pyo3::types::PyDict::new(py);
+    out.set_item("deviance", parts.deviance)?;
+    out.set_item("Dmu", 2.0 * parts.dmu)?;
+    out.set_item("Dmu2", 2.0 * parts.dmu2)?;
+    out.set_item("EDmu2", 2.0 * parts.dmu2)?;
+    out.set_item("nll_dmu", parts.dmu)?;
+    out.set_item("nll_dmu2", parts.dmu2)?;
+    out.set_item("sigmoid", parts.sigmoid)?;
+    Ok(out.into())
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (tau, sigma, co, n=1))]
+fn quantile_elf_saturated_loglik_py(tau: f64, sigma: f64, co: f64, n: usize) -> PyResult<f64> {
+    Ok((n as f64) * crate::pirls::quantile_elf_saturated_loglik_per_obs(tau, sigma, co))
+}
+
 #[pymodule]
 fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGAM>()?;
@@ -2233,5 +2330,7 @@ fn mgcv_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gam_reparam_core_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_raw_py, m)?)?;
     m.add_function(wrap_pyfunction!(fit_quantile_lss_retune_py, m)?)?;
+    m.add_function(wrap_pyfunction!(quantile_elf_parts_py, m)?)?;
+    m.add_function(wrap_pyfunction!(quantile_elf_saturated_loglik_py, m)?)?;
     Ok(())
 }

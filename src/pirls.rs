@@ -143,24 +143,26 @@ pub enum Family {
     /// the same calibrated smoothing of the pinball loss that R's qgam
     /// package uses on top of mgcv's basis/penalty machinery.
     ///
-    /// For residual r = y - η (identity link), the negative log-likelihood is
-    ///   L(r; τ, σ) = (η-y)(1-τ)/σ + log(1 + exp((y-η)/σ))
+    /// For residual r = y - η (identity link), qgam's negative log-likelihood is
+    ///   L(r; τ, σ, λ) = [λ(1-τ)log(1-τ) + λτlog(τ) - (1-τ)r
+    ///                    + λlog(1 + exp(r/λ))] / σ
     /// which approaches the pinball loss `ρ_τ(r) = max(τ·r, (τ-1)·r)` as σ→0.
     /// The minimizer of E[L] is the τ-quantile of y|x rather than the mean.
     ///
     /// PIRLS weights/working-response are derived analytically (see
     /// `fit_pirls_quantile`):
-    ///   s_i = 1/(1 + exp(-(y_i - η_i)/σ))
-    ///   w_i = s_i(1-s_i)/σ²    (always positive, well-behaved Hessian)
-    ///   z_i = η_i - σ(1 - τ - s_i)/(s_i(1-s_i))
+    ///   s_i = 1/(1 + exp(-(y_i - η_i)/λ))
+    ///   w_i = s_i(1-s_i)/(σλ)  (always positive, well-behaved Hessian)
+    ///   z_i = η_i + λ(s_i - (1-τ))/(s_i(1-s_i))
     ///
-    /// `tau` ∈ (0, 1) selects the target quantile; `sigma` controls the
-    /// pinball-loss smoothing (smaller σ → sharper quantile, larger σ →
-    /// smoother loss). v1 takes σ as user-provided or a heuristic default;
-    /// full qgam-style σ calibration is a deferred followup.
+    /// `tau` ∈ (0, 1) selects the target quantile; `lambda` is qgam's `co`
+    /// logistic width, while `sigma` is qgam's `exp(theta)` likelihood scale
+    /// for scalar `co`. If `lambda == sigma`, this exactly preserves the old
+    /// one-parameter approximation.
     Quantile {
         tau: f64,
         sigma: f64,
+        lambda: f64,
     },
 }
 
@@ -483,10 +485,8 @@ impl Family {
             // -log 2 - log σ - log B by an entropy-vs-log-2 constant; for
             // τ=0.5 they coincide (H(0.5)=log 2) but for asymmetric τ the
             // entropy version is what mgcv's LAML wants.
-            Family::Quantile { tau, sigma } => {
-                let h_tau = -((1.0 - tau) * (1.0 - tau).ln() + tau * tau.ln());
-                let log_beta = log_gamma(*tau) + log_gamma(1.0 - tau) - log_gamma(1.0);
-                n * (-h_tau - sigma.ln() - log_beta)
+            Family::Quantile { tau, sigma, lambda } => {
+                n * quantile_elf_saturated_loglik_per_obs(*tau, *sigma, *lambda)
             }
             // Inverse Gaussian saturated log-likelihood:
             // ls = -n/2 · log(2π·φ) - 3/2 · Σ log(y_i)
@@ -1177,7 +1177,9 @@ pub fn fit_pirls(
     max_iter: usize,
     tolerance: f64,
 ) -> Result<PiRLSResult> {
-    fit_pirls_cached(y, x, lambda, penalties, family, max_iter, tolerance, None, None)
+    fit_pirls_cached(
+        y, x, lambda, penalties, family, max_iter, tolerance, None, None,
+    )
 }
 
 /// Fit a GAM using PiRLS algorithm with optional cached X'X matrix
@@ -1548,7 +1550,7 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
                     2.0 * theta * ((mu_c + theta) / theta).ln()
                 }
             }
-            // Quantile/ELF deviance — port of qgam elf.R:122-138 with λ = σ.
+            // Quantile/ELF deviance — port of qgam elf.R:122-138.
             //
             // qgam's per-obs term:
             //   T = (1-τ)·λ·log(1-τ) + λ·τ·log(τ)
@@ -1563,16 +1565,8 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
             // saturation point which is only correct at τ=0.5; switching
             // to qgam's convention is what makes the REML score behave
             // sensibly (REML stops collapsing as σ→0).
-            Family::Quantile { tau, sigma } => {
-                let r = yi - mui;
-                let r_over_sigma = r / sigma;
-                let softplus = if r_over_sigma > 0.0 {
-                    r_over_sigma + (-r_over_sigma).exp().ln_1p()
-                } else {
-                    r_over_sigma.exp().ln_1p()
-                };
-                let h_tau = -((1.0 - tau) * (1.0 - tau).ln() + tau * tau.ln());
-                2.0 * (-h_tau - (1.0 - tau) * r / sigma + softplus)
+            Family::Quantile { tau, sigma, lambda } => {
+                quantile_elf_parts(yi, mui, tau, sigma, lambda).deviance
             }
         };
 
@@ -2580,25 +2574,85 @@ pub fn fit_pirls_tdist_discrete(
 // Quantile (qgam-style) family — IRLS on ELF (Extended Log-F) loss
 // ────────────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QuantileElfParts {
+    /// Per-observation deviance contribution: qgam `dev.resids`.
+    pub deviance: f64,
+    /// First derivative of negative log-likelihood with respect to μ.
+    pub dmu: f64,
+    /// Second derivative of negative log-likelihood with respect to μ.
+    pub dmu2: f64,
+    /// Logistic CDF term `s = sigmoid((y - μ) / lambda)`.
+    pub sigmoid: f64,
+}
+
+fn sigmoid_stable(x: f64) -> f64 {
+    if x >= 0.0 {
+        let e = (-x).exp();
+        1.0 / (1.0 + e)
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
+fn softplus_stable(x: f64) -> f64 {
+    if x > 0.0 {
+        x + (-x).exp().ln_1p()
+    } else {
+        x.exp().ln_1p()
+    }
+}
+
+pub(crate) fn quantile_elf_parts(
+    y: f64,
+    mu: f64,
+    tau: f64,
+    sigma: f64,
+    lambda: f64,
+) -> QuantileElfParts {
+    let r = y - mu;
+    let u = r / lambda;
+    let s = sigmoid_stable(u);
+    let softplus = softplus_stable(u);
+    let t = (1.0 - tau) * lambda * (1.0 - tau).ln() + lambda * tau * tau.ln() - (1.0 - tau) * r
+        + lambda * softplus;
+    QuantileElfParts {
+        deviance: 2.0 * t / sigma,
+        dmu: ((1.0 - tau) - s) / sigma,
+        dmu2: s * (1.0 - s) / (sigma * lambda),
+        sigmoid: s,
+    }
+}
+
+pub(crate) fn quantile_elf_saturated_loglik_per_obs(tau: f64, sigma: f64, lambda: f64) -> f64 {
+    let a = lambda * (1.0 - tau) / sigma;
+    let b = lambda * tau / sigma;
+    let log_beta = log_gamma(a) + log_gamma(b) - log_gamma(a + b);
+    (1.0 - tau) * lambda * (1.0 - tau).ln() / sigma + lambda * tau * tau.ln() / sigma
+        - lambda.ln()
+        - log_beta
+}
+
 /// Custom IRLS loop for the qgam-style Quantile family.
 ///
 /// At residual r = y - η (identity link) the per-obs negative log-likelihood is
-///   L(r; τ, σ) = (η - y)(1-τ)/σ + log(1 + exp((y - η)/σ))
+///   L(r; τ, σ, λ) = [λ(1-τ)log(1-τ) + λτlog(τ) - (1-τ)r
+///                    + λlog(1 + exp(r/λ))] / σ
 /// which is a smooth approximation to the pinball loss
 ///   ρ_τ(r) = max(τ·r, (τ-1)·r)
 /// (recovered as σ→0). The minimizer of E[L(y - η(x))] is the τ-quantile of
 /// y|x rather than the mean.
 ///
 /// Per Fasiolo et al. 2021 the working IRLS quantities derived analytically are
-///   s_i = sigmoid((y_i - η_i)/σ)
-///   w_i = s_i(1-s_i) / σ²        (well-defined PSD Hessian)
-///   z_i = η_i - σ(1-τ-s_i)/(s_i(1-s_i))
+///   s_i = sigmoid((y_i - η_i)/λ)
+///   w_i = s_i(1-s_i) / (σλ)      (well-defined PSD Hessian)
+///   z_i = η_i + λ(s_i-(1-τ))/(s_i(1-s_i))
 /// which fit cleanly into the standard PIRLS template.
 ///
-/// `sigma` is taken from the family. If 0.0 (sentinel), it is auto-calibrated
-/// at fit time as a robust scale of the residuals from the unpenalised
-/// τ-quantile of y. Full qgam-style σ-calibration (cross-validated bandwidth)
-/// is a deferred followup.
+/// `sigma` and `lambda` are taken from the family. If `sigma` is 0.0
+/// (sentinel), both scales default to the previous one-parameter heuristic
+/// unless `lambda` was supplied explicitly.
 pub fn fit_pirls_quantile(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -2606,6 +2660,7 @@ pub fn fit_pirls_quantile(
     penalties: &[BlockPenalty],
     tau: f64,
     sigma_user: f64,
+    lambda_user: f64,
     max_iter: usize,
     tolerance: f64,
 ) -> Result<PiRLSResult> {
@@ -2703,29 +2758,27 @@ pub fn fit_pirls_quantile(
     // The 1/(4τ(1-τ)) factor (= 1 at τ=0.5, ≈ 5 at τ=0.05/0.95) widens σ
     // enough to keep observations contributing through the IRLS solve.
     // Sharper, properly-calibrated σ remains a deferred followup.
-    let sigma = if sigma_user > 0.0 {
-        sigma_user
+    let (sigma, lambda_elf) = if sigma_user > 0.0 {
+        let lambda_elf = if lambda_user > 0.0 {
+            lambda_user
+        } else {
+            sigma_user
+        };
+        (sigma_user, lambda_elf)
     } else {
         let err = 0.05_f64;
         let sigma2_floor = sigma2_hat.max(1e-6);
         let co_default =
             err * (2.0 * std::f64::consts::PI * sigma2_floor).sqrt() / (2.0 * 2.0_f64.ln());
         let tail_scale = (1.0 / (4.0 * tau * (1.0 - tau))).max(1.0);
-        co_default * tail_scale
-    };
-    let inv_sigma = 1.0 / sigma;
-
-    // Helper: stable sigmoid
-    fn sigmoid_stable(x: f64) -> f64 {
-        if x >= 0.0 {
-            let e = (-x).exp();
-            1.0 / (1.0 + e)
+        let sigma_auto = co_default * tail_scale;
+        let lambda_auto = if lambda_user > 0.0 {
+            lambda_user
         } else {
-            let e = x.exp();
-            e / (1.0 + e)
-        }
-    }
-
+            sigma_auto
+        };
+        (sigma_auto, lambda_auto)
+    };
     let mut converged = false;
     let mut iter = 0;
 
@@ -2736,7 +2789,7 @@ pub fn fit_pirls_quantile(
 
         // Per-obs IRLS quantities, computed in a saturation-safe way (qgam
         // R-source pattern, elf.R:159-162):
-        //   w_i  = s_i(1-s_i)/σ²        (Dmu²/2; goes to 0 as |r/σ| → ∞ —
+        //   w_i  = s_i(1-s_i)/(σλ)      (Dmu²/2; goes to 0 as |r/λ| → ∞ —
         //                                that's fine, those obs just drop
         //                                out of the IRLS solve)
         //   The Newton step solves (X'WX + S) β = X' (W·η + g) where g_i =
@@ -2746,10 +2799,9 @@ pub fn fit_pirls_quantile(
         let mut w = Array1::<f64>::zeros(n);
         let mut g = Array1::<f64>::zeros(n);
         for i in 0..n {
-            let r = y[i] - eta[i];
-            let s = sigmoid_stable(r * inv_sigma);
-            w[i] = s * (1.0 - s) * inv_sigma * inv_sigma;
-            g[i] = (s - (1.0 - tau)) * inv_sigma;
+            let parts = quantile_elf_parts(y[i], eta[i], tau, sigma, lambda_elf);
+            w[i] = parts.dmu2;
+            g[i] = -parts.dmu;
         }
 
         let xtwx = crate::reml::compute_xtwx_dispatch(None, x, &w);
@@ -2797,26 +2849,16 @@ pub fn fit_pirls_quantile(
     let mut weights = Array1::<f64>::zeros(n);
     let mut working_response = Array1::<f64>::zeros(n);
     let mut deviance = 0.0;
-    let log2 = 2.0_f64.ln();
     for i in 0..n {
-        let r = y[i] - eta[i];
-        let s = sigmoid_stable(r * inv_sigma);
-        weights[i] = s * (1.0 - s) * inv_sigma * inv_sigma;
-        let g = (s - (1.0 - tau)) * inv_sigma;
+        let parts = quantile_elf_parts(y[i], eta[i], tau, sigma, lambda_elf);
+        weights[i] = parts.dmu2;
+        let g = -parts.dmu;
         working_response[i] = if weights[i] > 1e-10 {
             eta[i] + g / weights[i]
         } else {
             eta[i]
         };
-        // Per-obs ELF deviance: 2·(L(r) - log 2)
-        let r_over_sigma = r * inv_sigma;
-        let softplus = if r_over_sigma > 0.0 {
-            r_over_sigma + (-r_over_sigma).exp().ln_1p()
-        } else {
-            r_over_sigma.exp().ln_1p()
-        };
-        let l = -r * (1.0 - tau) * inv_sigma + softplus;
-        deviance += 2.0 * (l - log2);
+        deviance += parts.deviance;
     }
 
     Ok(PiRLSResult {
@@ -3497,7 +3539,16 @@ pub fn fit_pirls_discretized(
 
     // Fast path for Gaussian family
     if matches!(family, Family::Gaussian) {
-        return fit_pirls_gaussian_discretized(y, x, lambda, penalties, p, disc, cached_xtx, prior_weights);
+        return fit_pirls_gaussian_discretized(
+            y,
+            x,
+            lambda,
+            penalties,
+            p,
+            disc,
+            cached_xtx,
+            prior_weights,
+        );
     }
 
     // General IRLS path for non-Gaussian families with discretized X'WX
@@ -4094,11 +4145,7 @@ pub fn fit_pirls_fastreml(
         let (mut xx, mut f, mut yy) = {
             let xx = compute_xtwx_dispatch(discrete, x, &w);
             let f = compute_xtwy_dispatch(discrete, x, &w, &z);
-            let yy: f64 = w
-                .iter()
-                .zip(z.iter())
-                .map(|(&wi, &zi)| wi * zi * zi)
-                .sum();
+            let yy: f64 = w.iter().zip(z.iter()).map(|(&wi, &zi)| wi * zi * zi).sum();
             (xx, f, yy)
         };
 
@@ -4139,7 +4186,11 @@ pub fn fit_pirls_fastreml(
             if can_retry {
                 // Re-build (w, z) with Fisher weights and re-solve.
                 let (w_f, z_f) = fastreml_irls_step_with_mode(
-                    y, &eta, prior_weights, family, /*force_fisher=*/ true,
+                    y,
+                    &eta,
+                    prior_weights,
+                    family,
+                    /*force_fisher=*/ true,
                 );
                 let xx_f = compute_xtwx_dispatch(discrete, x, &w_f);
                 let f_f = compute_xtwy_dispatch(discrete, x, &w_f, &z_f);
@@ -4270,9 +4321,9 @@ pub fn fit_pirls_fastreml(
         // assembly when `z` substitutes for `y`).
         let dev_now = (yy - beta.dot(&f)).max(0.0);
         let phi_now = log_phi.exp().max(1e-300);
-        let crit_now =
-            (dev_now / (phi_now * config.gamma) - accepted_prop.ldet_s + accepted_prop.ldet_xxs)
-                * 0.5;
+        let crit_now = (dev_now / (phi_now * config.gamma) - accepted_prop.ldet_s
+            + accepted_prop.ldet_xxs)
+            * 0.5;
 
         // ─── C11: convergence test (bam.r:678). ─────────────────────────────
         if outer >= 2 {
@@ -4365,6 +4416,80 @@ mod tests {
             b,
             (a - b).abs(),
             tol
+        );
+    }
+
+    #[test]
+    fn test_quantile_elf_parts_match_one_parameter_contract() {
+        let y = 0.31;
+        let mu = -0.07;
+        let tau = 0.95;
+        let sigma = 0.014;
+        let parts = quantile_elf_parts(y, mu, tau, sigma, sigma);
+        let u = (y - mu) / sigma;
+        let softplus = if u > 0.0 {
+            u + (-u).exp().ln_1p()
+        } else {
+            u.exp().ln_1p()
+        };
+        let h_tau = -((1.0 - tau) * (1.0 - tau).ln() + tau * tau.ln());
+        let expected_dev = 2.0 * (-h_tau - (1.0 - tau) * (y - mu) / sigma + softplus);
+        let s = 1.0 / (1.0 + (-u).exp());
+
+        assert_close(
+            parts.deviance,
+            expected_dev,
+            1e-12,
+            "one-parameter deviance",
+        );
+        assert_close(
+            parts.dmu,
+            ((1.0 - tau) - s) / sigma,
+            1e-12,
+            "one-parameter dmu",
+        );
+        assert_close(
+            parts.dmu2,
+            s * (1.0 - s) / (sigma * sigma),
+            1e-12,
+            "one-parameter dmu2",
+        );
+        assert_close(parts.sigmoid, s, 1e-12, "one-parameter sigmoid");
+    }
+
+    #[test]
+    fn test_quantile_elf_parts_gradient_and_hessian() {
+        let y = 0.08;
+        let mu = 0.03;
+        let tau = 0.95;
+        let sigma = 0.007014029219992691;
+        let co = 0.0031251342630865355;
+        let nll = |m: f64| 0.5 * quantile_elf_parts(y, m, tau, sigma, co).deviance;
+        let parts = quantile_elf_parts(y, mu, tau, sigma, co);
+
+        let d1 = cd(nll, mu, 1e-7);
+        let h2 = 1e-4;
+        let d2 = (nll(mu + h2) - 2.0 * nll(mu) + nll(mu - h2)) / (h2 * h2);
+        assert_close(parts.dmu, d1, 1e-7, "two-parameter ELF dmu");
+        assert_close(parts.dmu2, d2, 1e-4, "two-parameter ELF dmu2");
+    }
+
+    #[test]
+    fn test_quantile_elf_saturated_loglik_uses_qgam_two_scales() {
+        let tau = 0.95;
+        let sigma = 0.007014029219992691;
+        let co = 0.0031251342630865355;
+        let ls = quantile_elf_saturated_loglik_per_obs(tau, sigma, co);
+        let a = co * (1.0 - tau) / sigma;
+        let b = co * tau / sigma;
+        let expected = (1.0 - tau) * co * (1.0 - tau).ln() / sigma + co * tau * tau.ln() / sigma
+            - co.ln()
+            - (log_gamma(a) + log_gamma(b) - log_gamma(a + b));
+        assert_close(
+            ls,
+            expected,
+            1e-12,
+            "two-parameter saturated log-likelihood",
         );
     }
 
@@ -4768,13 +4893,8 @@ mod tests {
 
         // ── With prior weights ────────────────────────────────────────────
         for &use_fisher in &[true, false] {
-            let step = exp_family_irls_step(
-                y.view(),
-                eta.view(),
-                Some(pw.view()),
-                family,
-                use_fisher,
-            );
+            let step =
+                exp_family_irls_step(y.view(), eta.view(), Some(pw.view()), family, use_fisher);
             for i in 0..n {
                 let mu = eta[i].exp();
                 // Fisher (canonical link): w = μ, z = η + (y − μ)/μ
@@ -4783,19 +4903,32 @@ mod tests {
                 assert!(
                     (step.w[i] - w_expected).abs() < 1e-12,
                     "Poisson w[{}] (use_fisher={}): got {}, want {} (mu={})",
-                    i, use_fisher, step.w[i], w_expected, mu
+                    i,
+                    use_fisher,
+                    step.w[i],
+                    w_expected,
+                    mu
                 );
                 assert!(
                     (step.z[i] - z_expected).abs() < 1e-12,
                     "Poisson z[{}] (use_fisher={}): got {}, want {} (mu={})",
-                    i, use_fisher, step.z[i], z_expected, mu
+                    i,
+                    use_fisher,
+                    step.z[i],
+                    z_expected,
+                    mu
                 );
             }
         }
 
         // ── Without prior weights ─────────────────────────────────────────
-        let step_nopw =
-            exp_family_irls_step(y.view(), eta.view(), None, family, /* use_fisher */ true);
+        let step_nopw = exp_family_irls_step(
+            y.view(),
+            eta.view(),
+            None,
+            family,
+            /* use_fisher */ true,
+        );
         for i in 0..n {
             let mu = eta[i].exp();
             let w_expected = mu;
@@ -4803,12 +4936,16 @@ mod tests {
             assert!(
                 (step_nopw.w[i] - w_expected).abs() < 1e-12,
                 "Poisson(no pw) w[{}]: got {}, want {}",
-                i, step_nopw.w[i], w_expected
+                i,
+                step_nopw.w[i],
+                w_expected
             );
             assert!(
                 (step_nopw.z[i] - z_expected).abs() < 1e-12,
                 "Poisson(no pw) z[{}]: got {}, want {}",
-                i, step_nopw.z[i], z_expected
+                i,
+                step_nopw.z[i],
+                z_expected
             );
         }
     }

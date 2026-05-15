@@ -10,6 +10,7 @@
 use crate::block_penalty::BlockPenalty;
 use crate::discrete::{compute_xtwx_discrete, compute_xtwy_discrete, DiscreteDesign};
 use crate::linalg::{inverse, solve};
+use crate::pirls::quantile_elf_parts;
 use crate::GAMError;
 use crate::Result;
 use ndarray::{Array1, Array2};
@@ -134,11 +135,22 @@ pub fn glm_deviance(
     mu: &Array1<f64>,
     family: crate::pirls::Family,
 ) -> f64 {
+    glm_deviance_weighted(y_original, mu, family, None)
+}
+
+#[cfg(feature = "blas")]
+pub fn glm_deviance_weighted(
+    y_original: &Array1<f64>,
+    mu: &Array1<f64>,
+    family: crate::pirls::Family,
+    prior_weights: Option<&Array1<f64>>,
+) -> f64 {
     use crate::pirls::Family;
     let mut dev = 0.0;
     for i in 0..y_original.len() {
         let yi = y_original[i];
         let mui = mu[i];
+        let wi = prior_weights.map(|w| w[i]).unwrap_or(1.0);
         let dev_i = match family {
             Family::Gaussian => (yi - mui).powi(2),
             Family::Binomial | Family::QuasiBinomial => {
@@ -173,18 +185,10 @@ pub fn glm_deviance(
                 let r = yi - mui;
                 (df + 1.0) * (1.0 + r * r / (df * sigma2)).ln()
             }
-            // Quantile/ELF deviance per qgam elf.R:122-138 with λ = σ
+            // Quantile/ELF deviance per qgam elf.R:122-138.
             // (matches pirls.rs::compute_deviance).
-            Family::Quantile { tau, sigma } => {
-                let r = yi - mui;
-                let r_over_sigma = r / sigma;
-                let softplus = if r_over_sigma > 0.0 {
-                    r_over_sigma + (-r_over_sigma).exp().ln_1p()
-                } else {
-                    r_over_sigma.exp().ln_1p()
-                };
-                let h_tau = -((1.0 - tau) * (1.0 - tau).ln() + tau * tau.ln());
-                2.0 * (-h_tau - (1.0 - tau) * r / sigma + softplus)
+            Family::Quantile { tau, sigma, lambda } => {
+                quantile_elf_parts(yi, mui, tau, sigma, lambda).deviance
             }
             // Tweedie deviance for 1 < p < 2
             Family::Tweedie { p } => {
@@ -217,7 +221,7 @@ pub fn glm_deviance(
                 }
             }
         };
-        dev += dev_i;
+        dev += wi * dev_i;
     }
     dev
 }
@@ -318,11 +322,7 @@ impl RemlSystem {
         family: crate::pirls::Family,
     ) -> f64 {
         if matches!(family, crate::pirls::Family::Gaussian) {
-            let ywy: f64 = y
-                .iter()
-                .zip(w.iter())
-                .map(|(yi, wi)| yi * yi * wi)
-                .sum();
+            let ywy: f64 = y.iter().zip(w.iter()).map(|(yi, wi)| yi * yi * wi).sum();
             let beta_xtwy = self.beta.dot(&self.xtwy);
             let xtwx_beta = xtwx.dot(&self.beta);
             let beta_xtwx_beta = self.beta.dot(&xtwx_beta);
@@ -424,6 +424,7 @@ impl RemlScoreParts {
         penalties_blocks: &[BlockPenalty],
         family: crate::pirls::Family,
         y_original: Option<&Array1<f64>>,
+        y_original_weights: Option<&Array1<f64>>,
         mp: usize,
         n: usize,
     ) -> Self {
@@ -437,7 +438,7 @@ impl RemlScoreParts {
                     .iter()
                     .map(|&eta| fam.inverse_link(eta))
                     .collect();
-                glm_deviance(y_orig, &mu, fam)
+                glm_deviance_weighted(y_orig, &mu, fam, y_original_weights)
             }
         };
         let bsb = system.penalty_quadratic(lambdas, penalties_blocks);
@@ -475,8 +476,8 @@ impl RemlScoreParts {
         fixed_sigma2: Option<f64>,
     ) -> Self {
         let dev_num = system.working_rss(y, w, x, xtwx, crate::pirls::Family::Gaussian);
-        let sigma2 = fixed_sigma2
-            .unwrap_or_else(|| dev_num / ((n as f64) - system.tr_a).max(1e-10));
+        let sigma2 =
+            fixed_sigma2.unwrap_or_else(|| dev_num / ((n as f64) - system.tr_a).max(1e-10));
         Self {
             dev_num,
             bsb: 0.0,
@@ -538,8 +539,9 @@ pub fn compute_ldet_s_with_derivs(
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
-    use crate::discrete::{compute_xtwx_discrete, compute_xtwy_discrete, DiscreteDesign,
-        DiscreteMarginal};
+    use crate::discrete::{
+        compute_xtwx_discrete, compute_xtwy_discrete, DiscreteDesign, DiscreteMarginal,
+    };
     use ndarray::Array2;
 
     fn approx_max_abs(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
@@ -576,9 +578,13 @@ mod dispatch_tests {
         let xtwx_dispatched = compute_xtwx_dispatch(None, &x, &w);
         // Byte identity: same code path, so bit-for-bit equal.
         for (a, b) in xtwx_direct.iter().zip(xtwx_dispatched.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits(),
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
                 "dispatch(None) must be byte-identical to compute_xtwx: {} vs {}",
-                a, b);
+                a,
+                b
+            );
         }
     }
 
@@ -598,9 +604,13 @@ mod dispatch_tests {
         let xtwy_direct = compute_xtwy(&x, &w, &y);
         let xtwy_dispatched = compute_xtwy_dispatch(None, &x, &w, &y);
         for (a, b) in xtwy_direct.iter().zip(xtwy_dispatched.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits(),
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
                 "dispatch(None) must be byte-identical to compute_xtwy: {} vs {}",
-                a, b);
+                a,
+                b
+            );
         }
     }
 
@@ -635,8 +645,11 @@ mod dispatch_tests {
         let xtwx_direct = compute_xtwx_discrete(&disc, &w);
         let xtwx_dispatched = compute_xtwx_dispatch(Some(&disc), &dummy_x, &w);
         let err = approx_max_abs(&xtwx_direct, &xtwx_dispatched);
-        assert!(err < 1e-12,
-            "dispatch(Some) must match compute_xtwx_discrete: max abs err = {}", err);
+        assert!(
+            err < 1e-12,
+            "dispatch(Some) must match compute_xtwx_discrete: max abs err = {}",
+            err
+        );
     }
 
     /// Same for X'Wy.
@@ -667,7 +680,10 @@ mod dispatch_tests {
         let xtwy_direct = compute_xtwy_discrete(&disc, &w, &y);
         let xtwy_dispatched = compute_xtwy_dispatch(Some(&disc), &dummy_x, &w, &y);
         let err = approx_max_abs_1d(&xtwy_direct, &xtwy_dispatched);
-        assert!(err < 1e-12,
-            "dispatch(Some) must match compute_xtwy_discrete: max abs err = {}", err);
+        assert!(
+            err < 1e-12,
+            "dispatch(Some) must match compute_xtwy_discrete: max abs err = {}",
+            err
+        );
     }
 }

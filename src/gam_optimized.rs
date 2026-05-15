@@ -280,7 +280,16 @@ impl FitCache {
         cached_xtx: Option<&Array2<f64>>,
         prior_weights: Option<&Array1<f64>>,
     ) -> Result<crate::pirls::PiRLSResult> {
-        self.run_pirls_with_options(y, lambda, family, max_iter, tolerance, cached_xtx, false, prior_weights)
+        self.run_pirls_with_options(
+            y,
+            lambda,
+            family,
+            max_iter,
+            tolerance,
+            cached_xtx,
+            false,
+            prior_weights,
+        )
     }
 
     /// Variant that lets the caller signal "the outer Newton drives σ²" for
@@ -344,7 +353,12 @@ impl FitCache {
         }
 
         // Quantile (qgam-style) needs a specialised IRLS using ELF weights.
-        if let crate::pirls::Family::Quantile { tau, sigma } = family {
+        if let crate::pirls::Family::Quantile {
+            tau,
+            sigma,
+            lambda: lambda_elf,
+        } = family
+        {
             if prior_weights.is_some() {
                 return Err(GAMError::OptimizationFailed(
                     "weights= not yet supported for family='quantile'; \
@@ -360,6 +374,7 @@ impl FitCache {
                 &self.penalties,
                 tau,
                 sigma,
+                lambda_elf,
                 max_iter,
                 tolerance,
             );
@@ -395,7 +410,11 @@ impl FitCache {
 }
 
 /// Initialize lambda with smart heuristic based on data
-pub(crate) fn initialize_lambda_smart(y: &Array1<f64>, x: &Array2<f64>, penalty: &BlockPenalty) -> f64 {
+pub(crate) fn initialize_lambda_smart(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    penalty: &BlockPenalty,
+) -> f64 {
     // Use a heuristic based on the ratio of signal variance to penalty norm
     let y_var = {
         let y_mean = y.sum() / y.len() as f64;
@@ -657,14 +676,15 @@ impl GAM {
             smoothing_params.negbin_log_theta = 2.0_f64.ln();
         }
         // Profile-df for scat (TDist): outer Newton on mgcv's theta1 =
-        // log(df - 2) at the ρ-loop level when caller passed no fixed df.
+        // log(df - min.df) at the ρ-loop level when caller passed no fixed df.
         // Internal Brent in `fit_pirls_tdist` is disabled — PIRLS treats
         // family.df as fixed within an inner fit; only the outer Newton
         // moves it. Initial theta1 seeded from family.df so user-fixed
         // mode (tdist_profile=false) and auto mode share state cleanly.
         smoothing_params.tdist_profile = self.tdist_profile;
         if let crate::pirls::Family::TDist { df, .. } = self.family {
-            smoothing_params.tdist_log_df = (df.max(2.0_f64 + 1e-8) - 2.0).ln();
+            let min_df = crate::family_theta::DEFAULT_MIN_DF;
+            smoothing_params.tdist_log_df = (df.max(min_df + 1e-8) - min_df).ln();
             // Seed σ² from sample variance — the gam.fit5 outer Newton on
             // log σ² then refines from there. Also overwrite the family
             // enum's σ² so the FIRST PIRLS call uses this seed (otherwise
@@ -683,7 +703,7 @@ impl GAM {
             };
             smoothing_params.family = self.family;
         } else {
-            smoothing_params.tdist_log_df = (5.0_f64 - 2.0).ln();
+            smoothing_params.tdist_log_df = (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln();
             smoothing_params.tdist_log_sigma2 = 0.0_f64;
         }
         // Stash the ORIGINAL response for the IFT gradient/Hessian path. For
@@ -692,6 +712,7 @@ impl GAM {
         // ∂D_GLM/∂β = -2 X'(y - μ)/(V·g'). Skip for Gaussian (z = y).
         if !matches!(self.family, crate::pirls::Family::Gaussian) {
             smoothing_params.y_original = Some(y.clone());
+            smoothing_params.y_original_weights = prior_weights_ref.cloned();
         }
 
         // Smart initialization for lambda
@@ -711,13 +732,19 @@ impl GAM {
         // and run mgcv's `bgam.fitd` driver directly. The driver returns
         // (β, λ, log_phi, fitted, EDF, PP) ready for `store_results`.
         if matches!(opt_method, OptimizationMethod::FastREML) {
-            let _ = (max_inner_iter, &weights, &total_pirls_time, &total_reml_time);
+            let _ = (
+                max_inner_iter,
+                &weights,
+                &total_pirls_time,
+                &total_reml_time,
+            );
             let phi_fixed = matches!(
                 self.family,
                 crate::pirls::Family::Binomial
                     | crate::pirls::Family::Poisson
                     | crate::pirls::Family::NegBin { .. }
                     | crate::pirls::Family::Quantile { .. }
+                    | crate::pirls::Family::TDist { .. }
             );
 
             // For scat: wire the B5 outer Newton on (log σ², log(df-min_df))
@@ -743,30 +770,21 @@ impl GAM {
                                      mu_in: &Array1<f64>,
                                      pw_in: Option<&Array1<f64>>,
                                      fam_in: crate::pirls::Family,
-                                     _log_phi: f64|
+                                     log_phi_in: f64|
              -> Result<crate::pirls::Family> {
                 if let crate::pirls::Family::TDist { .. } = fam_in {
                     let (log_s2_cur, log_d_cur) = scat_cb_state.expect("scat state initialised");
+                    let scale = log_phi_in.exp().max(1e-300);
                     let step = if tdist_profile {
-                        crate::family_theta::estimate_scat_theta_outer(
-                            y_in,
-                            mu_in,
-                            pw_in,
-                            log_s2_cur,
-                            log_d_cur,
-                            /*max_iters*/ 25,
-                            /*tol*/ 1e-7,
+                        crate::family_theta::estimate_scat_theta_outer_with_scale(
+                            y_in, mu_in, pw_in, log_s2_cur, log_d_cur, scale,
+                            /*max_iters*/ 25, /*tol*/ 1e-7,
                         )
                     } else {
                         // 1-D Newton on log σ² only (df fixed by user).
-                        crate::family_theta::estimate_scat_log_sigma2_outer(
-                            y_in,
-                            mu_in,
-                            pw_in,
-                            log_s2_cur,
-                            log_d_cur,
-                            /*max_iters*/ 25,
-                            /*tol*/ 1e-7,
+                        crate::family_theta::estimate_scat_log_sigma2_outer_with_scale(
+                            y_in, mu_in, pw_in, log_s2_cur, log_d_cur, scale,
+                            /*max_iters*/ 25, /*tol*/ 1e-7,
                         )
                     };
                     scat_cb_state = Some((step.log_sigma2, step.log_df_minus2));
@@ -1109,6 +1127,7 @@ impl GAM {
                 smoothing_params.mp,
                 self.family,
                 smoothing_params.y_original.as_ref(),
+                smoothing_params.y_original_weights.as_ref(),
             )
             .ok();
 
@@ -1208,6 +1227,7 @@ impl GAM {
                             smoothing_params.mp,
                             self.family,
                             smoothing_params.y_original.as_ref(),
+                            smoothing_params.y_original_weights.as_ref(),
                         )
                         .ok();
 
@@ -1253,6 +1273,7 @@ impl GAM {
                 smoothing_params.mp,
                 self.family,
                 smoothing_params.y_original.as_ref(),
+                smoothing_params.y_original_weights.as_ref(),
             )
             .ok();
 

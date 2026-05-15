@@ -67,6 +67,18 @@ def test_quantile_rejects_bad_sigma():
         GAM("quantile", tau=0.5, sigma=-1.0)
 
 
+def test_quantile_accepts_separate_qgam_co_parameter():
+    g = GAM("quantile", tau=0.95, sigma=0.007, co=0.003)
+    params = g.get_family_params()
+    assert params["sigma"] == pytest.approx(0.007)
+    assert params["co"] == pytest.approx(0.003)
+
+
+def test_quantile_rejects_bad_co():
+    with pytest.raises(ValueError):
+        GAM("quantile", tau=0.5, sigma=0.01, co=-1.0)
+
+
 # ------------------------------------------------------------------ #
 # Test 2: Calibration on synthetic data                               #
 # ------------------------------------------------------------------ #

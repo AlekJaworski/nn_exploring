@@ -668,6 +668,7 @@ def fit_quantile(
     bs: str = "cr",
     method: str = "REML",
     sigma: Optional[float] = None,
+    co: Optional[float] = None,
     calibrate: bool = False,
     n_folds: int = 3,
     seed: int = 0,
@@ -678,6 +679,7 @@ def fit_quantile(
 
     - `calibrate=True`: run `tune_quantile_sigma` first.
     - `sigma=` provided: fit at that σ.
+    - `co=` provided: use qgam's logistic-width parameter separately from σ.
     - Otherwise: fall back to the rust-side heuristic σ.
 
     `loss` chooses the calibration objective when `calibrate=True`:
@@ -700,10 +702,16 @@ def fit_quantile(
         )
 
     if sigma is not None:
-        g = GAM("quantile", tau=tau, sigma=float(sigma))
+        kwargs: dict[str, float] = {"tau": float(tau), "sigma": float(sigma)}
+        if co is not None:
+            kwargs["co"] = float(co)
+        g = GAM("quantile", **kwargs)
         g.fit(X, y, k=list(k), method=method, bs=bs)
         return g, float(sigma), info
 
-    g = GAM("quantile", tau=tau)
+    if co is not None:
+        g = GAM("quantile", tau=tau, co=float(co))
+    else:
+        g = GAM("quantile", tau=tau)
     g.fit(X, y, k=list(k), method=method, bs=bs)
     return g, 0.0, None  # sigma=0 sentinel = rust heuristic
