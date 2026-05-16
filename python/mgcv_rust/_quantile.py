@@ -675,6 +675,7 @@ def fit_quantile(
     loss: str = "pin",
     n_bootstrap: int = 20,
     final_algorithm: Optional[str] = None,
+    coverage_calibrate: bool = False,
 ) -> tuple[GAM, float, Optional[dict[str, Any]]]:
     """Fit ELF GAM, optionally with calibrated σ.
 
@@ -683,6 +684,9 @@ def fit_quantile(
     - `co=` provided: use qgam's logistic-width parameter separately from σ.
     - `final_algorithm="newton"`: use the Newton REML optimizer for the final
       fixed-σ fit. Calibration folds still use the default fast path.
+    - `coverage_calibrate=True`: after fitting, apply a one-dimensional
+      intercept shift so empirical training coverage equals `tau`. This is a
+      quality-oriented post-fit calibration; leave it off for qgam parity tests.
     - Otherwise: fall back to the rust-side heuristic σ.
 
     `loss` chooses the calibration objective when `calibrate=True`:
@@ -710,6 +714,10 @@ def fit_quantile(
             kwargs["co"] = float(co)
         g = GAM("quantile", **kwargs)
         g.fit(X, y, k=list(k), method=method, bs=bs, algorithm=final_algorithm)
+        if coverage_calibrate:
+            shift = g.calibrate_quantile_intercept(y)
+            if info is not None:
+                info["coverage_calibration_shift"] = shift
         return g, float(sigma), info
 
     if co is not None:
@@ -717,4 +725,6 @@ def fit_quantile(
     else:
         g = GAM("quantile", tau=tau)
     g.fit(X, y, k=list(k), method=method, bs=bs, algorithm=final_algorithm)
+    if coverage_calibrate:
+        g.calibrate_quantile_intercept(y)
     return g, 0.0, None  # sigma=0 sentinel = rust heuristic

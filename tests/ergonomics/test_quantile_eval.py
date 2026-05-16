@@ -129,7 +129,8 @@ def test_holdout_pinball_vs_qgam() -> None:
     resid_train, resid_test = resid[:split], resid[split:]
 
     gam, _sigma, _info = fit_quantile(
-        X_train, resid_train, tau=tau, k=[5, 5, 5, 5], bs="cr", method="REML"
+        X_train, resid_train, tau=tau, k=[5, 5, 5, 5], bs="cr", method="REML",
+        calibrate=True, loss="pin", n_folds=3, coverage_calibrate=True,
     )
     rust_pred_test = np.asarray(gam.predict(X_test), dtype=float)
     rust_pinball = _pinball(resid_test, rust_pred_test, tau)
@@ -138,14 +139,13 @@ def test_holdout_pinball_vs_qgam() -> None:
     print(
         f"\n  rust pinball: {rust_pinball:.6f}"
         f"\n  qgam pinball: {qgam_pinball:.6f}  (OOS, same 80/20 split)"
-        f"\n  ratio: {ratio:.4f}  (threshold 1.35; tighten to ~1.05 after Newton lands)"
+        f"\n  ratio: {ratio:.4f}  (threshold 1.00; calibrated fast path)"
     )
 
-    # Current baseline (FS default σ heuristic): ratio ~1.29. Threshold is 1.35
-    # to catch regressions. Tighten to ~1.05 once Newton warm-start (Phase 2)
-    # and Newton ELF gradient (Phase 3) land.
-    assert rust_pinball <= qgam_pinball * 1.35, (
-        f"rust pinball {rust_pinball:.6f} > 1.35 × qgam OOS pinball "
+    # Pinball-CV σ plus coverage calibration should beat qgam's OOS pinball
+    # while staying below qgam's production fit time on this fixture.
+    assert rust_pinball <= qgam_pinball, (
+        f"rust pinball {rust_pinball:.6f} > qgam OOS pinball "
         f"{qgam_pinball:.6f} (ratio {ratio:.4f})"
     )
 
@@ -188,7 +188,8 @@ def test_holdout_coverage_vs_qgam() -> None:
     qgam_coverage = contract["qgam_oos_coverage"]
 
     gam, _sigma, _info = fit_quantile(
-        X_train, resid_train, tau=tau, k=[5, 5, 5, 5], bs="cr", method="REML"
+        X_train, resid_train, tau=tau, k=[5, 5, 5, 5], bs="cr", method="REML",
+        calibrate=True, loss="pin", n_folds=3, coverage_calibrate=True,
     )
     rust_pred_test = np.asarray(gam.predict(X_test), dtype=float)
     rust_coverage = float(np.mean(resid_test < rust_pred_test))

@@ -913,6 +913,73 @@ impl PyGAM {
         Ok(PyArray1::from_vec(py, fitted.to_vec()))
     }
 
+    /// Shift the final quantile intercept so empirical training coverage matches τ.
+    fn calibrate_quantile_intercept(&mut self, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+        let tau = match self.inner.family {
+            Family::Quantile { tau, .. } => tau,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "calibrate_quantile_intercept is only valid for family='quantile'",
+                ))
+            }
+        };
+
+        let y_array = y.as_array();
+        let fitted = self
+            .inner
+            .fitted_values
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        if y_array.len() != fitted.len() {
+            return Err(PyValueError::new_err(format!(
+                "y length ({}) must match fitted length ({})",
+                y_array.len(),
+                fitted.len()
+            )));
+        }
+
+        let mut residuals: Vec<f64> = y_array
+            .iter()
+            .zip(fitted.iter())
+            .map(|(&yi, &fi)| yi - fi)
+            .filter(|r| r.is_finite())
+            .collect();
+        if residuals.is_empty() {
+            return Err(PyValueError::new_err(
+                "cannot calibrate quantile intercept from non-finite residuals",
+            ));
+        }
+        residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((residuals.len() as f64 - 1.0) * tau)
+            .floor()
+            .clamp(0.0, residuals.len() as f64 - 1.0) as usize;
+        let shift = residuals[idx];
+        if !shift.is_finite() {
+            return Err(PyValueError::new_err(
+                "non-finite quantile calibration shift",
+            ));
+        }
+
+        let coefficients = self
+            .inner
+            .coefficients
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet"))?;
+        coefficients[0] += shift;
+        fitted.mapv_inplace(|v| v + shift);
+        if let Some(linear_predictor) = self.inner.linear_predictor.as_mut() {
+            linear_predictor.mapv_inplace(|v| v + shift);
+        }
+        self.inner.deviance = Some(
+            y_array
+                .iter()
+                .zip(fitted.iter())
+                .map(|(&yi, &fi)| (yi - fi).powi(2))
+                .sum(),
+        );
+        Ok(shift)
+    }
+
     /// Get the family (distribution) used by this GAM
     fn get_family(&self) -> &str {
         match self.inner.family {

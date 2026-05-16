@@ -183,6 +183,11 @@ class GAM:
         x_arr = _ensure_2d_float64(x)
         return self._native.evaluate_lpmatrix(x_arr)
 
+    def calibrate_quantile_intercept(self, y: Any) -> float:
+        """Shift fitted quantile intercept so training coverage matches tau."""
+        y_arr = _ensure_1d_float64(y)
+        return float(self._native.calibrate_quantile_intercept(y_arr))
+
     def fit_quantile_fixed_sp(
         self,
         x: Any,
