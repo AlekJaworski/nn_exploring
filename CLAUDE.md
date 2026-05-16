@@ -83,6 +83,14 @@ Key modules:
 - **Real-data tests** (`tests/real_data/`): stress tests on actual datasets.
 - **Rust unit tests** (`tests/*.rs`): component-level (gradient correctness, Cholesky stability, batch solves).
 
+### qgam OOS Presets
+
+- qgam parity contracts remain diagnostic; product decisions should use OOS pinball, coverage, and wall time.
+- Real qgam OOS contracts live in `test_data/qgam_oos_real_contracts.json`; regenerate/expand them with `scripts/r/tests/extract_qgam_oos_real_contracts.R`.
+- Benchmark Rust variants with `python scripts/python/bench_quantile_oos.py --no-synthetic --variants heuristic,heuristic_covcal,pin_cv_covcal`.
+- Current 26-case real OOS finding: `heuristic_covcal` is the ultra-fast approximate preset (~72x qgam speedup, mean pinball ratio ~1.033); `pin_cv_covcal` is the quality preset (~1.4x speedup, mean ratio ~1.010). Uncalibrated q95 variants overcover and are not recommended for production q95.
+- Holdout/K-fold coverage calibration variants exist in the benchmark runner for diagnostics, but are not public API defaults; holdout is preferred over 5-fold if a statistically cleaner fast preset is needed.
+
 ### Cargo Profiles
 
 - `dev`: `opt-level=1` (fast compile, some optimization)
