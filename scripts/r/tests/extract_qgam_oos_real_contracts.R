@@ -16,7 +16,10 @@ suppressPackageStartupMessages({
 repo_root <- normalizePath(getwd(), mustWork = TRUE)
 fixture_dir <- file.path(repo_root, "data", "sale_price_fixtures")
 parity_dir  <- file.path(fixture_dir, "mgcv_rust_parity")
-out_path    <- file.path(repo_root, "test_data", "qgam_oos_real_contracts.json")
+out_path <- Sys.getenv(
+  "QGAM_OOS_OUT_PATH",
+  unset = file.path(repo_root, "test_data", "qgam_oos_real_contracts.json")
+)
 
 target  <- "sale_to_list_price_ratio"
 smooths <- c(
@@ -27,6 +30,17 @@ smooths <- c(
 )
 tau <- 0.95
 k <- 5L
+
+parse_seed_spec <- function(spec) {
+  if (grepl(":", spec, fixed = TRUE)) {
+    parts <- strsplit(spec, ":", fixed = TRUE)[[1]]
+    if (length(parts) != 2L) stop("QGAM_RANDOM_SEEDS range must look like '0:19'")
+    return(seq.int(as.integer(parts[[1]]), as.integer(parts[[2]])))
+  }
+  as.integer(strsplit(spec, ",", fixed = TRUE)[[1]])
+}
+
+random_seeds <- parse_seed_spec(Sys.getenv("QGAM_RANDOM_SEEDS", unset = "0,1,2"))
 
 pinball_loss <- function(y, pred, tau) {
   r <- y - pred
@@ -105,7 +119,7 @@ contracts[[length(contracts) + 1L]] <- fit_contract(
 )
 
 # Entire dataset, random seeded 80/20 splits.
-for (seed in c(0L, 1L, 2L)) {
+for (seed in random_seeds) {
   set.seed(seed)
   idx <- sample.int(n)
   train_idx <- sort(idx[seq_len(split)])
