@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SALE_FIXTURE_DIR = ROOT / "data" / "sale_price_fixtures"
 PARITY_DIR = SALE_FIXTURE_DIR / "mgcv_rust_parity"
 QGAM_HOLDOUT_CONTRACT = ROOT / "test_data" / "qgam_holdout_pinball_contract.json"
+QGAM_REAL_CONTRACTS = ROOT / "test_data" / "qgam_oos_real_contracts.json"
 
 QGAM_SMOOTHS = [
     "days_in_current_price_regime",
@@ -50,6 +51,7 @@ class Case:
     qgam_pred_test: np.ndarray | None = None
     qgam_pinball: float | None = None
     qgam_coverage: float | None = None
+    qgam_fit_time_s: float | None = None
     source_files: list[str] | None = None
 
 
@@ -82,6 +84,7 @@ def _metrics(case: Case, pred: np.ndarray) -> dict[str, Any]:
         out.update(
             {
                 "qgam_pinball": case.qgam_pinball,
+                "qgam_fit_time_s": case.qgam_fit_time_s,
                 "pinball_ratio_vs_qgam": out["pinball"] / case.qgam_pinball
                 if case.qgam_pinball and case.qgam_pinball > 0.0
                 else None,
@@ -271,8 +274,53 @@ def _sale_price_contract_case() -> Case:
         qgam_pred_test=np.asarray(contract["qgam_pred_test"], dtype=float),
         qgam_pinball=float(contract["qgam_oos_pinball"]),
         qgam_coverage=float(contract["qgam_oos_coverage"]),
+        qgam_fit_time_s=float(contract["fit_time_s"]),
         source_files=[str(train_path), str(mean_path), str(QGAM_HOLDOUT_CONTRACT)],
     )
+
+
+def _load_sale_price_arrays(source_name: str, mean_name: str) -> tuple[np.ndarray, np.ndarray]:
+    pd = _import_pandas()
+    train_path = SALE_FIXTURE_DIR / source_name
+    mean_path = PARITY_DIR / mean_name
+    df = pd.read_parquet(train_path)
+    mean_ref = pd.read_parquet(mean_path)
+    resid = mean_ref["y"].to_numpy(dtype=float) - mean_ref["pred_prod"].to_numpy(dtype=float)
+    return df[QGAM_SMOOTHS].to_numpy(dtype=float), resid
+
+
+def _case_from_qgam_contract(contract: dict[str, Any]) -> Case:
+    source_files = list(contract.get("source_files") or [])
+    source_name = source_files[0] if source_files else "entire_dataset_train.parquet"
+    mean_name = source_files[1] if len(source_files) > 1 else "mgcv_rust_parity/mean_gam_entire_dataset.parquet"
+    if mean_name.startswith("mgcv_rust_parity/"):
+        mean_name = mean_name.split("/", 1)[1]
+    X, resid = _load_sale_price_arrays(source_name, mean_name)
+    train_idx = np.asarray(contract["train_idx_1based"], dtype=int) - 1
+    test_idx = np.asarray(contract["test_idx_1based"], dtype=int) - 1
+    return Case(
+        case_id=str(contract["case_id"]),
+        case_kind="real",
+        X_train=X[train_idx],
+        y_train=resid[train_idx],
+        X_test=X[test_idx],
+        y_test=resid[test_idx],
+        tau=float(contract["tau"]),
+        k=[5, 5, 5, 5],
+        qgam_pred_test=np.asarray(contract["qgam_pred_test"], dtype=float),
+        qgam_pinball=float(contract["qgam_oos_pinball"]),
+        qgam_coverage=float(contract["qgam_oos_coverage"]),
+        qgam_fit_time_s=float(contract["fit_time_s"]),
+        source_files=[str(SALE_FIXTURE_DIR / source_name), str(PARITY_DIR / mean_name), str(QGAM_REAL_CONTRACTS)],
+    )
+
+
+def _qgam_real_contract_cases(path: Path, quick: bool) -> list[Case]:
+    payload = json.loads(path.read_text())
+    contracts = list(payload.get("contracts", []))
+    if quick:
+        contracts = [c for c in contracts if c.get("case_id") == "sale_price_q95_contract_80_20"]
+    return [_case_from_qgam_contract(c) for c in contracts]
 
 
 def _sale_price_split_cases(limit: int | None) -> list[Case]:
@@ -419,8 +467,12 @@ def _write_summary(rows: list[dict[str, Any]], summary_path: Path) -> None:
 def _selected_cases(args: argparse.Namespace) -> list[Case]:
     cases: list[Case] = []
     if args.real:
-        cases.append(_sale_price_contract_case())
-        if not args.quick:
+        qgam_contracts = Path(args.qgam_contracts)
+        if qgam_contracts.exists():
+            cases.extend(_qgam_real_contract_cases(qgam_contracts, args.quick))
+        else:
+            cases.append(_sale_price_contract_case())
+        if not args.quick and not qgam_contracts.exists():
             cases.extend(_sale_price_split_cases(args.real_limit))
     if args.synthetic:
         cases.extend(_synthetic_cases(args.quick, args.seed))
@@ -449,6 +501,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--variants", help="comma-separated variant names")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--real-limit", type=int, default=None)
+    parser.add_argument("--qgam-contracts", type=Path, default=QGAM_REAL_CONTRACTS)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
