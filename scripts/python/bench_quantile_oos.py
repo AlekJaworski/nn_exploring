@@ -141,6 +141,73 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _fit_heuristic(case: Case, X: np.ndarray, y: np.ndarray):
+    fit, sigma_used, info = fit_quantile(X, y, tau=case.tau, k=case.k, bs=case.bs)
+    return fit, sigma_used, info
+
+
+def _apply_intercept_shift(fit: Any, shift: float) -> float:
+    fitted = np.asarray(fit.get_fitted_values(), dtype=float)
+    pseudo_y = fitted + float(shift)
+    return float(fit.calibrate_quantile_intercept(pseudo_y))
+
+
+def _residual_quantile_shift(y: np.ndarray, pred: np.ndarray, tau: float) -> float:
+    residuals = np.asarray(y, dtype=float) - np.asarray(pred, dtype=float)
+    return float(np.quantile(residuals, tau, method="lower"))
+
+
+def _fit_heuristic_holdout_covcal(case: Case, seed: int) -> tuple[Any, float, dict[str, Any]]:
+    rng = np.random.default_rng(seed)
+    n = case.X_train.shape[0]
+    idx = rng.permutation(n)
+    n_fit = max(1, int(0.8 * n))
+    fit_idx = np.sort(idx[:n_fit])
+    cal_idx = np.sort(idx[n_fit:])
+
+    cal_fit, _, _ = _fit_heuristic(case, case.X_train[fit_idx], case.y_train[fit_idx])
+    cal_pred = np.asarray(cal_fit.predict(case.X_train[cal_idx]), dtype=float)
+    shift = _residual_quantile_shift(case.y_train[cal_idx], cal_pred, case.tau)
+
+    final_fit, sigma_used, info = _fit_heuristic(case, case.X_train, case.y_train)
+    applied_shift = _apply_intercept_shift(final_fit, shift)
+    return final_fit, sigma_used, {
+        "coverage_calibration": "holdout",
+        "n_extra_fits": 1,
+        "n_fit": int(len(fit_idx)),
+        "n_cal": int(len(cal_idx)),
+        "shift": shift,
+        "applied_shift": applied_shift,
+        "base_info": info,
+    }
+
+
+def _fit_heuristic_kfold_covcal(case: Case, seed: int, n_folds: int) -> tuple[Any, float, dict[str, Any]]:
+    rng = np.random.default_rng(seed)
+    n = case.X_train.shape[0]
+    idx = rng.permutation(n)
+    folds = np.array_split(idx, n_folds)
+    oof_pred = np.empty(n, dtype=float)
+
+    for fold in folds:
+        fold = np.asarray(fold, dtype=int)
+        train_idx = np.setdiff1d(np.arange(n), fold, assume_unique=False)
+        fold_fit, _, _ = _fit_heuristic(case, case.X_train[train_idx], case.y_train[train_idx])
+        oof_pred[fold] = np.asarray(fold_fit.predict(case.X_train[fold]), dtype=float)
+
+    shift = _residual_quantile_shift(case.y_train, oof_pred, case.tau)
+    final_fit, sigma_used, info = _fit_heuristic(case, case.X_train, case.y_train)
+    applied_shift = _apply_intercept_shift(final_fit, shift)
+    return final_fit, sigma_used, {
+        "coverage_calibration": f"kfold_{n_folds}",
+        "n_extra_fits": n_folds,
+        "n_folds": n_folds,
+        "shift": shift,
+        "applied_shift": applied_shift,
+        "base_info": info,
+    }
+
+
 def _run_variant(case: Case, variant: str, seed: int) -> dict[str, Any]:
     row = _base_row(case, variant, seed)
     try:
@@ -162,6 +229,15 @@ def _run_variant(case: Case, variant: str, seed: int) -> dict[str, Any]:
                 bs=case.bs,
                 coverage_calibrate=True,
             )
+            pred_fn = fit.predict
+        elif variant == "heuristic_holdout_covcal":
+            fit, sigma_used, info = _fit_heuristic_holdout_covcal(case, seed)
+            pred_fn = fit.predict
+        elif variant == "heuristic_kfold3_covcal":
+            fit, sigma_used, info = _fit_heuristic_kfold_covcal(case, seed, 3)
+            pred_fn = fit.predict
+        elif variant == "heuristic_kfold5_covcal":
+            fit, sigma_used, info = _fit_heuristic_kfold_covcal(case, seed, 5)
             pred_fn = fit.predict
         elif variant == "pin_cv":
             fit, sigma_used, info = fit_quantile(
