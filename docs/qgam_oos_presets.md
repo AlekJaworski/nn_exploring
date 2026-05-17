@@ -43,3 +43,11 @@ Current real-data benchmark summary on 26 qgam-referenced OOS cases:
 `final_algorithm=` remains available for diagnostics. Passing it to `fit_quantile` emits a `RuntimeWarning` because the quantile-specific ELF Newton/LAML gradient is not complete yet; calibration folds still use the default fast path, and the final fit should not be treated as a production preset.
 
 Holdout and K-fold coverage-calibration variants are still benchmark-only diagnostics in `scripts/python/bench_quantile_oos.py`. If they become public API, add new named presets rather than changing these mappings.
+
+Benchmark the public preset names directly with:
+
+```bash
+python scripts/python/bench_quantile_oos.py --no-synthetic --variants fast_oos,quality_oos
+```
+
+The runner still supports the older explicit-option variant names (`heuristic_covcal`, `pin_cv_covcal`) for continuity with historical result files.

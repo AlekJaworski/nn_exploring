@@ -1,7 +1,9 @@
 """OOS benchmark for qgam-style quantile fits.
 
 Compares Rust quantile variants on real sale-price residual fixtures and
-synthetic cases with known conditional quantiles. qgam is included where an
+synthetic cases with known conditional quantiles. Public preset variants
+(`fast_oos`, `quality_oos`) are included as aliases for their explicit option
+forms so preset behavior can be benchmarked directly. qgam is included where an
 existing OOS contract is available; live R/qgam calls are intentionally out of
 scope so this remains repeatable in CI/dev shells.
 """
@@ -230,6 +232,16 @@ def _run_variant(case: Case, variant: str, seed: int) -> dict[str, Any]:
                 coverage_calibrate=True,
             )
             pred_fn = fit.predict
+        elif variant == "fast_oos":
+            fit, sigma_used, info = fit_quantile(
+                case.X_train,
+                case.y_train,
+                tau=case.tau,
+                k=case.k,
+                bs=case.bs,
+                preset="fast_oos",
+            )
+            pred_fn = fit.predict
         elif variant == "heuristic_holdout_covcal":
             fit, sigma_used, info = _fit_heuristic_holdout_covcal(case, seed)
             pred_fn = fit.predict
@@ -264,6 +276,18 @@ def _run_variant(case: Case, variant: str, seed: int) -> dict[str, Any]:
                 n_folds=3,
                 seed=seed,
                 coverage_calibrate=True,
+            )
+            pred_fn = fit.predict
+        elif variant == "quality_oos":
+            fit, sigma_used, info = fit_quantile(
+                case.X_train,
+                case.y_train,
+                tau=case.tau,
+                k=case.k,
+                bs=case.bs,
+                preset="quality_oos",
+                n_folds=3,
+                seed=seed,
             )
             pred_fn = fit.predict
         elif variant == "cal_kl_small":
