@@ -21,8 +21,10 @@ LAML/REML directly — see test_*_laml_progress.py.
 
 from __future__ import annotations
 
-import numpy as np
+import warnings
 from typing import Any, Optional, Sequence
+
+import numpy as np
 
 from . import GAM
 
@@ -676,14 +678,21 @@ def fit_quantile(
     n_bootstrap: int = 20,
     final_algorithm: Optional[str] = None,
     coverage_calibrate: bool = False,
+    preset: Optional[str] = None,
 ) -> tuple[GAM, float, Optional[dict[str, Any]]]:
     """Fit ELF GAM, optionally with calibrated σ.
 
+    - `preset="fast_oos"`: use the fast OOS product path
+      (`coverage_calibrate=True`, Rust heuristic σ).
+    - `preset="quality_oos"`: use the higher-quality OOS product path
+      (`calibrate=True, loss="pin", coverage_calibrate=True`).
     - `calibrate=True`: run `tune_quantile_sigma` first.
     - `sigma=` provided: fit at that σ.
     - `co=` provided: use qgam's logistic-width parameter separately from σ.
     - `final_algorithm="newton"`: use the Newton REML optimizer for the final
-      fixed-σ fit. Calibration folds still use the default fast path.
+      fixed-σ fit. Calibration folds still use the default fast path. This is
+      diagnostic for quantile fits until the ELF-specific REML gradient is
+      complete.
     - `coverage_calibrate=True`: after fitting, apply a one-dimensional
       intercept shift so empirical training coverage equals `tau`. This is a
       quality-oriented post-fit calibration; leave it off for qgam parity tests.
@@ -696,6 +705,28 @@ def fit_quantile(
 
     Returns (fitted_gam, sigma_used, calibration_info_or_None).
     """
+    if preset is not None:
+        if preset == "fast_oos":
+            calibrate = False
+            coverage_calibrate = True
+        elif preset == "quality_oos":
+            calibrate = True
+            loss = "pin"
+            coverage_calibrate = True
+        else:
+            raise ValueError(
+                f"unknown quantile preset {preset!r}; expected "
+                "'fast_oos' or 'quality_oos'"
+            )
+
+    if final_algorithm is not None:
+        warnings.warn(
+            "fit_quantile(final_algorithm=...) is diagnostic for quantile fits; "
+            "the ELF-specific Newton/LAML gradient is not complete yet.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
     if X.ndim == 1:

@@ -213,7 +213,7 @@ This structurally closes two production bug classes:
 | `nb` / `negbin` | log | — | `nb` profiles θ; `negbin` is fixed-θ |
 | `t-dist` / `scat` | identity | — | df profiled if not given (`df ∈ [2, 100]`) |
 | `quasipoisson`, `quasibinomial` | log / logit | — | dispersion-aware |
-| `quantile` | identity | — | see `mgcv_rust.fit_quantile` / `fit_quantile_lss` |
+| `quantile` | identity | — | see `mgcv_rust.fit_quantile` / `fit_quantile_lss`; OOS presets documented in [`docs/qgam_oos_presets.md`](docs/qgam_oos_presets.md) |
 
 ## Architecture (Rust side)
 

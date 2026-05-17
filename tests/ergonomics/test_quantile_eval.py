@@ -211,3 +211,72 @@ def test_holdout_coverage_vs_qgam() -> None:
     assert rust_coverage >= 0.88, (
         f"rust coverage {rust_coverage:.4f} < 0.88 — severe under-coverage"
     )
+
+
+def _make_preset_equivalence_data() -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(123)
+    X = rng.uniform(0, 1, (120, 2))
+    signal = np.sin(2 * np.pi * X[:, 0]) + 0.25 * X[:, 1]
+    y = signal + 0.2 * rng.standard_normal(len(X))
+    return X, y
+
+
+def test_fast_oos_preset_equals_explicit_options() -> None:
+    X, y = _make_preset_equivalence_data()
+
+    g_preset, sigma_preset, info_preset = fit_quantile(
+        X, y, tau=0.9, k=[6, 6], bs="cr", preset="fast_oos",
+    )
+    g_explicit, sigma_explicit, info_explicit = fit_quantile(
+        X, y, tau=0.9, k=[6, 6], bs="cr", coverage_calibrate=True,
+    )
+
+    assert sigma_preset == sigma_explicit == 0.0
+    assert info_preset is None
+    assert info_explicit is None
+    np.testing.assert_allclose(
+        g_preset.predict(X), g_explicit.predict(X), atol=1e-12,
+    )
+
+
+def test_quality_oos_preset_equals_explicit_options() -> None:
+    pytest.importorskip("scipy")
+    X, y = _make_preset_equivalence_data()
+
+    g_preset, sigma_preset, info_preset = fit_quantile(
+        X, y, tau=0.9, k=[6, 6], bs="cr", preset="quality_oos",
+        n_folds=2, seed=7,
+    )
+    g_explicit, sigma_explicit, info_explicit = fit_quantile(
+        X, y, tau=0.9, k=[6, 6], bs="cr",
+        calibrate=True, loss="pin", coverage_calibrate=True,
+        n_folds=2, seed=7,
+    )
+
+    assert info_preset is not None
+    assert info_explicit is not None
+    assert sigma_preset == sigma_explicit
+    assert (
+        info_preset["coverage_calibration_shift"]
+        == info_explicit["coverage_calibration_shift"]
+    )
+    np.testing.assert_allclose(
+        g_preset.predict(X), g_explicit.predict(X), atol=1e-12,
+    )
+
+
+def test_unknown_quantile_preset_rejected() -> None:
+    X, y = _make_preset_equivalence_data()
+
+    with pytest.raises(ValueError, match="unknown quantile preset"):
+        fit_quantile(X, y, tau=0.9, k=[6, 6], preset="not_a_preset")
+
+
+def test_final_algorithm_warns_diagnostic() -> None:
+    X, y = _make_preset_equivalence_data()
+
+    with pytest.warns(RuntimeWarning, match="diagnostic for quantile fits"):
+        fit_quantile(
+            X, y, tau=0.9, k=[6, 6], bs="cr",
+            final_algorithm="fellner-schall",
+        )
