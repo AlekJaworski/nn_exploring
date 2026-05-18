@@ -1066,6 +1066,7 @@ impl GAM {
                     // Read the latest family from the shared cell — the outer
                     // Newton loop publishes fresh df/σ²/p/θ here between iters.
                     let family = *family_cell_ref.lock().expect("family_cell mutex poisoned");
+                    let refresh_start = std::time::Instant::now();
                     let res = cache_ref.run_pirls_with_options(
                         y_ref,
                         trial_lambdas,
@@ -1076,6 +1077,7 @@ impl GAM {
                         outer_sigma2_profile,
                         prior_weights_ref,
                     )?;
+                    let elapsed_micros = refresh_start.elapsed().as_micros();
                     callback_pirls_iters += res.iterations;
                     let xtwx = compute_xtwx_dispatch(
                         cache_ref.discrete.as_ref(),
@@ -1091,6 +1093,8 @@ impl GAM {
                         xtwx,
                         sigma2,
                         df,
+                        inner_iterations: res.iterations,
+                        elapsed_micros,
                     })
                 };
                 smoothing_params.optimize_with_beta_xtwx_and_pirls_callback(

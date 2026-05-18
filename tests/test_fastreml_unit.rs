@@ -63,7 +63,12 @@ fn synth_design(n: usize, p: usize, seed: u64) -> Array2<f64> {
 }
 
 /// Synthetic response `y = X β_true + noise`, deterministic.
-fn synth_response(x: &Array2<f64>, beta_true: &Array1<f64>, noise_sd: f64, seed: u64) -> Array1<f64> {
+fn synth_response(
+    x: &Array2<f64>,
+    beta_true: &Array1<f64>,
+    noise_sd: f64,
+    seed: u64,
+) -> Array1<f64> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let n = x.nrows();
     let mu = x.dot(beta_true);
@@ -156,7 +161,18 @@ fn fd_grad_hess(
     let mut hess = Array2::<f64>::zeros((ntot, ntot));
 
     let eval = |rho_pert: &[f64], log_phi_pert: f64| -> f64 {
-        score_at(sl, xx, f, yy, rho_pert, log_phi_pert, nobs, mp, gamma, phi_fixed)
+        score_at(
+            sl,
+            xx,
+            f,
+            yy,
+            rho_pert,
+            log_phi_pert,
+            nobs,
+            mp,
+            gamma,
+            phi_fixed,
+        )
     };
 
     let center = eval(rho, log_phi);
@@ -468,6 +484,7 @@ fn sanity_fastreml_vs_reml_constant_offset() {
             Some(&f),
             mp,
             Family::Gaussian,
+            None,
             None,
         )
         .unwrap();

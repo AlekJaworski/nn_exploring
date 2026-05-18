@@ -7,14 +7,14 @@ use crate::linalg::solve;
 pub use crate::reml::ScaleParameterMethod;
 #[cfg(feature = "blas")]
 use crate::reml::{
-    compute_xtwx_cholesky, gcv_criterion, newton_1d_with_halving, penalty_sqrt, reml_criterion,
-    reml_criterion_multi, reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
-    reml_gradient_gamfit4_tdist_analytic, reml_gradient_mgcv_exact_closed_form,
-    reml_gradient_mgcv_exact_ift, reml_gradient_multi_qr_adaptive,
-    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
-    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
-    reml_joint_gh_gamfit4_tdist_analytic, tweedie_theta_derivatives_cached, ExtraKind, ExtraParam,
-    OuterLinearCache, OuterSearchVector,
+    compute_sl_fitchol_step, compute_xtwx_cholesky, gcv_criterion, newton_1d_with_halving,
+    penalty_sqrt, reml_criterion, reml_criterion_multi, reml_criterion_multi_cached,
+    reml_criterion_multi_cached_mgcv_exact, reml_gradient_gamfit4_tdist_analytic,
+    reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
+    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
+    reml_hessian_gamfit4_tdist_analytic, reml_hessian_mgcv_exact_closed_form,
+    reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached, reml_joint_gh_gamfit4_tdist_analytic,
+    tweedie_theta_derivatives_cached, ExtraKind, ExtraParam, OuterLinearCache, OuterSearchVector,
 };
 #[cfg(not(feature = "blas"))]
 use crate::reml::{gcv_criterion, reml_criterion, reml_criterion_multi, reml_gradient_multi};
@@ -55,6 +55,103 @@ fn use_mgcv_exact_ift_policy(
     }
 
     true
+}
+
+#[cfg(feature = "blas")]
+fn joint_logphi_scaffold_active(family: crate::pirls::Family) -> bool {
+    std::env::var("MGCV_JOINT_LOGPHI").is_ok() && matches!(family, crate::pirls::Family::Gaussian)
+}
+
+#[cfg(feature = "blas")]
+fn weighted_y_y(y: &Array1<f64>, w: &Array1<f64>) -> f64 {
+    y.iter().zip(w.iter()).map(|(&yi, &wi)| wi * yi * yi).sum()
+}
+
+#[cfg(feature = "blas")]
+fn gaussian_logphi_profile_from_system(
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    xtwx: &Array2<f64>,
+    xtwy: &Array1<f64>,
+    log_lambda: &[f64],
+    penalties: &[BlockPenalty],
+    mp: usize,
+) -> Result<f64> {
+    let rho = Array1::from_vec(log_lambda.to_vec());
+    let yy = weighted_y_y(y, w);
+    let out = compute_sl_fitchol_step(
+        penalties,
+        xtwx.view(),
+        xtwy.view(),
+        rho.view(),
+        yy,
+        0.0,
+        true,
+        y.len() as f64,
+        mp,
+        1.0,
+    )?;
+    let dp = (yy - out.beta.dot(xtwy)).max(1.0e-300);
+    let denom = ((y.len() as isize - mp as isize).max(1) as f64).max(1.0);
+    Ok((dp / denom).ln())
+}
+
+#[cfg(feature = "blas")]
+fn gaussian_joint_logphi_gh_from_system(
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    xtwx: &Array2<f64>,
+    xtwy: &Array1<f64>,
+    log_lambda: &[f64],
+    penalties: &[BlockPenalty],
+    log_phi: f64,
+    mp: usize,
+) -> Result<(Array1<f64>, Array2<f64>)> {
+    let rho = Array1::from_vec(log_lambda.to_vec());
+    let yy = weighted_y_y(y, w);
+    let out = compute_sl_fitchol_step(
+        penalties,
+        xtwx.view(),
+        xtwy.view(),
+        rho.view(),
+        yy,
+        log_phi,
+        false,
+        y.len() as f64,
+        mp,
+        1.0,
+    )?;
+    Ok((out.grad, out.hess))
+}
+
+#[cfg(feature = "blas")]
+fn gaussian_joint_logphi_score_from_system(
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    xtwx: &Array2<f64>,
+    xtwy: &Array1<f64>,
+    log_lambda: &[f64],
+    penalties: &[BlockPenalty],
+    log_phi: f64,
+    mp: usize,
+) -> Result<f64> {
+    let rho = Array1::from_vec(log_lambda.to_vec());
+    let yy = weighted_y_y(y, w);
+    let out = compute_sl_fitchol_step(
+        penalties,
+        xtwx.view(),
+        xtwy.view(),
+        rho.view(),
+        yy,
+        log_phi,
+        false,
+        y.len() as f64,
+        mp,
+        1.0,
+    )?;
+    let dp = (yy - out.beta.dot(xtwy)).max(0.0);
+    let phi = log_phi.exp().max(1.0e-300);
+    Ok(0.5 * (dp / phi - out.ldet_s + out.ldet_xxs + (y.len() as f64 - mp as f64) * log_phi))
 }
 
 /// Dispatch to either mgcv-exact REML or default REML based on the
@@ -640,6 +737,9 @@ pub struct SmoothingParameter {
     /// Current log(σ) for Quantile profile-σ. Updated each outer Newton
     /// iteration in the same FD-Newton style as Tweedie p / NegBin θ.
     pub quantile_log_sigma: f64,
+    /// Current `log(phi)` value for the gated joint-logphi scaffold.
+    /// Inactive unless `MGCV_JOINT_LOGPHI=1` and the family is Gaussian.
+    pub log_phi: f64,
     /// Profile-df mode for the scat (TDist) family at the *outer* Newton
     /// level — joint with ρ, à la Tweedie p / NegBin θ. When true, the
     /// outer Newton FD-steps on log(df) after each ρ step using the
@@ -711,6 +811,11 @@ pub struct PirlsRefresh {
     /// the outer family enum in sync so score evaluations see the same df as
     /// the refreshed PIRLS weights/β.
     pub df: Option<f64>,
+    /// Inner PIRLS iterations spent producing this refresh. Used only for
+    /// trace instrumentation; it does not affect scoring or optimizer state.
+    pub inner_iterations: usize,
+    /// Wall time for the inner PIRLS refresh, in microseconds.
+    pub elapsed_micros: u128,
 }
 
 /// Callback type for refreshing PIRLS at trial λ during Newton line search.
@@ -742,6 +847,7 @@ impl SmoothingParameter {
             negbin_log_theta: 2.0_f64.ln(),
             quantile_profile: false,
             quantile_log_sigma: 0.0,
+            log_phi: 0.0,
             tdist_profile: false,
             tdist_log_df: (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
@@ -776,6 +882,7 @@ impl SmoothingParameter {
             negbin_log_theta: 2.0_f64.ln(),
             quantile_profile: false,
             quantile_log_sigma: 0.0,
+            log_phi: 0.0,
             tdist_profile: false,
             tdist_log_df: (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
@@ -810,6 +917,7 @@ impl SmoothingParameter {
             negbin_log_theta: 2.0_f64.ln(),
             quantile_profile: false,
             quantile_log_sigma: 0.0,
+            log_phi: 0.0,
             tdist_profile: false,
             tdist_log_df: (5.0_f64 - crate::family_theta::DEFAULT_MIN_DF).ln(),
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
@@ -833,6 +941,15 @@ impl SmoothingParameter {
     #[cfg(feature = "blas")]
     pub(crate) fn build_outer_search_vector(&self, log_lambda: &[f64]) -> OuterSearchVector {
         let mut extras: Vec<ExtraParam> = Vec::new();
+        if joint_logphi_scaffold_active(self.family) {
+            extras.push(ExtraParam {
+                kind: ExtraKind::LogPhi,
+                value: self.log_phi,
+                lo: f64::NEG_INFINITY,
+                hi: f64::INFINITY,
+                step_cap: 1.0,
+            });
+        }
         if self.tweedie_profile {
             extras.push(ExtraParam {
                 kind: ExtraKind::TweedieTheta,
@@ -881,6 +998,9 @@ impl SmoothingParameter {
     pub(crate) fn commit_outer_search_vector(&mut self, sv: &OuterSearchVector) {
         for extra in sv.extras.iter() {
             match extra.kind {
+                ExtraKind::LogPhi => {
+                    self.log_phi = extra.value;
+                }
                 ExtraKind::TweedieTheta => {
                     self.tweedie_theta = extra.value;
                     let new_p = tweedie_theta_to_p(extra.value)
@@ -1330,9 +1450,23 @@ impl SmoothingParameter {
         // the ρ step; that gap is tracked for a follow-up since their cross
         // terms come from FD, not analytic).
         // -------------------------------------------------------------------
-        let joint_active = self.mgcv_exact_score
+        let joint_logphi_active =
+            self.mgcv_exact_score && joint_logphi_scaffold_active(self.family);
+        if joint_logphi_active {
+            self.log_phi = gaussian_logphi_profile_from_system(
+                &y_local,
+                &w_local,
+                &xtwx_local,
+                &xtwy_local,
+                &log_lambda,
+                penalties,
+                self.mp,
+            )?;
+        }
+        let joint_tdist_active = self.mgcv_exact_score
             && self.tdist_profile
             && matches!(self.family, crate::pirls::Family::TDist { .. });
+        let joint_active = joint_tdist_active || joint_logphi_active;
         let extras_template: Vec<ExtraParam> = if joint_active {
             self.build_outer_search_vector(&log_lambda).extras
         } else {
@@ -1351,6 +1485,7 @@ impl SmoothingParameter {
         // (the extras only cover the working coords we step on; any
         // family-shape param the joint Newton does *not* drive must come
         // from a constant snapshot so the trial family stays consistent).
+        let snapshot_family = self.family;
         let (snapshot_df, snapshot_sigma2) =
             if let crate::pirls::Family::TDist { df, sigma2 } = self.family {
                 (df, sigma2)
@@ -1376,13 +1511,18 @@ impl SmoothingParameter {
                             .max(crate::family_theta::DEFAULT_MIN_DF)
                             .min(100.0_f64);
                     }
+                    ExtraKind::LogPhi => {}
                     // Tweedie / NegBin not yet on the joint path.
                     _ => {}
                 }
             }
-            crate::pirls::Family::TDist {
-                df: df_v,
-                sigma2: sigma2_v,
+            if matches!(snapshot_family, crate::pirls::Family::TDist { .. }) {
+                crate::pirls::Family::TDist {
+                    df: df_v,
+                    sigma2: sigma2_v,
+                }
+            } else {
+                snapshot_family
             }
         };
 
@@ -1400,8 +1540,15 @@ impl SmoothingParameter {
         let armijo_c1 = 0.01;
 
         let mut prev_reml = f64::INFINITY;
+        let trace_pirls_refresh = std::env::var("MGCV_RUST_TRACE_PIRLS_REFRESH").is_ok();
 
         for iter in 0..max_iter {
+            let mut iter_refresh_calls: usize = 0;
+            let mut iter_refresh_inner_iterations: usize = 0;
+            let mut iter_refresh_micros: u128 = 0;
+            let mut iter_line_search_refresh_calls: usize = 0;
+            let mut iter_line_search_inner_iterations: usize = 0;
+            let mut iter_line_search_micros: u128 = 0;
             // Current lambdas
             let lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
 
@@ -1412,6 +1559,17 @@ impl SmoothingParameter {
             // Gaussian (callback=None) skip — W=I, z=y, no refresh needed.
             if let Some(cb) = pirls_callback.as_mut() {
                 let refresh = cb(&lambdas)?;
+                iter_refresh_calls += 1;
+                iter_refresh_inner_iterations += refresh.inner_iterations;
+                iter_refresh_micros += refresh.elapsed_micros;
+                if trace_pirls_refresh {
+                    eprintln!(
+                        "[PIRLS_REFRESH iter={}] phase=outer_start calls=1 inner_iters={} micros={}",
+                        iter + 1,
+                        refresh.inner_iterations,
+                        refresh.elapsed_micros
+                    );
+                }
                 beta_local = Some(refresh.beta);
                 y_local = refresh.working_response;
                 w_local = refresh.weights;
@@ -1442,16 +1600,29 @@ impl SmoothingParameter {
 
             // Compute current REML value for convergence check
             // (dispatches to mgcv-exact formula when mgcv_exact_score=true)
-            let current_reml = dispatch_reml_score(
-                self,
-                &y_local,
-                x,
-                &w_local,
-                &lambdas,
-                penalties,
-                Some(&xtwx_local),
-                Some(&xtwy_local),
-            )?;
+            let current_reml = if joint_logphi_active {
+                gaussian_joint_logphi_score_from_system(
+                    &y_local,
+                    &w_local,
+                    &xtwx_local,
+                    &xtwy_local,
+                    &log_lambda,
+                    penalties,
+                    self.log_phi,
+                    self.mp,
+                )?
+            } else {
+                dispatch_reml_score(
+                    self,
+                    &y_local,
+                    x,
+                    &w_local,
+                    &lambdas,
+                    penalties,
+                    Some(&xtwx_local),
+                    Some(&xtwy_local),
+                )?
+            };
 
             // Compute gradient and Hessian.
             // - Default mode: closed-form QR-based formulas, fast.
@@ -1481,7 +1652,7 @@ impl SmoothingParameter {
             // analytic so the outer Newton step uses cross-terms. Otherwise
             // fall through to the existing per-family closed-form / IFT paths
             // returning M-dim arrays.
-            let joint_gh: Option<(Array1<f64>, Array2<f64>)> = if joint_active {
+            let joint_gh: Option<(Array1<f64>, Array2<f64>)> = if joint_tdist_active {
                 Some(reml_joint_gh_gamfit4_tdist_analytic(
                     &y_local,
                     x,
@@ -1492,6 +1663,17 @@ impl SmoothingParameter {
                     Some(&xtwx_local),
                     self.y_original.as_ref().unwrap_or(&y_local),
                     self.family,
+                )?)
+            } else if joint_logphi_active {
+                Some(gaussian_joint_logphi_gh_from_system(
+                    &y_local,
+                    &w_local,
+                    &xtwx_local,
+                    &xtwy_local,
+                    &log_lambda,
+                    penalties,
+                    self.log_phi,
+                    self.mp,
                 )?)
             } else {
                 None
@@ -2074,6 +2256,15 @@ impl SmoothingParameter {
                 } else {
                     Vec::new()
                 };
+                let trial_log_phi = if joint_logphi_active {
+                    extras_kinds
+                        .iter()
+                        .position(|&kind| kind == ExtraKind::LogPhi)
+                        .map(|idx| new_extras[idx])
+                        .unwrap_or(self.log_phi)
+                } else {
+                    self.log_phi
+                };
                 if joint_active && k_extras > 0 {
                     let trial_fam = trial_family_for_extras(&new_extras);
                     self.family = trial_fam;
@@ -2092,18 +2283,46 @@ impl SmoothingParameter {
                 // gam.fit3.r:1444, 1500-1504, 1571-1576.
                 let trial_eval = if let Some(cb) = pirls_callback.as_mut() {
                     match cb(&new_lambdas) {
-                        Ok(refresh) => dispatch_reml_score(
-                            self,
-                            &refresh.working_response,
-                            x,
-                            &refresh.weights,
-                            &new_lambdas,
-                            penalties,
-                            Some(&refresh.xtwx),
-                            None,
-                        ),
+                        Ok(refresh) => {
+                            iter_refresh_calls += 1;
+                            iter_refresh_inner_iterations += refresh.inner_iterations;
+                            iter_refresh_micros += refresh.elapsed_micros;
+                            iter_line_search_refresh_calls += 1;
+                            iter_line_search_inner_iterations += refresh.inner_iterations;
+                            iter_line_search_micros += refresh.elapsed_micros;
+                            if trace_pirls_refresh {
+                                eprintln!(
+                                    "[PIRLS_REFRESH iter={}] phase=line_search half={} inner_iters={} micros={}",
+                                    iter + 1,
+                                    half,
+                                    refresh.inner_iterations,
+                                    refresh.elapsed_micros
+                                );
+                            }
+                            dispatch_reml_score(
+                                self,
+                                &refresh.working_response,
+                                x,
+                                &refresh.weights,
+                                &new_lambdas,
+                                penalties,
+                                Some(&refresh.xtwx),
+                                None,
+                            )
+                        }
                         Err(e) => Err(e),
                     }
+                } else if joint_logphi_active {
+                    gaussian_joint_logphi_score_from_system(
+                        &y_local,
+                        &w_local,
+                        &xtwx_local,
+                        &xtwy_local,
+                        &new_log_lambda,
+                        penalties,
+                        trial_log_phi,
+                        self.mp,
+                    )
                 } else {
                     dispatch_reml_score(
                         self,
@@ -2208,6 +2427,19 @@ impl SmoothingParameter {
                     best_reml,
                     accepted,
                     reason
+                );
+            }
+            if trace_pirls_refresh {
+                eprintln!(
+                    "[PIRLS_REFRESH iter={}] summary calls={} inner_iters={} micros={} line_search_calls={} line_search_inner_iters={} line_search_micros={} halvings={}",
+                    iter + 1,
+                    iter_refresh_calls,
+                    iter_refresh_inner_iterations,
+                    iter_refresh_micros,
+                    iter_line_search_refresh_calls,
+                    iter_line_search_inner_iterations,
+                    iter_line_search_micros,
+                    halvings_attempted
                 );
             }
 
@@ -2324,16 +2556,26 @@ impl SmoothingParameter {
                     // refresh PIRLS at the SD trial λ.
                     let sd_eval = if let Some(cb) = pirls_callback.as_mut() {
                         match cb(&new_lambdas_sd) {
-                            Ok(refresh) => dispatch_reml_score(
-                                self,
-                                &refresh.working_response,
-                                x,
-                                &refresh.weights,
-                                &new_lambdas_sd,
-                                penalties,
-                                Some(&refresh.xtwx),
-                                None,
-                            ),
+                            Ok(refresh) => {
+                                if trace_pirls_refresh {
+                                    eprintln!(
+                                        "[PIRLS_REFRESH iter={}] phase=steepest_descent inner_iters={} micros={}",
+                                        iter + 1,
+                                        refresh.inner_iterations,
+                                        refresh.elapsed_micros
+                                    );
+                                }
+                                dispatch_reml_score(
+                                    self,
+                                    &refresh.working_response,
+                                    x,
+                                    &refresh.weights,
+                                    &new_lambdas_sd,
+                                    penalties,
+                                    Some(&refresh.xtwx),
+                                    None,
+                                )
+                            }
                             Err(e) => Err(e),
                         }
                     } else {
@@ -2594,6 +2836,23 @@ impl SmoothingParameter {
                         eprintln!(
                             "[PROFILE]   NB profile-θ: log_θ {:.4}→{:.4} θ={:.4} dlr/d(log_θ)={:.4e}",
                             log_theta, accepted_lt, new_theta, dlr_dlt
+                        );
+                    }
+                    if std::env::var("MGCV_RUST_TRACE_NB").is_ok() {
+                        let accepted_step = accepted_lt - log_theta;
+                        eprintln!(
+                            "[NB_TRACE iter={}] log_sp={:?} sp={:?} REML={:.10} log_theta={:.10} theta={:.10} grad_log_theta={:.6e} hess_log_theta={:.6e} accepted_log_theta={:.10} accepted_theta={:.10} accepted_step={:.6e}",
+                            iter + 1,
+                            log_lambda,
+                            current_lambdas,
+                            rc,
+                            log_theta,
+                            log_theta.exp().max(0.5_f64).min(50.0_f64),
+                            dlr_dlt,
+                            d2lr_dlt2,
+                            accepted_lt,
+                            new_theta,
+                            accepted_step
                         );
                     }
                 }
@@ -3113,6 +3372,137 @@ mod tests {
         let sp = SmoothingParameter::new(2, OptimizationMethod::REML);
         assert_eq!(sp.lambda.len(), 2);
         assert_eq!(sp.lambda[0], 0.1); // Updated to match current default
+    }
+
+    #[cfg(feature = "blas")]
+    #[test]
+    fn test_joint_logphi_scaffold_gate_and_round_trip() {
+        let mut sp = SmoothingParameter::new(2, OptimizationMethod::REML);
+        sp.family = crate::pirls::Family::Gaussian;
+        sp.log_phi = -0.25;
+
+        std::env::remove_var("MGCV_JOINT_LOGPHI");
+        let sv_off = sp.build_outer_search_vector(&[0.0, 1.0]);
+        assert_eq!(sv_off.dim(), 2);
+        assert!(sv_off.find_kind(ExtraKind::LogPhi).is_none());
+
+        std::env::set_var("MGCV_JOINT_LOGPHI", "1");
+        let mut sv = sp.build_outer_search_vector(&[0.0, 1.0]);
+        std::env::remove_var("MGCV_JOINT_LOGPHI");
+
+        assert_eq!(sv.dim(), 3);
+        assert_eq!(sv.log_lambda, vec![0.0, 1.0]);
+        let idx = sv.find_kind(ExtraKind::LogPhi).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(sv.extras[idx].value, -0.25);
+
+        sv.extras[idx].value = 0.5;
+        sp.commit_outer_search_vector(&sv);
+        assert_eq!(sp.lambda, vec![0.1, 0.1]);
+        assert_eq!(sp.log_phi, 0.5);
+    }
+
+    #[cfg(feature = "blas")]
+    #[test]
+    fn test_gaussian_joint_logphi_analytic_block_identities() {
+        use crate::block_penalty::BlockPenalty;
+
+        let y = Array1::from_vec(vec![1.0, 1.5, 2.0, 2.6, 3.1, 3.7]);
+        let x = Array2::from_shape_vec(
+            (6, 3),
+            vec![
+                1.0, -1.0, 1.0, 1.0, -0.6, 0.36, 1.0, -0.2, 0.04, 1.0, 0.2, 0.04, 1.0, 0.6, 0.36,
+                1.0, 1.0, 1.0,
+            ],
+        )
+        .unwrap();
+        let w = Array1::ones(6);
+        let xtwx = x.t().dot(&x);
+        let xtwy = x.t().dot(&y);
+        let penalty = BlockPenalty::new(
+            Array2::from_diag(&Array1::from_vec(vec![0.0, 1.0, 1.0])),
+            0,
+            3,
+        );
+        let penalties = vec![penalty];
+        let log_lambda = vec![0.2_f64];
+        let mp = 1_usize;
+        let log_phi =
+            gaussian_logphi_profile_from_system(&y, &w, &xtwx, &xtwy, &log_lambda, &penalties, mp)
+                .unwrap();
+
+        let (g_joint, h_joint) = gaussian_joint_logphi_gh_from_system(
+            &y,
+            &w,
+            &xtwx,
+            &xtwy,
+            &log_lambda,
+            &penalties,
+            log_phi,
+            mp,
+        )
+        .unwrap();
+        let (g_rho, h_rho) = gaussian_joint_logphi_gh_from_system(
+            &y,
+            &w,
+            &xtwx,
+            &xtwy,
+            &log_lambda,
+            &penalties,
+            log_phi,
+            mp,
+        )
+        .unwrap();
+
+        assert_eq!(g_joint.len(), 2);
+        assert_eq!(h_joint.dim(), (2, 2));
+        assert!((h_joint[[0, 1]] - h_joint[[1, 0]]).abs() < 1e-12);
+        assert!((g_joint[0] - g_rho[0]).abs() < 1e-12);
+        assert!((h_joint[[0, 0]] - h_rho[[0, 0]]).abs() < 1e-12);
+
+        // For the analytic log(phi) block:
+        // grad_s = -Dp/(2 phi) + (n - Mp)/2, hess_ss = Dp/(2 phi).
+        // Their sum is therefore exactly (n - Mp)/2 at fixed rho.
+        let expected = (y.len() as f64 - mp as f64) * 0.5;
+        assert!((g_joint[1] + h_joint[[1, 1]] - expected).abs() < 1e-10);
+    }
+
+    #[cfg(feature = "blas")]
+    #[test]
+    fn test_gaussian_joint_logphi_gated_optimizer_smoke() {
+        use crate::block_penalty::BlockPenalty;
+
+        std::env::set_var("MGCV_JOINT_LOGPHI", "1");
+        let n = 24;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
+            let t = -1.0 + 2.0 * (i as f64) / ((n - 1) as f64);
+            match j {
+                0 => 1.0,
+                1 => t,
+                _ => t * t,
+            }
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            let t = -1.0 + 2.0 * (i as f64) / ((n - 1) as f64);
+            1.0 + 0.4 * t + 0.2 * t * t
+        });
+        let w = Array1::ones(n);
+        let penalty = BlockPenalty::new(
+            Array2::from_diag(&Array1::from_vec(vec![0.0, 1.0, 1.0])),
+            0,
+            3,
+        );
+        let penalties = vec![penalty];
+        let mut sp = SmoothingParameter::new(1, OptimizationMethod::REML);
+        sp.mgcv_exact_score = true;
+        sp.family = crate::pirls::Family::Gaussian;
+        sp.mp = 1;
+        let res = sp.optimize_with_beta(&y, &x, &w, &penalties, 4, 1e-7, None);
+        std::env::remove_var("MGCV_JOINT_LOGPHI");
+
+        assert!(res.is_ok());
+        assert!(sp.lambda[0].is_finite() && sp.lambda[0] > 0.0);
+        assert!(sp.log_phi.is_finite());
     }
 
     #[test]

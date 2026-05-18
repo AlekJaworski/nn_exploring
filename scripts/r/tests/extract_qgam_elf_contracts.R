@@ -79,6 +79,39 @@ payload <- list(
   )
 )
 
+# Diagnostic-only nat.param / diagonal.penalty snapshot for the production
+# fixed-sp fixture. This is intentionally not consumed by production code; it
+# freezes qgam's penalty-coordinate objects before the ELF Newton work starts.
+sale_dir <- file.path(repo_root, "data", "sale_price_fixtures")
+train_path <- file.path(sale_dir, "entire_dataset_train.parquet")
+mean_path <- file.path(sale_dir, "mgcv_rust_parity", "mean_gam_entire_dataset.parquet")
+if (requireNamespace("arrow", quietly = TRUE) && file.exists(train_path) && file.exists(mean_path)) {
+  train_df <- as.data.frame(arrow::read_parquet(train_path))
+  mean_ref <- as.data.frame(arrow::read_parquet(mean_path))
+  train_df$resid <- mean_ref$y - mean_ref$pred_prod
+  k_map <- list(
+    days_in_current_price_regime = 5L,
+    cum_dom_before_current_regime = 5L,
+    price_change_pct_from_original = 5L,
+    monthly_index = 5L
+  )
+  form <- resid ~ s(days_in_current_price_regime, k = 5, bs = "cr") +
+    s(cum_dom_before_current_regime, k = 5, bs = "cr") +
+    s(price_change_pct_from_original, k = 5, bs = "cr") +
+    s(monthly_index, k = 5, bs = "cr")
+  qfit <- qgam::qgam(form, data = train_df, qu = tau, lsig = theta, err = co)
+  payload$production_natparam <- list(
+    source = "qgam production fixed-sp nat.param / diagonal.penalty diagnostic",
+    n = nrow(train_df),
+    k = k_map,
+    sp = as.numeric(qfit$sp),
+    min_sp = as.numeric(qfit$min.sp),
+    coefficients = as.numeric(coef(qfit)),
+    diagonal_penalty = if (!is.null(qfit$diagonal.penalty)) as.numeric(qfit$diagonal.penalty) else NULL,
+    nat_param = if (!is.null(qfit$nat.param)) as.numeric(qfit$nat.param) else NULL
+  )
+}
+
 dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
 write_json(payload, out_path, auto_unbox = TRUE, pretty = TRUE, digits = 17)
 cat(sprintf("Wrote %s\n", out_path))

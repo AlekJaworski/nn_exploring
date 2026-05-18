@@ -2888,6 +2888,24 @@ fn fit_pirls_quantile_impl(
         };
         (sigma_auto, lambda_auto)
     };
+    // Penalised ELF deviance: sum_i deviance_i(beta) + beta' S beta.
+    // Used by the backtracking guard below to prevent the sharp-sigma
+    // fixed-sp path from accepting a full Newton step that collapses weights.
+    let elf_pen_deviance = |b: &Array1<f64>| -> f64 {
+        let eta_t = x.dot(b);
+        let mut total = 0.0_f64;
+        for i in 0..n {
+            let d = quantile_elf_parts(y[i], eta_t[i], tau, sigma, lambda_elf).deviance;
+            if !d.is_finite() {
+                return f64::INFINITY;
+            }
+            total += d;
+        }
+        let sb = penalty_total.dot(b);
+        let pen: f64 = b.iter().zip(sb.iter()).map(|(&bi, &sbi)| bi * sbi).sum();
+        total + pen
+    };
+    let mut obj_cur = elf_pen_deviance(&beta);
     let mut converged = false;
     let mut iter = 0;
 
@@ -2936,14 +2954,43 @@ fn fit_pirls_quantile_impl(
             .collect();
         let xt_rhs = x.t().dot(&weta_plus_g);
 
-        let beta_old = beta.clone();
-        beta = solve(a, xt_rhs)?;
+        let beta_proposed = solve(a, xt_rhs)?;
 
-        let max_change = beta
+        // Armijo-style backtracking on the penalised ELF objective. This was
+        // the fixed-sp qgam parity stabiliser: at q95 with tiny sigma, the full
+        // IRLS step can overshoot into saturation and diverge on the next solve.
+        let direction: Vec<f64> = beta_proposed
             .iter()
-            .zip(beta_old.iter())
+            .zip(beta.iter())
+            .map(|(&bn, &bo)| bn - bo)
+            .collect();
+        let mut alpha = 1.0_f64;
+        let mut accepted = false;
+        let mut beta_new = beta.clone();
+        let mut obj_new = obj_cur;
+        for _ in 0..20 {
+            for j in 0..p {
+                beta_new[j] = beta[j] + alpha * direction[j];
+            }
+            obj_new = elf_pen_deviance(&beta_new);
+            if obj_new.is_finite() && obj_new <= obj_cur + 1.0e-10 {
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if !accepted {
+            converged = true;
+            break;
+        }
+
+        let max_change = beta_new
+            .iter()
+            .zip(beta.iter())
             .map(|(b, b_old)| (b - b_old).abs())
             .fold(0.0f64, f64::max);
+        beta = beta_new;
+        obj_cur = obj_new;
 
         if max_change < tolerance {
             converged = true;

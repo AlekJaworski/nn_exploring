@@ -9,6 +9,8 @@
 /// `log φ`, Quantile `log σ`, ocat thresholds) plug into the same harness.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExtraKind {
+    /// Gaussian / dispersion-family `log(phi)` — gated scaffold only.
+    LogPhi,
     /// Tweedie working parameter θ (mgcv convention, a=1.001 b=1.999).
     TweedieTheta,
     /// NegBin `log θ` — log-space enforces θ > 0.

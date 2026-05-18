@@ -71,6 +71,54 @@ def _gen_4d_mixed(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndar
     return x, y
 
 
+def _gen_4d_correlated(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Correlated feature case for one-feature extrapolation slices.
+
+    The additive truth uses four smooth-ish marginal effects, but the training
+    design is strongly correlated. This stresses the production use case where
+    a 1D slice moves one feature out of range while other correlated features
+    are held fixed at anchors.
+    """
+    x0 = rng.uniform(0.0, 1.0, n)
+    x1 = np.clip(0.10 + 0.82 * x0 + rng.normal(0.0, 0.055, n), 0.0, 1.0)
+    x2 = np.clip(0.72 - 0.52 * x0 + 0.25 * x1 + rng.normal(0.0, 0.06, n), 0.0, 1.0)
+    x3 = np.clip(0.18 + 0.62 * x1 + rng.normal(0.0, 0.08, n), 0.0, 1.0)
+    x = np.column_stack([x0, x1, x2, x3])
+    y = (
+        0.8 * np.sin(2.0 * np.pi * x0)
+        + 0.45 * np.cos(1.5 * np.pi * x1)
+        + 0.35 * (x2 - 0.45) ** 2
+        + 0.25 * x3
+        + rng.normal(0.0, 0.12, n)
+    )
+    return x, y
+
+
+def _extrap_one_dim_correlated_slices(
+    _rng: np.random.Generator,
+    x_train: np.ndarray,
+    _n_extrap: int,
+) -> np.ndarray:
+    """Block layout: for each dim, low / in-domain / high 1D slice blocks."""
+    anchors = np.median(x_train, axis=0)
+    x_min = x_train.min(axis=0)
+    x_max = x_train.max(axis=0)
+    span = np.maximum(x_max - x_min, 1e-6)
+    rows: list[np.ndarray] = []
+    n_grid = 9
+    for dim in range(x_train.shape[1]):
+        grids = [
+            np.linspace(x_min[dim] - 0.25 * span[dim], x_min[dim] - 0.03 * span[dim], n_grid),
+            np.linspace(x_min[dim], x_max[dim], n_grid),
+            np.linspace(x_max[dim] + 0.03 * span[dim], x_max[dim] + 0.25 * span[dim], n_grid),
+        ]
+        for grid in grids:
+            block = np.tile(anchors, (n_grid, 1))
+            block[:, dim] = grid
+            rows.append(block)
+    return np.vstack(rows)
+
+
 def _gen_binomial_logit(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
     x = rng.uniform(0.0, 1.0, (n, 2))
     eta = 2.0 * np.sin(2 * np.pi * x[:, 0]) + 1.5 * (x[:, 1] - 0.5)
@@ -561,6 +609,7 @@ class Case:
     generator: Callable[[np.random.Generator, int], tuple[np.ndarray, np.ndarray]]
     n_test: int = 100      # held-out, in-range
     n_extrap: int = 20     # extrapolation, just outside [x_min, x_max]
+    extrap_fn: Optional[Callable[[np.random.Generator, np.ndarray, int], np.ndarray]] = None
     # Deterministic per-row prior weights, computed from (rng, x_train) at
     # realize() time. None ⇒ unweighted (the default). The generator and
     # harness both honour the realized weights end-to-end so parity
@@ -575,15 +624,18 @@ class Case:
         # Held-out: same distribution as training
         x_test, _ = self.generator(rng, self.n_test)
 
-        # Extrapolation: just outside the training x range, per dimension
-        x_min = x_train.min(axis=0)
-        x_max = x_train.max(axis=0)
-        margin = 0.1 * (x_max - x_min)
-        # Half on the low side, half on the high side, evenly per dim
-        n_per_side = self.n_extrap // 2
-        low = rng.uniform(x_min - margin, x_min - 1e-3, (n_per_side, self.d))
-        high = rng.uniform(x_max + 1e-3, x_max + margin, (self.n_extrap - n_per_side, self.d))
-        x_extrap = np.vstack([low, high])
+        if self.extrap_fn is not None:
+            x_extrap = self.extrap_fn(rng, x_train, self.n_extrap)
+        else:
+            # Extrapolation: just outside the training x range, per dimension
+            x_min = x_train.min(axis=0)
+            x_max = x_train.max(axis=0)
+            margin = 0.1 * (x_max - x_min)
+            # Half on the low side, half on the high side, evenly per dim
+            n_per_side = self.n_extrap // 2
+            low = rng.uniform(x_min - margin, x_min - 1e-3, (n_per_side, self.d))
+            high = rng.uniform(x_max + 1e-3, x_max + margin, (self.n_extrap - n_per_side, self.d))
+            x_extrap = np.vstack([low, high])
 
         weights = None
         if self.weights_fn is not None:
@@ -684,6 +736,15 @@ CASES: list[Case] = [
         seed=42, n=1000, d=4, k=[10, 10, 10, 10], bs=["cr"] * 4,
         family="gaussian", link="identity", method="REML",
         generator=_gen_4d_mixed,
+    ),
+    Case(
+        name="4d_gaussian_correlated_extrap_slices_n800_k10_cr",
+        description="4D correlated features with one-feature extrapolation slice blocks",
+        seed=59, n=800, d=4, k=[10, 10, 10, 10], bs=["cr"] * 4,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_4d_correlated,
+        n_extrap=108,
+        extrap_fn=_extrap_one_dim_correlated_slices,
     ),
 
     # ---- Non-Gaussian families ----------------------------------------
