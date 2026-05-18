@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "mgcv_rust"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "approx",
  "lapack-sys",

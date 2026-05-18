@@ -25,6 +25,7 @@ import tempfile
 import os
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from mgcv_rust import GAMFitter
@@ -49,6 +50,36 @@ def _make_tdist_data(
     y = true_signal + noise
     X = x.reshape(-1, 1)
     return X, y, true_signal
+
+
+def _make_degenerate_sale_price_fixture(
+    n_listings: int = 20,
+    obs_per_listing: int = 5,
+) -> pd.DataFrame:
+    rows = []
+    for i in range(n_listings):
+        for j in range(obs_per_listing):
+            idx = i * obs_per_listing + j
+            price_change_bucket = (i + j) % 12
+            rows.append(
+                {
+                    "listing_number": f"L{i:02d}",
+                    "current_list_price": 400_000 + i * 10_000 + j * 1_000,
+                    "price_change_pct_from_original": 0.0
+                    if price_change_bucket == 0
+                    else 9.6 - 0.8 * price_change_bucket,
+                    "cum_dom_before_current_regime": (2 * i + j) % 45,
+                    "days_in_current_price_regime": 7 * j,
+                    "monthly_index": -(i // 5 + 1),
+                    "at_least_1_price_drop": int(i % 3 == 0),
+                    "at_least_2_price_drops": int(i % 5 == 0),
+                    "at_least_3_price_drops": int(i % 7 == 0),
+                    "sale_to_list_price_ratio": 0.88 + (idx % 15) * 0.01,
+                    "n_obs": obs_per_listing,
+                    "weight": 1.0 / obs_per_listing,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------------ #
@@ -122,6 +153,83 @@ def test_tdist_fixed_df():
     assert corr_between > 0.9, (
         f"Fixed-df and profiled-df predictions correlate at {corr_between:.4f} < 0.9"
     )
+
+
+@pytest.mark.parametrize(
+    ("n_listings", "obs_per_listing", "expected_unique"),
+    [
+        (20, 5, {"monthly_index": 4, "days_in_current_price_regime": 5}),
+        (10, 5, {"monthly_index": 2, "days_in_current_price_regime": 5}),
+        (25, 4, {"monthly_index": 5, "days_in_current_price_regime": 4}),
+        (50, 3, {"monthly_index": 10, "days_in_current_price_regime": 3}),
+    ],
+)
+def test_tdist_freml_degenerate_worker_fixture_fits(
+    n_listings: int,
+    obs_per_listing: int,
+    expected_unique: dict[str, int],
+):
+    """Tiny deterministic scat+bam-shaped fixtures should retry Fisher safely.
+
+    This mirrors the sale_price_prediction synthetic worker tests that exposed
+    an internal `Sl.fitChol` failure: observed-info t weights made the first
+    fREML linear system too indefinite before the existing candidate-level retry
+    ladder could inspect it.
+    """
+    df = _make_degenerate_sale_price_fixture(n_listings, obs_per_listing)
+    smooths = [
+        "current_list_price",
+        "price_change_pct_from_original",
+        "cum_dom_before_current_regime",
+        "days_in_current_price_regime",
+        "monthly_index",
+    ]
+    parametric = [
+        "at_least_1_price_drop",
+        "at_least_2_price_drops",
+        "at_least_3_price_drops",
+    ]
+    predictors = smooths + parametric
+    assert df["current_list_price"].nunique() == n_listings * obs_per_listing
+    assert df["price_change_pct_from_original"].nunique() == 12
+    assert df["cum_dom_before_current_regime"].nunique() == min(
+        45,
+        2 * n_listings + obs_per_listing - 2,
+    )
+    for name, n_unique in expected_unique.items():
+        assert df[name].nunique() == n_unique
+    for name in parametric:
+        assert df[name].nunique() == 2
+    assert df["sale_to_list_price_ratio"].nunique() == 15
+
+    gam = GAMFitter(
+        predictors=predictors,
+        target="sale_to_list_price_ratio",
+        family="t-dist",
+        method="fREML",
+        discrete=True,
+        term_k_mapping={
+            "current_list_price": 7,
+            "price_change_pct_from_original": 7,
+            "cum_dom_before_current_regime": 7,
+            "days_in_current_price_regime": 5,
+            "monthly_index": 4,
+        },
+        predictor_basis_map={
+            **{name: "cr" for name in smooths},
+            **{name: "parametric" for name in parametric},
+        },
+    )
+    gam.fit(
+        df[predictors],
+        df["sale_to_list_price_ratio"].to_numpy(),
+        sample_weight=df["weight"].to_numpy(),
+    )
+    pred = gam.predict(df[predictors])
+
+    assert np.all(np.isfinite(pred))
+    assert pred.min() > 0.5
+    assert pred.max() < 1.5
 
 
 # ------------------------------------------------------------------ #

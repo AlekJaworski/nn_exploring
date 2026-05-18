@@ -4296,7 +4296,6 @@ pub fn fit_pirls_fastreml(
         // families we use exp_family_irls_step.
         let eta = fastreml_compute_eta(x, discrete, &beta);
         let (mut w, mut z) = fastreml_irls_step(y, &eta, prior_weights, family);
-
         // ─── C9: form X'WX, X'Wz, y_w_y (here z'Wz) (bam.r:657-659). ────────
         let (mut xx, mut f, mut yy) = {
             let xx = compute_xtwx_dispatch(discrete, x, &w);
@@ -4307,7 +4306,7 @@ pub fn fit_pirls_fastreml(
 
         // ─── C12: B3 closed-form step on (ρ, log φ). ───────────────────────
         let rho_arr = Array1::from_vec(rho.clone());
-        let mut proposal = compute_sl_fitchol_step(
+        let proposal_result = compute_sl_fitchol_step(
             sl,
             xx.view(),
             f.view(),
@@ -4318,7 +4317,56 @@ pub fn fit_pirls_fastreml(
             n as f64,
             mp,
             config.gamma,
-        )?;
+        );
+        let mut proposal = match proposal_result {
+            Ok(prop) => prop,
+            Err(err) if matches!(family, Family::TDist { .. }) => {
+                // Same retry ladder as below, but for failures that happen
+                // inside Sl.fitChol before a candidate can be returned. This
+                // occurs on tiny/degenerate scat fixtures where observed-info
+                // weights make X'WX too indefinite for the rank-revealing solve.
+                let (w_f, z_f) = fastreml_irls_step_with_mode(
+                    y,
+                    &eta,
+                    prior_weights,
+                    family,
+                    /*force_fisher=*/ true,
+                );
+                let xx_f = compute_xtwx_dispatch(discrete, x, &w_f);
+                let f_f = compute_xtwy_dispatch(discrete, x, &w_f, &z_f);
+                let yy_f: f64 = w_f
+                    .iter()
+                    .zip(z_f.iter())
+                    .map(|(&wi, &zi)| wi * zi * zi)
+                    .sum();
+                let prop_f = compute_sl_fitchol_step(
+                    sl,
+                    xx_f.view(),
+                    f_f.view(),
+                    rho_arr.view(),
+                    yy_f,
+                    log_phi,
+                    config.phi_fixed,
+                    n as f64,
+                    mp,
+                    config.gamma,
+                )
+                .map_err(|retry_err| {
+                    GAMError::OptimizationFailed(format!(
+                        "fit_pirls_fastreml: Sl.fitChol failed at outer iter {} \
+                         with observed-info weights ({}) and Fisher retry ({})",
+                        outer, err, retry_err
+                    ))
+                })?;
+                w = w_f;
+                z = z_f;
+                xx = xx_f;
+                f = f_f;
+                yy = yy_f;
+                prop_f
+            }
+            Err(err) => return Err(err),
+        };
 
         // ─── C12b: candidate-retry ladder (2026-05-14 handoff design) ───────
         // Observed-info IRLS can produce a genuinely indefinite X'WX when

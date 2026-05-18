@@ -882,6 +882,11 @@ fn clamped_newton_step(grad: &Array1<f64>, hess: &Array2<f64>) -> Result<Array1<
     if n == 0 {
         return Ok(Array1::<f64>::zeros(0));
     }
+    if grad.iter().any(|v| !v.is_finite()) {
+        return Err(crate::GAMError::InvalidParameter(
+            "clamped_newton_step: non-finite gradient".to_string(),
+        ));
+    }
     // Symmetrise to feed `eigh` cleanly (mgcv passes `reml2` directly).
     let h_sym = {
         let mut h = hess.clone();
@@ -894,6 +899,12 @@ fn clamped_newton_step(grad: &Array1<f64>, hess: &Array2<f64>) -> Result<Array1<
         }
         h
     };
+    if h_sym.iter().any(|v| !v.is_finite()) {
+        return Err(crate::GAMError::InvalidParameter(
+            "clamped_newton_step: non-finite Hessian".to_string(),
+        ));
+    }
+
     let (eigvals, eigvecs) = h_sym.eigh(ndarray_linalg::UPLO::Upper).map_err(|e| {
         crate::GAMError::InvalidParameter(format!(
             "clamped_newton_step: eigendecomposition failed: {:?}",
