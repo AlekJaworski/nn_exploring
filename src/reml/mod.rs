@@ -524,6 +524,9 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
 #[cfg(feature = "blas")]
 pub struct OuterLinearCache<'a> {
     pub y_for_ls: &'a Array1<f64>,
+    pub x: &'a Array2<f64>,
+    pub lambdas: Vec<f64>,
+    pub penalties: &'a [BlockPenalty],
     pub fitted: Array1<f64>,
     pub bsb: f64,
     pub log_det_h: f64,
@@ -558,11 +561,11 @@ impl<'a> OuterLinearCache<'a> {
     /// across all trial θ values during the outer θ-Newton FD step.
     pub fn build(
         y_local: &Array1<f64>,
-        x: &Array2<f64>,
+        x: &'a Array2<f64>,
         w_local: &Array1<f64>,
         xtwx_local: &Array2<f64>,
         lambdas: &[f64],
-        penalties: &[BlockPenalty],
+        penalties: &'a [BlockPenalty],
         mp: usize,
         y_for_ls: &'a Array1<f64>,
     ) -> Result<Self> {
@@ -594,6 +597,9 @@ impl<'a> OuterLinearCache<'a> {
         let log_det_s = log_lambda_sum + log_pseudo_det_sum;
         Ok(OuterLinearCache {
             y_for_ls,
+            x,
+            lambdas: lambdas.to_vec(),
+            penalties,
             fitted: system.fitted(x).clone(),
             bsb,
             log_det_h,
@@ -628,7 +634,23 @@ impl<'a> OuterLinearCache<'a> {
         let scale_est = family.estimate_phi_mgcv(self.y_for_ls, dp, self.mp, 1.0, phi_init);
         let ls1 = family.saturated_log_likelihood(self.y_for_ls, scale_est);
         let formula = family.score_formula();
-        Ok(formula.assemble(dp, ls1, self.log_det_h, self.log_det_s, scale_est, self.mp))
+        let log_det_h = if family.is_canonical_link() {
+            self.log_det_h
+        } else {
+            let w_score =
+                crate::pirls::compute_newton_score_weights(self.y_for_ls, &self.fitted, family);
+            if w_score.iter().any(|w| !w.is_finite()) {
+                self.log_det_h
+            } else {
+                let xtwx_score = compute_xtwx_dispatch(None, self.x, &w_score);
+                let mut a_score = xtwx_score;
+                for (lambda, penalty) in self.lambdas.iter().zip(self.penalties.iter()) {
+                    penalty.scaled_add_to(&mut a_score, *lambda);
+                }
+                crate::linalg::log_abs_det_symmetric(&a_score).unwrap_or(self.log_det_h)
+            }
+        };
+        Ok(formula.assemble(dp, ls1, log_det_h, self.log_det_s, scale_est, self.mp))
     }
 
     /// Tweedie-specific convenience wrapper around `score_at_theta`.
