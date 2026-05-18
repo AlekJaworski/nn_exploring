@@ -753,27 +753,57 @@ fn reml_gradient_mgcv_exact_closed_form_inner(
 ) -> Result<Array1<f64>> {
     let n = y.len();
     let m = lambdas.len();
+    // Optional internal reparametrisation (MGCV_REPARAM=1). This mirrors
+    // `reml_criterion_multi_cached_mgcv_exact` and the IFT path so closed-form
+    // diagnostic gradients compare in the same numerically stable basis.
+    let p = x.ncols();
+    let rot_state = if std::env::var("MGCV_REPARAM").is_ok() {
+        let (u1, mp_detected) = crate::reparam::compute_total_penalty_space(penalties_blocks, p)?;
+        let rot = crate::reparam::apply_reparam(x, penalties_blocks, lambdas, &u1, mp_detected, 0)?;
+        let rotated_pens: Vec<BlockPenalty> = rot
+            .rs_rot
+            .iter()
+            .map(|rs| BlockPenalty::new(rs.dot(&rs.t()), 0, p))
+            .collect();
+        Some((rot.x_rot, rotated_pens))
+    } else {
+        None
+    };
+    let (x_use, pens_use): (&Array2<f64>, &[BlockPenalty]) = match &rot_state {
+        Some((x_rot, pens_rot)) => (x_rot, pens_rot.as_slice()),
+        None => (x, penalties_blocks),
+    };
+    let cached_xtwx = if rot_state.is_some() {
+        None
+    } else {
+        cached_xtwx
+    };
+    let cached_xtwy = if rot_state.is_some() {
+        None
+    } else {
+        cached_xtwy
+    };
     let xtwx_owned;
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx_dispatch(None, x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x_use, w);
         &xtwx_owned
     };
 
-    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks, cached_xtwy)?;
+    let system = assemble_reml_system(y, x_use, w, xtwx, lambdas, pens_use, cached_xtwy)?;
 
     // RSS / σ² — same working-RSS approximation as the score function
     // for non-Gaussian (see comment there). Family is plumbed through
     // for future use but not branched on yet.
     let _ = family;
-    let parts = RemlScoreParts::gaussian_only(&system, y, w, x, xtwx, n, fixed_scale);
+    let parts = RemlScoreParts::gaussian_only(&system, y, w, x_use, xtwx, n, fixed_scale);
     let a_inv = &system.a_inv;
     let scale_est = parts.sigma2;
 
     // Per-smooth gradient
     let mut grad = Array1::<f64>::zeros(m);
-    for (j, (lambda, penalty)) in lambdas.iter().zip(penalties_blocks.iter()).enumerate() {
+    for (j, (lambda, penalty)) in lambdas.iter().zip(pens_use.iter()).enumerate() {
         // β' S_j β = quadratic_form on the smooth's block
         let bsb_j = penalty.quadratic_form(&system.beta);
         // tr(A^-1 S_j) — only the smooth's block contributes
@@ -830,18 +860,48 @@ pub fn reml_hessian_mgcv_exact_closed_form(
 ) -> Result<Array2<f64>> {
     let n = y.len();
     let m = lambdas.len();
+    // Optional internal reparametrisation (MGCV_REPARAM=1). Keep the
+    // closed-form Hessian in the same rotated basis as the criterion and IFT
+    // Hessian; cached raw-basis X'WX/X'Wy are invalid after rotation.
+    let p = x.ncols();
+    let rot_state = if std::env::var("MGCV_REPARAM").is_ok() {
+        let (u1, mp_detected) = crate::reparam::compute_total_penalty_space(penalties_blocks, p)?;
+        let rot = crate::reparam::apply_reparam(x, penalties_blocks, lambdas, &u1, mp_detected, 0)?;
+        let rotated_pens: Vec<BlockPenalty> = rot
+            .rs_rot
+            .iter()
+            .map(|rs| BlockPenalty::new(rs.dot(&rs.t()), 0, p))
+            .collect();
+        Some((rot.x_rot, rotated_pens))
+    } else {
+        None
+    };
+    let (x_use, pens_use): (&Array2<f64>, &[BlockPenalty]) = match &rot_state {
+        Some((x_rot, pens_rot)) => (x_rot, pens_rot.as_slice()),
+        None => (x, penalties_blocks),
+    };
+    let cached_xtwx = if rot_state.is_some() {
+        None
+    } else {
+        cached_xtwx
+    };
+    let cached_xtwy = if rot_state.is_some() {
+        None
+    } else {
+        cached_xtwy
+    };
     let xtwx_owned;
     let xtwx = if let Some(c) = cached_xtwx {
         c
     } else {
-        xtwx_owned = compute_xtwx_dispatch(None, x, w);
+        xtwx_owned = compute_xtwx_dispatch(None, x_use, w);
         &xtwx_owned
     };
 
     // A = X'WX + ΣλS, β = A^-1 X'Wy, σ² = RSS/(n-trA), A^-1
-    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks, cached_xtwy)?;
+    let system = assemble_reml_system(y, x_use, w, xtwx, lambdas, pens_use, cached_xtwy)?;
     let _ = family;
-    let parts = RemlScoreParts::gaussian_only(&system, y, w, x, xtwx, n, None);
+    let parts = RemlScoreParts::gaussian_only(&system, y, w, x_use, xtwx, n, None);
     let a_inv = &system.a_inv;
     let scale_est = parts.sigma2;
 
@@ -859,7 +919,7 @@ pub fn reml_hessian_mgcv_exact_closed_form(
     let mut block_offsets: Vec<usize> = Vec::with_capacity(m);
     let mut block_sizes: Vec<usize> = Vec::with_capacity(m);
     let p = system.a.nrows();
-    for penalty in penalties_blocks.iter() {
+    for penalty in pens_use.iter() {
         let block = penalty.block_view();
         let off = penalty.offset;
         let k = block.nrows();
