@@ -323,7 +323,11 @@ fn dispatch_reml_score_fd(
     pirls_callback: &mut Option<PirlsCallback<'_>>,
 ) -> Result<f64> {
     if let Some(cb) = pirls_callback.as_mut() {
-        let refresh = cb(lambdas)?;
+        // FD-based gradient/Hessian diagnostic: each evaluation needs the
+        // converged state at the perturbed λ (NoRefresh would bias the
+        // central difference by O(|Δρ|²) in the same direction we are
+        // trying to recover from).
+        let refresh = cb(lambdas, PirlsRefreshMode::Full)?;
         dispatch_reml_score(
             sp,
             &refresh.working_response,
@@ -496,7 +500,9 @@ fn dispatch_reml_score_fixed_logphi_fd(
 ) -> Result<f64> {
     let sigma2 = log_phi.exp().max(1e-300);
     if let Some(cb) = pirls_callback.as_mut() {
-        let refresh = cb(lambdas)?;
+        // Joint-logphi FD evaluator path — Full mode (same reasoning as the
+        // dispatch_reml_score helper above).
+        let refresh = cb(lambdas, PirlsRefreshMode::Full)?;
         let refresh_xtwy = compute_xtwy_helper(x, &refresh.weights, &refresh.working_response);
         reml_criterion_multi_cached_mgcv_exact_fixed_sigma2(
             &refresh.working_response,
@@ -963,13 +969,34 @@ pub struct PirlsRefresh {
     pub elapsed_micros: u128,
 }
 
+/// Refresh mode for `PirlsCallback`.
+///
+/// `Full` — converge inner PIRLS at the requested λ. Used at outer-iter
+/// start and as the warm-up bootstrap.
+///
+/// `NoRefresh` — Wood 2011 IFT line-search shortcut (`gam.fit5.r:367-393`):
+/// compute β_trial = β_accepted + Σ_k b1[:,k]·Δρ_k from already-known
+/// (b1, β_accepted, λ_accepted), then take ONE working-pair IRLS step at
+/// β_trial to populate (w, z, X'WX). No PIRLS convergence loop is run.
+/// Score evaluations on these quantities are first-order accurate in Δρ
+/// — adequate for Armijo line search where we only compare candidates
+/// against one another; the next outer-iter-start `Full` refresh
+/// re-converges β at the accepted λ.
+#[cfg(feature = "blas")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PirlsRefreshMode {
+    Full,
+    NoRefresh,
+}
+
 /// Callback type for refreshing PIRLS at trial λ during Newton line search.
 /// `Some(callback)` enables mgcv's per-trial-λ inner-IRLS refresh
 /// (gam.fit3.r:1444, 1500-1504, 1571-1576). `None` keeps the fast
 /// frozen-β/w/z path used for Gaussian (where W=I, z=y, no refresh
 /// needed).
 #[cfg(feature = "blas")]
-pub type PirlsCallback<'a> = &'a mut dyn FnMut(&[f64]) -> Result<PirlsRefresh>;
+pub type PirlsCallback<'a> =
+    &'a mut dyn FnMut(&[f64], PirlsRefreshMode) -> Result<PirlsRefresh>;
 
 impl SmoothingParameter {
     /// Create new smoothing parameters with initial values
@@ -1722,7 +1749,11 @@ impl SmoothingParameter {
             // stale frozen-β/w/z values inherited from the caller. For
             // Gaussian (callback=None) skip — W=I, z=y, no refresh needed.
             if let Some(cb) = pirls_callback.as_mut() {
-                let refresh = cb(&lambdas)?;
+                // Outer-iter-start refresh: convergence-state for current
+                // λ (after previous iter's accepted step). Full PIRLS here
+                // gives the converged β that the score/gradient/Hessian
+                // evaluations below assume.
+                let refresh = cb(&lambdas, PirlsRefreshMode::Full)?;
                 iter_refresh_calls += 1;
                 iter_refresh_inner_iterations += refresh.inner_iterations;
                 iter_refresh_micros += refresh.elapsed_micros;
@@ -2559,7 +2590,12 @@ impl SmoothingParameter {
                 // stale-β/w/z one-step approximation. mgcv equivalent:
                 // gam.fit3.r:1444, 1500-1504, 1571-1576.
                 let trial_eval = if let Some(cb) = pirls_callback.as_mut() {
-                    match cb(&new_lambdas) {
+                    // Line-search trial halving: Wood 2011 IFT shortcut.
+                    // The callback runs the cheap one-IRLS-step path at
+                    // β_trial = β_accepted + Σ_k b1[:,k]·Δρ_k instead of
+                    // converging PIRLS at λ_trial. The next outer-iter-start
+                    // call (Full mode) re-converges β at the accepted λ.
+                    match cb(&new_lambdas, PirlsRefreshMode::NoRefresh) {
                         Ok(refresh) => {
                             iter_refresh_calls += 1;
                             iter_refresh_inner_iterations += refresh.inner_iterations;
@@ -2916,9 +2952,10 @@ impl SmoothingParameter {
 
                     // Steepest-descent trial uses the line-search refresh
                     // path too (mgcv parity): if a callback is supplied,
-                    // refresh PIRLS at the SD trial λ.
+                    // refresh PIRLS at the SD trial λ. Same NoRefresh
+                    // shortcut as the Newton-direction halvings above.
                     let sd_eval = if let Some(cb) = pirls_callback.as_mut() {
-                        match cb(&new_lambdas_sd) {
+                        match cb(&new_lambdas_sd, PirlsRefreshMode::NoRefresh) {
                             Ok(refresh) => {
                                 if trace_pirls_refresh {
                                     eprintln!(

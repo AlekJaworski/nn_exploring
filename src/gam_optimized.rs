@@ -1093,7 +1093,9 @@ impl GAM {
                         Vec<f64>,
                     )>,
                 > = std::cell::RefCell::new(None);
-                let mut callback = |trial_lambdas: &[f64]| -> Result<crate::smooth::PirlsRefresh> {
+                let mut callback = |trial_lambdas: &[f64],
+                                    mode: crate::smooth::PirlsRefreshMode|
+                 -> Result<crate::smooth::PirlsRefresh> {
                     callback_pirls_calls += 1;
                     // Read the latest family from the shared cell — the outer
                     // Newton loop publishes fresh df/σ²/p/θ here between iters.
@@ -1104,7 +1106,13 @@ impl GAM {
                     // Pull the saved (β, b1, λ) from the previous refresh.
                     // For the very first call (no saved state) we bootstrap
                     // from the initial outer PIRLS β.
-                    let warm_beta: ndarray::Array1<f64> = {
+                    //
+                    // `ift_used` records whether the IFT propagation
+                    // produced a valid warm β; when it didn't (e.g. the
+                    // first call without saved state, or a guardrail
+                    // rejection) we degrade NoRefresh → Full because we
+                    // need a converged β to populate the score-eval state.
+                    let (warm_beta, ift_used): (ndarray::Array1<f64>, bool) = {
                         let st = warm_state.borrow();
                         if let Some((beta_prev, b1_prev, lambdas_prev)) = st.as_ref() {
                             if b1_prev.ncols() == trial_lambdas.len()
@@ -1132,17 +1140,92 @@ impl GAM {
                                     && family.validmu_all(&mu_trial)
                                     && bt.iter().all(|x| x.is_finite())
                                 {
-                                    bt
+                                    (bt, true)
                                 } else {
-                                    beta_prev.clone()
+                                    (beta_prev.clone(), false)
                                 }
                             } else {
-                                beta_prev.clone()
+                                (beta_prev.clone(), false)
                             }
                         } else {
-                            pirls_result.coefficients.clone()
+                            (pirls_result.coefficients.clone(), false)
                         }
                     };
+
+                    // NoRefresh shortcut: Wood 2011 gam.fit5-style trial
+                    // (mgcv `gam.fit5.r:367-393` reuses `coefold` plus the
+                    // IFT increment without running an inner-loop solve).
+                    // Skip the full PIRLS, compute (w, z, X'WX) directly
+                    // from one IRLS step at β_trial, and return without
+                    // touching the saved (β, b1, λ) state — the next
+                    // outer-iter-start Full call re-converges at the
+                    // accepted λ. The NoRefresh result is only meaningful
+                    // for relative score comparison inside the line-search
+                    // Armijo test; it is never accepted as the final β.
+                    //
+                    // Degrades to Full when:
+                    //   - The discretised path is active (the one-IRLS-step
+                    //     plumbing below uses dense X·β; the discretised
+                    //     scatter-gather call has a separate, more
+                    //     conservative refresh model — keeping it on Full
+                    //     for now avoids scope creep).
+                    //   - IFT wasn't usable for this trial (no saved state
+                    //     yet, or guardrail rejection).
+                    //   - The family is t-dist / Quantile (handled by
+                    //     specialised inner fitters that maintain their
+                    //     own scale state; their working pair lives in
+                    //     `fit_pirls_tdist` / `fit_pirls_quantile`, not in
+                    //     the standard exp-family `exp_family_irls_step`).
+                    //   - The family has variance growing faster than μ²
+                    //     (InverseGaussian: V=μ³; Tweedie with p>2 — not
+                    //     supported but defensive). Working weight
+                    //     W = (dμ/dη)²/V = 1/μ for log-link IG means small
+                    //     β perturbations swing W by orders of magnitude;
+                    //     one IRLS step from the IFT-warm β produces a
+                    //     working state that misleads the line-search
+                    //     Armijo test. mgcv's `gam.fit5.r` line-search
+                    //     shortcut is similarly skipped for InvGauss —
+                    //     mgcv's IG always goes through `gam.fit3.r` with
+                    //     full per-trial PIRLS (gam.fit3.r:1500-1504).
+                    let no_refresh_ok = matches!(mode, crate::smooth::PirlsRefreshMode::NoRefresh)
+                        && ift_used
+                        && cache_ref.discrete.is_none()
+                        && !matches!(
+                            family,
+                            crate::pirls::Family::TDist { .. }
+                                | crate::pirls::Family::Quantile { .. }
+                                | crate::pirls::Family::InverseGaussian
+                                | crate::pirls::Family::Tweedie { .. }
+                        );
+
+                    if no_refresh_ok {
+                        let eta = cache_ref.design_matrix.dot(&warm_beta);
+                        let step = crate::pirls::exp_family_irls_step(
+                            y_ref.view(),
+                            eta.view(),
+                            prior_weights_ref.map(|pw| pw.view()),
+                            family,
+                            /* use_fisher = */ false,
+                        );
+                        let xtwx = compute_xtwx_dispatch(
+                            cache_ref.discrete.as_ref(),
+                            &cache_ref.design_matrix,
+                            &step.w,
+                        );
+                        let elapsed_micros = refresh_start.elapsed().as_micros();
+                        // No PIRLS iterations were run; report 0 so the
+                        // trace summary makes the savings visible.
+                        return Ok(crate::smooth::PirlsRefresh {
+                            beta: warm_beta,
+                            weights: step.w,
+                            working_response: step.z,
+                            xtwx,
+                            sigma2: None,
+                            df: None,
+                            inner_iterations: 0,
+                            elapsed_micros,
+                        });
+                    }
 
                     let res = cache_ref.run_pirls_with_options(
                         y_ref,
