@@ -293,6 +293,7 @@ impl FitCache {
             false,
             prior_weights,
             None,
+            None,
         )
     }
 
@@ -322,7 +323,30 @@ impl FitCache {
         tdist_outer_sigma2: bool,
         prior_weights: Option<&Array1<f64>>,
         initial_beta: Option<&Array1<f64>>,
+        ocat_theta: Option<&[f64]>,
     ) -> Result<crate::pirls::PiRLSResult> {
+        // Ocat: ordered-categorical needs the threshold vector θ which
+        // doesn't sit in the Family variant. The outer Newton owns it
+        // (see `SmoothingParameter::ocat_theta`) and passes a borrowed
+        // slice here.
+        if let crate::pirls::Family::Ocat { r } = family {
+            let theta = ocat_theta.ok_or_else(|| {
+                GAMError::InvalidParameter(
+                    "ocat family requires ocat_theta to be passed; got None".to_string(),
+                )
+            })?;
+            return crate::pirls::fit_pirls_ocat(
+                y,
+                &self.design_matrix,
+                lambda,
+                &self.penalties,
+                theta,
+                r as usize,
+                max_iter,
+                tolerance,
+                prior_weights,
+            );
+        }
         // t-dist family needs a specialised fitter. df sentinel: 0.0 ⟹
         // PIRLS profiles df via internal 1D Brent (auto-mode, the default
         // for `family="t-dist"` with no df arg), > 0 ⟹ user-fixed (or set
@@ -730,7 +754,9 @@ impl GAM {
             crate::pirls::Family::Binomial | crate::pirls::Family::Poisson
             | crate::pirls::Family::NegBin { .. }
             // Quantile/ELF: σ is the family parameter; φ stays at 1 by convention.
-            | crate::pirls::Family::Quantile { .. } => Some(1.0),
+            | crate::pirls::Family::Quantile { .. }
+            // Ocat: no dispersion (φ ≡ 1 for categorical likelihood).
+            | crate::pirls::Family::Ocat { .. } => Some(1.0),
             // QuasiPoisson/QuasiBinomial: dispersion is profiled, not fixed at 1.
             crate::pirls::Family::Gaussian
             | crate::pirls::Family::QuasiPoisson
@@ -753,6 +779,15 @@ impl GAM {
             smoothing_params.negbin_log_theta = theta.ln();
         } else {
             smoothing_params.negbin_log_theta = 2.0_f64.ln();
+        }
+        // Ocat: seed θ from the category-frequency heuristic
+        // (mgcv `preinitialize` port). For now treat θ as fixed; the
+        // outer Newton optimises only log λ. A follow-up will add
+        // alternating θ updates between ρ steps (mirrors the negbin
+        // profile-θ path).
+        if let crate::pirls::Family::Ocat { r } = self.family {
+            smoothing_params.ocat_profile = true;
+            smoothing_params.ocat_theta = crate::ocat::ocat_init_theta(y, r as usize);
         }
         // Profile-df for scat (TDist): outer Newton on mgcv's theta1 =
         // log(df - min.df) at the ρ-loop level when caller passed no fixed df.
@@ -998,6 +1033,11 @@ impl GAM {
                 self.tdist_profile,
                 prior_weights_ref,
                 None,
+                if smoothing_params.ocat_theta.is_empty() {
+                    None
+                } else {
+                    Some(smoothing_params.ocat_theta.as_slice())
+                },
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
@@ -1030,6 +1070,11 @@ impl GAM {
             // Newton).
             let family_cell = std::sync::Arc::new(std::sync::Mutex::new(self.family));
             smoothing_params.family_cell = Some(std::sync::Arc::clone(&family_cell));
+            // Ocat θ cell — see SmoothingParameter::ocat_theta_cell docs.
+            let ocat_theta_cell = std::sync::Arc::new(std::sync::Mutex::new(
+                smoothing_params.ocat_theta.clone(),
+            ));
+            smoothing_params.ocat_theta_cell = Some(std::sync::Arc::clone(&ocat_theta_cell));
             // For trial-λ refresh inside Newton's line search, cap PIRLS at
             // a fraction of the outer cap. The trial λ is close to the
             // current λ so β_trial converges in 5-20 iters with warm start;
@@ -1227,6 +1272,12 @@ impl GAM {
                         });
                     }
 
+                    // Ocat: read fresh θ from the shared cell. Other
+                    // families don't use this; pass None.
+                    let ocat_theta_locked = ocat_theta_cell
+                        .lock()
+                        .expect("ocat_theta_cell mutex poisoned")
+                        .clone();
                     let res = cache_ref.run_pirls_with_options(
                         y_ref,
                         trial_lambdas,
@@ -1237,6 +1288,13 @@ impl GAM {
                         outer_sigma2_profile,
                         prior_weights_ref,
                         Some(&warm_beta),
+                        if matches!(family, crate::pirls::Family::Ocat { .. })
+                            && !ocat_theta_locked.is_empty()
+                        {
+                            Some(ocat_theta_locked.as_slice())
+                        } else {
+                            None
+                        },
                     )?;
 
                     // ── Update saved (β, b1, λ) for the next call ───────────
@@ -1359,6 +1417,11 @@ impl GAM {
                 self.tdist_profile,
                 prior_weights_ref,
                 None,
+                if smoothing_params.ocat_theta.is_empty() {
+                    None
+                } else {
+                    Some(smoothing_params.ocat_theta.as_slice())
+                },
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1435,14 +1498,21 @@ impl GAM {
             for outer_iter in 0..max_outer_iter {
                 // PiRLS with current smoothing parameters (uses discretized scatter-gather)
                 let pirls_start = Instant::now();
-                let pirls_result = cache.run_pirls(
+                let pirls_result = cache.run_pirls_with_options(
                     y,
                     &smoothing_params.lambda,
                     self.family,
                     max_inner_iter,
                     tolerance,
                     xtx_ref,
+                    self.tdist_profile,
                     prior_weights_ref,
+                    None,
+                    if smoothing_params.ocat_theta.is_empty() {
+                        None
+                    } else {
+                        Some(smoothing_params.ocat_theta.as_slice())
+                    },
                 )?;
                 total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1488,14 +1558,21 @@ impl GAM {
                 if max_lambda_change < adaptive_tol {
                     // Do final fit
                     let pirls_start = Instant::now();
-                    let final_result = cache.run_pirls(
+                    let final_result = cache.run_pirls_with_options(
                         y,
                         &smoothing_params.lambda,
                         self.family,
                         max_inner_iter,
                         tolerance,
                         xtx_ref,
+                        self.tdist_profile,
                         prior_weights_ref,
+                        None,
+                        if smoothing_params.ocat_theta.is_empty() {
+                            None
+                        } else {
+                            Some(smoothing_params.ocat_theta.as_slice())
+                        },
                     )?;
                     total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1535,14 +1612,21 @@ impl GAM {
 
             // Reached max iterations - use current fit
             let pirls_start = Instant::now();
-            let final_result = cache.run_pirls(
+            let final_result = cache.run_pirls_with_options(
                 y,
                 &smoothing_params.lambda,
                 self.family,
                 max_inner_iter,
                 tolerance,
                 xtx_ref,
+                self.tdist_profile,
                 prior_weights_ref,
+                None,
+                if smoothing_params.ocat_theta.is_empty() {
+                    None
+                } else {
+                    Some(smoothing_params.ocat_theta.as_slice())
+                },
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 

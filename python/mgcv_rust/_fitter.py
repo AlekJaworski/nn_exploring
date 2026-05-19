@@ -322,7 +322,7 @@ class Gam:
         knots_increase_ratio: float = 1.5,
         min_points_to_save: int = 100,
         max_points_to_save: int = 1000,
-        method: str = "REML",
+        method: Optional[str] = None,
         family: str = "gaussian",
         link: Optional[str] = None,
         df: Optional[float] = None,
@@ -349,6 +349,15 @@ class Gam:
         self.df = df  # degrees of freedom for t-dist family (None = profile)
         self.tweedie_p = tweedie_p  # power parameter for Tweedie family (None → default 1.5)
         self.negbin_theta = negbin_theta  # dispersion for NegBin family (None = profile via nb())
+        # Default method depends on family. scat (TDist) is ~22× slower on
+        # REML than fREML for production-shaped fits (n>1000, 4-5 smooths),
+        # because REML routes through the joint-Newton tdist_gdi2_native
+        # path that scales O(n·p²·ntot²) per iter while fREML uses the
+        # Sl.fitChol-style O(p³) closed-form step matching mgcv.bam's
+        # default for scat. For other families the REML default matches
+        # mgcv.gam's default, so we keep it.
+        if method is None:
+            method = "fREML" if family in ("scat", "t-dist") else "REML"
         self.method = method
         self.family = family
         # link=None resolves to the canonical link per family at fit time.

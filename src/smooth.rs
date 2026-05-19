@@ -915,6 +915,20 @@ pub struct SmoothingParameter {
     /// df) Newton; until that lands the band keeps σ² near the data scale.
     pub tdist_log_sigma2_lo: f64,
     pub tdist_log_sigma2_hi: f64,
+    /// Profile-θ mode for the ordered-categorical (`ocat`) family. When
+    /// `true`, the outer Newton steps θ alongside `log λ` (joint
+    /// `(log λ, θ)` Newton — mgcv `gam.fit5` extended-family path).
+    pub ocat_profile: bool,
+    /// Current θ vector (log-gaps, length R-2) for the ocat family.
+    /// Updated each outer Newton iteration; read by `fit_pirls_ocat`.
+    pub ocat_theta: Vec<f64>,
+    /// Shared mutable handle to the ocat θ vector for the per-trial-λ
+    /// PIRLS callback. Mirror of `ocat_theta` for the same reasons
+    /// `family_cell` mirrors `family`: the closure that drives trial
+    /// refreshes runs while the outer Newton owns this Newton search
+    /// vector, so it needs an Arc to read fresh θ between iterations.
+    pub ocat_theta_cell:
+        Option<std::sync::Arc<std::sync::Mutex<Vec<f64>>>>,
     /// REML / LAML score at convergence. Populated by the outer optimizer
     /// (Newton or FS) on the last iteration so callers can read it back
     /// for σ profiling at the wrapper level.
@@ -1025,6 +1039,9 @@ impl SmoothingParameter {
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
             tdist_log_sigma2_lo: f64::NEG_INFINITY,
             tdist_log_sigma2_hi: f64::INFINITY,
+            ocat_profile: false,
+            ocat_theta: Vec::new(),
+            ocat_theta_cell: None,
             last_score: None,
             family_cell: None,
         }
@@ -1060,6 +1077,9 @@ impl SmoothingParameter {
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
             tdist_log_sigma2_lo: f64::NEG_INFINITY,
             tdist_log_sigma2_hi: f64::INFINITY,
+            ocat_profile: false,
+            ocat_theta: Vec::new(),
+            ocat_theta_cell: None,
             last_score: None,
             family_cell: None,
         }
@@ -1095,6 +1115,9 @@ impl SmoothingParameter {
             tdist_log_sigma2: 0.0_f64, // placeholder; caller seeds from sample variance
             tdist_log_sigma2_lo: f64::NEG_INFINITY,
             tdist_log_sigma2_hi: f64::INFINITY,
+            ocat_profile: false,
+            ocat_theta: Vec::new(),
+            ocat_theta_cell: None,
             last_score: None,
             family_cell: None,
         }
@@ -3258,6 +3281,151 @@ impl SmoothingParameter {
                 }
             }
             // End of NegBin profile-θ step
+
+            // -----------------------------------------------------------------------
+            // Ocat profile-θ: alternating 1-D Newton on each θ_j.
+            //
+            // mgcv's `gam.fit5` does this jointly with log λ via a single
+            // (M + R-2)-vector Newton; we approximate that with an
+            // alternating loop — after each ρ step, update each θ_j
+            // independently using FD on the REML score at fixed ρ. This
+            // mirrors the negbin profile path and inherits its convergence
+            // story (verified to give working β + smooth λ for the
+            // 2d_nb_profile_log_n1000 fixture).
+            //
+            // FD evaluation requires re-running `fit_pirls_ocat` at the
+            // trial θ since the per-row weights depend on θ. We delegate
+            // that via `pirls_callback`, which already handles trial PIRLS
+            // refreshes for non-Gaussian families.
+            // -----------------------------------------------------------------------
+            // Note: the FD-based alternating θ update below currently produces
+            // gradients with the *opposite* sign vs mgcv's joint outer Newton
+            // — at the preinit θ the FD-of-`dispatch_reml_score` thinks the
+            // REML descent direction is toward smaller θ, but mgcv (gam.fit5
+            // with joint `[log λ; θ]` Newton) converges to LARGER θ on the
+            // same fixture. The discrepancy is the same kind of "REML criterion
+            // differs from mgcv's by a constant in θ" gap seen earlier on
+            // weighted scat. Until the proper joint (ρ, θ) Newton ports
+            // (mgcv `gam.fit3.r:1397-1411` augmentation but with `θ` instead
+            // of `log φ`), ship the alternating step gated behind
+            // `MGCV_RUST_OCAT_ALT_THETA=1` and default to the preinit-θ
+            // fixed-θ fit. The preinit heuristic gives a reasonable θ from
+            // category frequencies; predictions won't byte-match mgcv but
+            // are in the right ballpark.
+            let ocat_alt_theta_enabled = std::env::var("MGCV_RUST_OCAT_ALT_THETA").is_ok();
+            if ocat_alt_theta_enabled && self.ocat_profile && !self.ocat_theta.is_empty() {
+                let h_th: f64 = 5e-3;
+                let n_theta = self.ocat_theta.len();
+                let current_theta = self.ocat_theta.clone();
+                let current_lambdas: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+
+                // Helper: refresh PIRLS at the current `self.ocat_theta` and
+                // evaluate REML at the refreshed state. Returns Err if the
+                // callback is missing — ocat requires non-Gaussian path.
+                fn eval_score(
+                    sp: &mut SmoothingParameter,
+                    y: &Array1<f64>,
+                    x: &Array2<f64>,
+                    lambdas: &[f64],
+                    penalties: &[BlockPenalty],
+                    cb: &mut Option<PirlsCallback<'_>>,
+                ) -> Result<f64> {
+                    // Publish the current θ to the shared cell so the
+                    // callback's `run_pirls_with_options` sees the trial θ.
+                    if let Some(cell) = sp.ocat_theta_cell.as_ref() {
+                        if let Ok(mut g) = cell.lock() {
+                            *g = sp.ocat_theta.clone();
+                        }
+                    }
+                    if let Some(cb) = cb.as_mut() {
+                        let refresh = cb(lambdas, PirlsRefreshMode::Full)?;
+                        let refresh_xtwy =
+                            compute_xtwy_helper(x, &refresh.weights, &refresh.working_response);
+                        dispatch_reml_score(
+                            sp,
+                            &refresh.working_response,
+                            x,
+                            &refresh.weights,
+                            lambdas,
+                            penalties,
+                            Some(&refresh.xtwx),
+                            Some(&refresh_xtwy),
+                        )
+                    } else {
+                        Err(crate::GAMError::OptimizationFailed(
+                            "ocat outer Newton requires a PIRLS callback".to_string(),
+                        ))
+                    }
+                }
+
+                for j in 0..n_theta {
+                    // Snapshot current θ
+                    self.ocat_theta = current_theta.clone();
+                    let r_center = eval_score(
+                        self,
+                        &y_local,
+                        x,
+                        &current_lambdas,
+                        penalties,
+                        &mut pirls_callback,
+                    );
+                    self.ocat_theta = current_theta.clone();
+                    self.ocat_theta[j] += h_th;
+                    let r_plus = eval_score(
+                        self,
+                        &y_local,
+                        x,
+                        &current_lambdas,
+                        penalties,
+                        &mut pirls_callback,
+                    );
+                    self.ocat_theta = current_theta.clone();
+                    self.ocat_theta[j] -= h_th;
+                    let r_minus = eval_score(
+                        self,
+                        &y_local,
+                        x,
+                        &current_lambdas,
+                        penalties,
+                        &mut pirls_callback,
+                    );
+
+                    if let (Ok(rc), Ok(rp), Ok(rm)) = (r_center, r_plus, r_minus) {
+                        let g = (rp - rm) / (2.0 * h_th);
+                        let h = (rp - 2.0 * rc + rm) / (h_th * h_th);
+                        let h_safe = if h > 1e-8 { h } else { 1e-8 };
+                        // Step cap = 0.5 (same magnitude mgcv uses for log θ).
+                        let step = (-g / h_safe).max(-0.5).min(0.5);
+                        // Restore baseline then apply step
+                        self.ocat_theta = current_theta.clone();
+                        self.ocat_theta[j] += step;
+                        // Publish to the shared cell so the per-trial-λ
+                        // callback closure picks up fresh θ on the next
+                        // iter's line-search refreshes.
+                        if let Some(cell) = self.ocat_theta_cell.as_ref() {
+                            if let Ok(mut g) = cell.lock() {
+                                *g = self.ocat_theta.clone();
+                            }
+                        }
+                        if std::env::var("MGCV_RUST_TRACE_OCAT").is_ok() {
+                            eprintln!(
+                                "[OCAT iter={} j={}] θ={:.6} → {:.6}  grad={:.4e} hess={:.4e} step={:.4e}",
+                                iter + 1,
+                                j,
+                                current_theta[j],
+                                self.ocat_theta[j],
+                                g,
+                                h,
+                                step
+                            );
+                        }
+                    } else {
+                        // Restore on failure.
+                        self.ocat_theta = current_theta.clone();
+                    }
+                }
+            }
+            // End of Ocat profile-θ step
 
             // TDist (scat) shape extras are now driven by the joint outer
             // Newton step at the top of this iteration via

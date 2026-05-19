@@ -16,6 +16,7 @@ pub mod linalg;
 pub mod link;
 #[cfg(feature = "blas")]
 pub mod newton_optimizer;
+pub mod ocat;
 pub mod penalty;
 pub mod pirls;
 pub mod reml;
@@ -152,7 +153,7 @@ pub struct PyGAM {
 #[pymethods]
 impl PyGAM {
     #[new]
-    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None, tau=None, sigma=None, co=None))]
+    #[pyo3(signature = (family=None, mgcv_exact=None, link=None, df=None, p=None, theta=None, tau=None, sigma=None, co=None, r=None))]
     fn new(
         family: Option<&str>,
         mgcv_exact: Option<bool>,
@@ -163,6 +164,7 @@ impl PyGAM {
         tau: Option<f64>,
         sigma: Option<f64>,
         co: Option<f64>,
+        r: Option<u8>,
     ) -> PyResult<Self> {
         // Validate df early if provided
         if let Some(df_val) = df {
@@ -256,6 +258,16 @@ impl PyGAM {
                     )));
                 }
                 Family::Quantile { tau: tau_val, sigma: sigma_val, lambda: lambda_val }
+            }
+            // Ordered categorical (mgcv's ocat(R=K)). Identity link.
+            (Some("ocat"), None) | (Some("ocat"), Some("identity")) => {
+                let r_val = r.unwrap_or(0);
+                if r_val < 3 {
+                    return Err(PyValueError::new_err(format!(
+                        "ocat requires R >= 3 categories (set via `r=...`), got R={r_val}"
+                    )));
+                }
+                Family::Ocat { r: r_val }
             }
             (Some(f), Some(l)) => {
                 return Err(PyValueError::new_err(format!(
@@ -873,6 +885,61 @@ impl PyGAM {
         Ok(PyArray1::from_vec(py, predictions.to_vec()))
     }
 
+    /// For the ordered-categorical (`ocat`) family: per-row n×R category
+    /// probability matrix. Reads the converged θ from the fitted
+    /// SmoothingParameter and applies mgcv's
+    /// `P(Y=k) = F(α_{k+1} − η) − F(α_k − η)` mapping.
+    fn predict_proba_ocat<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<f64>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
+        let r = match self.inner.family {
+            Family::Ocat { r } => r as usize,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "predict_proba_ocat requires family='ocat'",
+                ))
+            }
+        };
+        let theta = self
+            .inner
+            .smoothing_params
+            .as_ref()
+            .map(|p| p.ocat_theta.clone())
+            .ok_or_else(|| PyValueError::new_err("Model not fitted yet (ocat θ unavailable)"))?;
+        if theta.len() != r - 2 {
+            return Err(PyValueError::new_err(format!(
+                "ocat θ length {} doesn't match R-2 = {} — model may not be fitted",
+                theta.len(),
+                r - 2
+            )));
+        }
+        let x_array = x.as_array().to_owned();
+        let eta = self
+            .inner
+            .predict(&x_array)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        let prob = crate::ocat::ocat_prob(&eta, &theta, r);
+        Ok(numpy::PyArray2::from_owned_array(py, prob))
+    }
+
+    /// Get the ocat θ vector (log-gap parameters, length R-2). Errors if
+    /// the family is not ocat or the model isn't fitted.
+    fn get_ocat_theta(&self) -> PyResult<Vec<f64>> {
+        match self.inner.family {
+            Family::Ocat { .. } => self
+                .inner
+                .smoothing_params
+                .as_ref()
+                .map(|p| p.ocat_theta.clone())
+                .ok_or_else(|| PyValueError::new_err("Model not fitted yet")),
+            _ => Err(PyValueError::new_err(
+                "get_ocat_theta requires family='ocat'",
+            )),
+        }
+    }
+
     fn get_lambda(&self) -> PyResult<f64> {
         self.inner
             .smoothing_params
@@ -996,6 +1063,7 @@ impl PyGAM {
             Family::InverseGaussian => "inverse.gaussian",
             Family::NegBin { .. } => "negbin",
             Family::Quantile { .. } => "quantile",
+            Family::Ocat { .. } => "ocat",
         }
     }
 
@@ -1014,6 +1082,7 @@ impl PyGAM {
             Family::InverseGaussian => "log",
             Family::NegBin { .. } => "log",
             Family::Quantile { .. } => "identity",
+            Family::Ocat { .. } => "identity",
         }
     }
 

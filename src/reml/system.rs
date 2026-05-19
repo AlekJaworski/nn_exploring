@@ -220,6 +220,10 @@ pub fn glm_deviance_weighted(
                     2.0 * theta * ((mu_c + theta) / theta).ln()
                 }
             }
+            // Ocat deviance needs the threshold vector θ (not on Family).
+            // The dedicated ocat path computes deviance via `ocat_dev_resids`
+            // and feeds it into the REML system directly.
+            Family::Ocat { .. } => 0.0,
         };
         dev += wi * dev_i;
     }

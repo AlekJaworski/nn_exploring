@@ -164,6 +164,29 @@ pub enum Family {
         sigma: f64,
         lambda: f64,
     },
+    /// Ordered categorical (mgcv's `ocat(R=K)`). Identity link.
+    ///
+    /// Response `Y ∈ {1, …, R}` with cumulative-logit thresholds
+    /// `α_1 = −∞ < α_2 = −1 < α_3 < … < α_R < α_{R+1} = +∞`. The free
+    /// threshold parameters are `θ ∈ ℝ^{R-2}` in *log-gap* form
+    /// (`θ_j = log(α_{j+2} − α_{j+1})`), so `exp(·)` enforces strict
+    /// ordering without inequality constraints.
+    ///
+    /// `r` is the number of categories (3..=255). The threshold vector
+    /// `θ` lives **outside** this enum variant — `Family` is `Copy` and
+    /// a length-(R-2) vector can't sit here cleanly. Functions that need
+    /// θ (`ocat_dd`, `ocat_dev_resids`, `ocat_prob`) take it as an
+    /// explicit `&[f64]` argument; the outer Newton in `smooth.rs`
+    /// owns the live θ values (same pattern as TDist's σ²/df via
+    /// `family_cell`).
+    ///
+    /// Identity link semantics: V(μ)=1, dμ/dη=1, all link derivatives
+    /// are the identity ones. The actual likelihood / deviance / PIRLS
+    /// weights are computed in family-specific paths via `ocat_dd`.
+    /// Reference: mgcv `efam.r:2618-2945` (`ocat()` family).
+    Ocat {
+        r: u8,
+    },
 }
 
 impl Family {
@@ -190,6 +213,10 @@ impl Family {
             // that any code path defaulting to V(μ) gets a finite sentinel;
             // the actual per-obs weights are computed in `fit_pirls_quantile`.
             Family::Quantile { sigma, .. } => 4.0 * sigma * sigma,
+            // Ocat (extended family): identity link, working weights come
+            // from `ocat_dd`'s Dmu2 — V(μ)=1 keeps the standard IRLS
+            // weight formula `dμ/dη)² / V(μ) = 1` as the baseline sentinel.
+            Family::Ocat { .. } => 1.0,
         }
     }
 
@@ -203,7 +230,10 @@ impl Family {
     pub fn link_kind(&self) -> crate::link::Link {
         use crate::link::{Link, DEFAULT_ETA_EPS, DEFAULT_ETA_MAX};
         match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => Link::Identity,
+            Family::Gaussian
+            | Family::TDist { .. }
+            | Family::Quantile { .. }
+            | Family::Ocat { .. } => Link::Identity,
             Family::Binomial | Family::QuasiBinomial => Link::Logit {
                 eta_max: DEFAULT_ETA_MAX,
             },
@@ -253,7 +283,10 @@ impl Family {
             return false;
         }
         match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => true,
+            Family::Gaussian
+            | Family::TDist { .. }
+            | Family::Quantile { .. }
+            | Family::Ocat { .. } => true,
             Family::Binomial | Family::QuasiBinomial => mu > 0.0 && mu < 1.0,
             Family::Poisson
             | Family::QuasiPoisson
@@ -288,7 +321,10 @@ impl Family {
     /// links to compute the α correction `α = 1 + (y−μ)·(V'/V + g''·dμ/dη)`.
     pub fn dvar(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
+            Family::Gaussian
+            | Family::TDist { .. }
+            | Family::Quantile { .. }
+            | Family::Ocat { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => 1.0 - 2.0 * mu,
             Family::Poisson | Family::QuasiPoisson => 1.0,
             Family::Gamma | Family::GammaLog => 2.0 * mu,
@@ -305,7 +341,10 @@ impl Family {
     /// weight-derivative term in the REML gradient.
     pub fn d2var(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
+            Family::Gaussian
+            | Family::TDist { .. }
+            | Family::Quantile { .. }
+            | Family::Ocat { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => -2.0,
             Family::Poisson | Family::QuasiPoisson => 0.0,
             Family::Gamma | Family::GammaLog => 2.0,
@@ -337,7 +376,10 @@ impl Family {
     /// Tk·KK' Hessian contribution (full Newton path).
     pub fn d3var(&self, mu: f64) -> f64 {
         match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
+            Family::Gaussian
+            | Family::TDist { .. }
+            | Family::Quantile { .. }
+            | Family::Ocat { .. } => 0.0,
             Family::Binomial | Family::QuasiBinomial => 0.0,
             Family::Poisson | Family::QuasiPoisson => 0.0,
             Family::Gamma | Family::GammaLog => 0.0,
@@ -373,7 +415,9 @@ impl Family {
     ///     the family methods, not as the GLM dispersion φ.
     pub fn score_formula(&self) -> ScoreFormula {
         match self {
-            Family::TDist { .. } | Family::Quantile { .. } => ScoreFormula::GamFit5,
+            Family::TDist { .. } | Family::Quantile { .. } | Family::Ocat { .. } => {
+                ScoreFormula::GamFit5
+            }
             _ => ScoreFormula::GamFit3,
         }
     }
@@ -392,7 +436,10 @@ impl Family {
             | Family::TDist { .. }
             // Quantile family: identity link, weights derived analytically
             // from the Hessian — no extra Newton correction needed.
-            | Family::Quantile { .. } => true,
+            | Family::Quantile { .. }
+            // Ocat: extended family with identity link; PIRLS weights
+            // come directly from ocat_dd's Dmu2 — no Newton α correction.
+            | Family::Ocat { .. } => true,
             // Tweedie canonical link is μ^(1-p); log link is non-canonical → full Newton.
             // InverseGaussian canonical link is 1/μ²; log link is non-canonical → full Newton.
             // NB canonical link is log(μ/(μ+θ)); log link is non-canonical → full Newton.
@@ -477,6 +524,10 @@ impl Family {
             Family::Quantile { tau, sigma, lambda } => {
                 n * quantile_elf_saturated_loglik_per_obs(*tau, *sigma, *lambda)
             }
+            // Ocat: mgcv `efam.r:2918` sets `ls = 0` (no σ², no saturated-
+            // distribution analogue for ordered categorical — the deviance
+            // carries the full likelihood signal).
+            Family::Ocat { .. } => 0.0,
             // Inverse Gaussian saturated log-likelihood:
             // ls = -n/2 · log(2π·φ) - 3/2 · Σ log(y_i)
             // (from dinvgauss at saturation μ=y; the -3/2·Σlog(y) is a
@@ -583,6 +634,9 @@ impl Family {
             // Quantile: ls is independent of φ (σ is the family parameter,
             // φ stays at 1 by convention). dls/dφ = 0 ⟹ no σ²-chain term.
             Family::Quantile { .. } => 0.0,
+            // Ocat: mgcv defines ls = 0 (no dispersion / no σ² chain).
+            // efam.r:2918 sets ls = 0 explicitly for the ocat family.
+            Family::Ocat { .. } => 0.0,
             // Tweedie dls/dφ: from ldTweedie0 R code (gam.fit3.r:2799):
             //   ld[,2] = -l_base/φ + dlogW/dφ
             // where l_base is the analytic density term at μ=y, and
@@ -634,6 +688,7 @@ impl Family {
                 n * (-trigamma(inv_phi) / scale.powi(4) + (1.0 - 2.0 * a) / scale.powi(3))
             }
             Family::Quantile { .. } => 0.0,
+            Family::Ocat { .. } => 0.0,
             Family::Tweedie { p } => {
                 let phi = scale;
                 // Near p=2: use the Gamma-limit (Tweedie → Gamma as p→2). The
@@ -768,6 +823,9 @@ impl Family {
             Family::TDist { sigma2, .. } => (*sigma2).max(1e-8),
             // Quantile: σ is the family parameter; φ stays at 1 by convention.
             Family::Quantile { .. } => 1.0,
+            // Ocat: dispersion fixed at 1 (categorical likelihood has no
+            // scale parameter). mgcv's ocat sets `scale = 1` throughout.
+            Family::Ocat { .. } => 1.0,
             Family::Gamma | Family::GammaLog => {
                 // Newton-Raphson on
                 //   F(φ) = dp + 2n[ψ(1/φ) + log φ] + mp·φ
@@ -1353,6 +1411,14 @@ pub fn fit_pirls_cached(
                 | Family::NegBin { .. } => y[i].max(0.1),
                 // Identity-link families: initialize η = y directly.
                 Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
+                // Ocat: PIRLS initialisation is special — η = (α_y + α_{y+1})/2
+                // (the midpoint of the flanking thresholds, mgcv efam.r:2947
+                // `initialize` expression). The `fit_pirls_cached` path
+                // doesn't drive ocat; the dedicated `fit_pirls_ocat` does its
+                // own init. This arm is reached only when something routes
+                // Ocat into fit_pirls_cached by mistake — fall back to y so
+                // we don't NaN.
+                Family::Ocat { .. } => y[i],
             };
             eta[i] = family.link(safe_y);
         }
@@ -1704,6 +1770,13 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
             Family::Quantile { tau, sigma, lambda } => {
                 quantile_elf_parts(yi, mui, tau, sigma, lambda).deviance
             }
+            // Ocat: deviance needs the threshold vector θ, which doesn't
+            // live in the Family variant. `fit_pirls_ocat` /
+            // `compute_deviance_ocat` carries θ explicitly. Returning 0
+            // here is the same convention TDist uses in `Family::TDist`'s
+            // ls/deviance code paths — the per-row math is dispatched
+            // through the dedicated entry points instead.
+            Family::Ocat { .. } => 0.0,
         };
 
         deviance += dev_i;
@@ -2870,6 +2943,265 @@ pub fn fit_pirls_tdist_discrete(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Ordered categorical (ocat) family — extended-family PIRLS
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Inner PIRLS for the ordered-categorical (`ocat`) family at fixed (θ, λ).
+///
+/// Mirrors `fit_pirls_tdist`'s shape: per-iteration we recompute the
+/// derivative struct via [`crate::ocat::ocat_dd`] (level 0), form working
+/// weights `w_i = 0.5·Dmu2_i` and working response `z_i = η_i − Dmu_i/Dmu2_i`
+/// (identity link, dμ/dη = 1), solve `(X'WX + S(λ)) β = X'Wz`, and apply
+/// the same `inner_pirls_step_halving` guard the standard exp-family path
+/// uses — for ocat the valideta/validmu checks are trivially true since
+/// the support is all of ℝ, but the pdev divergence guard still catches
+/// non-finite proposals.
+///
+/// θ is **external**: the outer Newton owns it and re-runs this function
+/// at each accepted (log λ, θ) step. The returned `PiRLSResult.sigma2` is
+/// `None` (no dispersion for ocat); the outer loop reads θ from the
+/// `SmoothingParameter.ocat_theta` cell instead.
+#[cfg(feature = "blas")]
+pub fn fit_pirls_ocat(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    theta: &[f64],
+    r: usize,
+    max_iter: usize,
+    tolerance: f64,
+    prior_weights: Option<&Array1<f64>>,
+) -> Result<PiRLSResult> {
+    let n = y.len();
+    let p = x.ncols();
+    if x.nrows() != n {
+        return Err(GAMError::DimensionMismatch(format!(
+            "X has {} rows but y has {}",
+            x.nrows(),
+            n
+        )));
+    }
+    if lambda.len() != penalties.len() {
+        return Err(GAMError::DimensionMismatch(
+            "lambda length must match number of penalty blocks".to_string(),
+        ));
+    }
+    if r < 3 {
+        return Err(GAMError::InvalidParameter(format!(
+            "ocat requires R >= 3 categories, got R = {r}"
+        )));
+    }
+    if theta.len() != r - 2 {
+        return Err(GAMError::InvalidParameter(format!(
+            "ocat theta length must be R-2 = {}, got {}",
+            r - 2,
+            theta.len()
+        )));
+    }
+
+    let family = Family::Ocat { r: r as u8 };
+
+    // Build the penalty total S(λ) = Σ λ_k S_k once.
+    let mut penalty_total = Array2::<f64>::zeros((p, p));
+    for (lambda_j, penalty_j) in lambda.iter().zip(penalties.iter()) {
+        penalty_j.scaled_add_to(&mut penalty_total, *lambda_j);
+    }
+    let num_penalties = lambda.len();
+    let ridge_scale = if std::env::var("MGCV_EXACT_FIT").is_ok() {
+        1e-12
+    } else {
+        1e-5 * (1.0 + (num_penalties as f64).sqrt())
+    };
+
+    // β = 0; initial η = boundary midpoint of each obs's category
+    // (mgcv efam.r:2947 `initialize` expression).
+    let mut beta = Array1::<f64>::zeros(p);
+    let alpha = crate::ocat::ocat_alpha(theta, r);
+    // mgcv uses α_1 = −2, α_{R+1} = α_R + 1 for the initialisation only
+    // (gives finite midpoints at the boundaries). The `dev.resids` /
+    // `Dd` path keeps the −∞/+∞ convention.
+    let alpha_init_low = -2.0_f64;
+    let alpha_init_high = alpha[r - 1] + 1.0;
+    let mut eta = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let yi = (y[i].round() as i64).clamp(1, r as i64) as usize;
+        let lo = if yi == 1 { alpha_init_low } else { alpha[yi - 1] };
+        let hi = if yi == r { alpha_init_high } else { alpha[yi] };
+        eta[i] = 0.5 * (lo + hi);
+    }
+
+    let mut converged = false;
+    let mut iter_used: usize = 0;
+    let mut dev_total: f64 = 0.0;
+
+    for outer in 0..max_iter {
+        iter_used = outer + 1;
+
+        let deriv = crate::ocat::ocat_dd(
+            y,
+            &eta,
+            theta,
+            r,
+            prior_weights,
+            crate::ocat::OcatDerivLevel::Level0,
+        );
+        // Working weight `w = 0.5 · Dmu2` (mgcv gam.fit5; identity link).
+        // Dmu2 should be > 0 in well-behaved regions; clamp to a small
+        // positive floor to keep the linear system PSD when a row's
+        // category sits right on a threshold.
+        let mut w = Array1::<f64>::zeros(n);
+        let mut z_work = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let w_i = (0.5 * deriv.dmu2[i]).max(1e-12);
+            w[i] = w_i;
+            let dmu = deriv.dmu[i];
+            // identity link: z = η − Dmu / Dmu2
+            z_work[i] = eta[i] - dmu / (deriv.dmu2[i].max(1e-12));
+        }
+
+        let xtwx = crate::reml::compute_xtwx_dispatch(None, x, &w);
+        let mut max_diag: f64 = 1.0;
+        for i in 0..p {
+            max_diag = max_diag.max(xtwx[[i, i]].abs());
+        }
+        let mut a = xtwx + &penalty_total;
+        let ridge = ridge_scale * max_diag;
+        for i in 0..p {
+            a[[i, i]] += ridge;
+        }
+        let wz: Array1<f64> = w
+            .iter()
+            .zip(z_work.iter())
+            .map(|(&wi, &zi)| wi * zi)
+            .collect();
+        let xtwz = x.t().dot(&wz);
+
+        let beta_old = beta.clone();
+        // Penalised deviance pre-step. ocat deviance comes from ocat_dd,
+        // not compute_deviance (which returns 0 for Ocat by design).
+        let pen_old: f64 = lambda
+            .iter()
+            .zip(penalties.iter())
+            .map(|(lam, pen)| *lam * pen.quadratic_form(&beta_old))
+            .sum();
+        let dev_old: f64 = deriv.d.iter().sum();
+        let pdev_old = dev_old + pen_old;
+
+        let beta_proposed = solve(a, xtwz)?;
+        let eta_proposed = x.dot(&beta_proposed);
+
+        // Custom step-halving: we can't use `inner_pirls_step_halving`
+        // because it dispatches deviance through `compute_deviance`,
+        // which returns 0 for Ocat. Use the ocat deviance directly.
+        let mut beta_accepted = beta_proposed.clone();
+        let mut eta_accepted = eta_proposed.clone();
+        let mut pdev_new = pdev_at_beta(&beta_accepted, &eta_accepted, lambda, penalties,
+                                        y, theta, r, prior_weights);
+        let div_thresh = 10.0 * (0.1 + pdev_old.abs()) * f64::EPSILON.sqrt();
+        let mut halvings = 0_usize;
+        let iter_one = iter_used == 1;
+        while (!pdev_new.is_finite() || (!iter_one && pdev_new - pdev_old > div_thresh))
+            && halvings < 100
+        {
+            for j in 0..beta_accepted.len() {
+                beta_accepted[j] = 0.5 * (beta_accepted[j] + beta_old[j]);
+            }
+            eta_accepted = x.dot(&beta_accepted);
+            pdev_new = pdev_at_beta(&beta_accepted, &eta_accepted, lambda, penalties,
+                                    y, theta, r, prior_weights);
+            halvings += 1;
+        }
+        if !pdev_new.is_finite() || (!iter_one && pdev_new - pdev_old > div_thresh) {
+            beta_accepted = beta_old.clone();
+            eta_accepted = x.dot(&beta_accepted);
+        }
+        beta = beta_accepted;
+        eta = eta_accepted;
+
+        let max_change = beta
+            .iter()
+            .zip(beta_old.iter())
+            .map(|(b, bo)| (b - bo).abs())
+            .fold(0.0_f64, f64::max);
+        if max_change < tolerance {
+            converged = true;
+            // Final-pass deviance.
+            let final_deriv = crate::ocat::ocat_dd(
+                y,
+                &eta,
+                theta,
+                r,
+                prior_weights,
+                crate::ocat::OcatDerivLevel::Level0,
+            );
+            dev_total = final_deriv.d.iter().sum();
+            break;
+        }
+        dev_total = deriv.d.iter().sum();
+    }
+
+    // Final-scoring pass — we need (w, z) at the converged β for the
+    // REML / log|H| computations in the outer loop.
+    let final_deriv = crate::ocat::ocat_dd(
+        y,
+        &eta,
+        theta,
+        r,
+        prior_weights,
+        crate::ocat::OcatDerivLevel::Level0,
+    );
+    let mut w_final = Array1::<f64>::zeros(n);
+    let mut z_final = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        w_final[i] = (0.5 * final_deriv.dmu2[i]).max(1e-12);
+        z_final[i] = eta[i] - final_deriv.dmu[i] / final_deriv.dmu2[i].max(1e-12);
+    }
+    let mu = eta.clone(); // identity link
+    Ok(PiRLSResult {
+        coefficients: beta,
+        fitted_values: mu,
+        linear_predictor: eta,
+        weights: w_final,
+        working_response: z_final,
+        deviance: dev_total,
+        iterations: iter_used,
+        converged,
+        sigma2: None,
+        df: None,
+    })
+}
+
+#[cfg(feature = "blas")]
+#[inline]
+fn pdev_at_beta(
+    beta: &Array1<f64>,
+    eta: &Array1<f64>,
+    lambda: &[f64],
+    penalties: &[BlockPenalty],
+    y: &Array1<f64>,
+    theta: &[f64],
+    r: usize,
+    prior_weights: Option<&Array1<f64>>,
+) -> f64 {
+    let deriv = crate::ocat::ocat_dd(
+        y,
+        eta,
+        theta,
+        r,
+        prior_weights,
+        crate::ocat::OcatDerivLevel::Level0,
+    );
+    let dev: f64 = deriv.d.iter().sum();
+    let pen: f64 = lambda
+        .iter()
+        .zip(penalties.iter())
+        .map(|(lam, pen)| *lam * pen.quadratic_form(beta))
+        .sum();
+    dev + pen
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Quantile (qgam-style) family — IRLS on ELF (Extended Log-F) loss
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -4023,6 +4355,9 @@ pub fn fit_pirls_discretized(
             | Family::NegBin { .. } => y[i].max(0.1),
             // Identity-link families: initialize η = y directly.
             Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
+            // Ocat is not driven through the discretised path (see
+            // `fit_pirls_ocat`). Defensive fallback.
+            Family::Ocat { .. } => y[i],
         };
         eta[i] = family.link(safe_y);
     }
