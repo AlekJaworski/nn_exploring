@@ -302,6 +302,68 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     y_original: Option<&Array1<f64>>,
     y_original_weights: Option<&Array1<f64>>,
 ) -> Result<f64> {
+    reml_criterion_multi_cached_mgcv_exact_inner(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        cached_xtwy,
+        mp,
+        family,
+        y_original,
+        y_original_weights,
+        None,
+    )
+}
+
+#[cfg(feature = "blas")]
+pub fn reml_criterion_multi_cached_mgcv_exact_fixed_sigma2(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    mp: usize,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
+    fixed_sigma2: f64,
+) -> Result<f64> {
+    reml_criterion_multi_cached_mgcv_exact_inner(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        cached_xtwy,
+        mp,
+        family,
+        y_original,
+        y_original_weights,
+        Some(fixed_sigma2),
+    )
+}
+
+#[cfg(feature = "blas")]
+fn reml_criterion_multi_cached_mgcv_exact_inner(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    mp: usize,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
+    fixed_sigma2: Option<f64>,
+) -> Result<f64> {
     let n = y.len();
     let p = x.ncols();
     // Optional internal reparametrisation: when `MGCV_REPARAM=1`, work in
@@ -382,7 +444,7 @@ pub fn reml_criterion_multi_cached_mgcv_exact(
     let dev_numerator = parts.dev_num;
     let bsb = parts.bsb;
     let dp = parts.dp;
-    let scale_est = parts.sigma2;
+    let scale_est = fixed_sigma2.unwrap_or(parts.sigma2).max(1e-300);
 
     // log|H| — mgcv's REML formula (gam.fit3.r:621) uses log|X'W·X + S|
     // with W = NEWTON weights `wf · α` (gam.fit3.r:511-522, "full Newton"
@@ -1778,7 +1840,7 @@ fn compute_dev_grad_beta(
 /// compute `∂σ̂²/∂ρ_k` via central finite differences in log-λ space.
 /// Returns 1.0 for Binomial/Poisson (fixed dispersion).
 #[cfg(feature = "blas")]
-fn compute_sigma2_at(
+pub(crate) fn compute_sigma2_at(
     y: &Array1<f64>,
     x: &Array2<f64>,
     w: &Array1<f64>,
@@ -1895,6 +1957,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner(
         enable_sigma_chain,
         mp,
         None,
+        None,
     )
 }
 
@@ -1917,6 +1980,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
     enable_sigma_chain: bool,
     mp: usize,
     beta_provided: Option<&Array1<f64>>,
+    fixed_sigma2: Option<f64>,
 ) -> Result<Array1<f64>> {
     let n = y.len();
     let m = lambdas.len();
@@ -1984,7 +2048,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
     // with the same plug-in σ² (gam.fit3.r:625 convention). For non-Gaussian
     // families, use estimate_phi_mgcv (dp/(n-mp)) which is the correct
     // profiled dispersion for extended-family REML.
-    let scale_est = match family {
+    let scale_est = fixed_sigma2.unwrap_or_else(|| match family {
         crate::pirls::Family::Binomial
         | crate::pirls::Family::Poisson
         | crate::pirls::Family::NegBin { .. } => 1.0,
@@ -1993,7 +2057,7 @@ pub fn reml_gradient_mgcv_exact_ift_inner_at_beta(
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
             family.estimate_phi_mgcv(y_for_grad, dp_for_phi, mp, 1.0, phi_init)
         }
-    };
+    });
 
     let p = a.nrows();
 
@@ -2254,6 +2318,37 @@ pub fn reml_gradient_mgcv_exact_ift(
     )
 }
 
+#[cfg(feature = "blas")]
+pub fn reml_gradient_mgcv_exact_ift_fixed_sigma2(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
+    fixed_sigma2: f64,
+    mp: usize,
+) -> Result<Array1<f64>> {
+    reml_gradient_mgcv_exact_ift_inner_at_beta(
+        y,
+        x,
+        w,
+        lambdas,
+        penalties_blocks,
+        cached_xtwx,
+        family,
+        y_original,
+        y_original_weights,
+        false,
+        mp,
+        None,
+        Some(fixed_sigma2),
+    )
+}
+
 /// IFT-based REML gradient at a known PIRLS-converged β, using mgcv's
 /// **Newton-weight A** for the log|H| / IFT pieces.
 ///
@@ -2440,6 +2535,7 @@ pub fn reml_hessian_mgcv_exact_ift(
     cached_xtwx: Option<&Array2<f64>>,
     family: crate::pirls::Family,
     y_original: Option<&Array1<f64>>,
+    fixed_sigma2: Option<f64>,
 ) -> Result<Array2<f64>> {
     let n = y.len();
     let m = lambdas.len();
@@ -2529,7 +2625,7 @@ pub fn reml_hessian_mgcv_exact_ift(
         .map(|(l, pen)| l * pen.quadratic_form(&beta))
         .sum();
     let dp_hess = dev_numerator + bsb_hess;
-    let scale_est = match family {
+    let scale_est = fixed_sigma2.unwrap_or_else(|| match family {
         crate::pirls::Family::Binomial
         | crate::pirls::Family::Poisson
         | crate::pirls::Family::NegBin { .. } => 1.0,
@@ -2537,7 +2633,7 @@ pub fn reml_hessian_mgcv_exact_ift(
             let phi_init = dev_numerator / ((n as f64) - tr_a).max(1e-10);
             family.estimate_phi_mgcv(y_for_hess, dp_hess, mp_hess, 1.0, phi_init)
         }
-    };
+    });
 
     // IFT first derivatives
     let b1 = compute_b1_ift(&a_inv, &beta, lambdas, penalties_blocks);
@@ -2760,6 +2856,106 @@ pub fn reml_hessian_mgcv_exact_ift(
     }
 
     Ok(hess)
+}
+
+/// Augment a gam.fit3 REML `(rho)` gradient/Hessian with mgcv's analytic
+/// independent `log(phi)` coordinate.
+///
+/// Direct port of `gam.fit3.r:628-637` (gamma=1, REML not ML):
+///   g_phi      = -Dp/(2φ) - ls'(φ)φ - Mp/2
+///   h_phi_phi =  Dp/(2φ) - ls''(φ)φ² - ls'(φ)φ
+///   h_rho_phi = -D1/(2φ)
+/// where `D1` is the derivative of penalised deviance, excluding determinant
+/// terms. The supplied `rho_grad`/`rho_hess` are copied unchanged into the
+/// leading block; this helper only supplies the extra row/column.
+#[cfg(feature = "blas")]
+pub fn reml_joint_logphi_augment_gamfit3_analytic(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties_blocks: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    family: crate::pirls::Family,
+    y_original: Option<&Array1<f64>>,
+    y_original_weights: Option<&Array1<f64>>,
+    mp: usize,
+    log_phi: f64,
+    rho_grad: &Array1<f64>,
+    rho_hess: &Array2<f64>,
+) -> Result<(Array1<f64>, Array2<f64>)> {
+    let m = lambdas.len();
+    let dim = m + 1;
+    let phi = log_phi.exp().max(1.0e-300);
+    let xtwx_owned;
+    let xtwx = if let Some(c) = cached_xtwx {
+        c
+    } else {
+        xtwx_owned = compute_xtwx_dispatch(None, x, w);
+        &xtwx_owned
+    };
+    let system = assemble_reml_system(y, x, w, xtwx, lambdas, penalties_blocks, cached_xtwy)?;
+    let parts = RemlScoreParts::from_system(
+        &system,
+        y,
+        w,
+        x,
+        xtwx,
+        lambdas,
+        penalties_blocks,
+        family,
+        y_original,
+        y_original_weights,
+        mp,
+        y.len(),
+    );
+
+    let beta = &system.beta;
+    let a_inv = &system.a_inv;
+    let b1 = compute_b1_ift(a_inv, beta, lambdas, penalties_blocks);
+    let dev_grad_beta =
+        compute_dev_grad_beta(y, x, w, beta, family, y_original, y_original_weights);
+    let p = x.ncols();
+    let mut sum_lambda_s_beta = Array1::<f64>::zeros(p);
+    for (lambda, penalty) in lambdas.iter().zip(penalties_blocks.iter()) {
+        let s_j_beta = penalty.dot_vec(beta);
+        for r in 0..p {
+            sum_lambda_s_beta[r] += lambda * s_j_beta[r];
+        }
+    }
+
+    let y_for_ls = y_original.unwrap_or(y);
+    let dls = family.dls_dsigma2(y_for_ls, phi);
+    let d2ls = family.d2ls_dsigma2(y_for_ls, phi);
+
+    let mut grad = Array1::<f64>::zeros(dim);
+    for k in 0..m {
+        grad[k] = rho_grad[k];
+    }
+    grad[m] = -parts.dp / (2.0 * phi) - dls * phi - (mp as f64) / 2.0;
+
+    let mut hess = Array2::<f64>::zeros((dim, dim));
+    for i in 0..m {
+        for j in 0..m {
+            hess[[i, j]] = rho_hess[[i, j]];
+        }
+    }
+    for (k, (lambda, penalty)) in lambdas.iter().zip(penalties_blocks.iter()).enumerate() {
+        let mut dev_dot_b1 = 0.0;
+        let mut sls_dot_b1 = 0.0;
+        for r in 0..p {
+            dev_dot_b1 += dev_grad_beta[r] * b1[[r, k]];
+            sls_dot_b1 += sum_lambda_s_beta[r] * b1[[r, k]];
+        }
+        let d1_k = dev_dot_b1 + lambda * penalty.quadratic_form(beta) + 2.0 * sls_dot_b1;
+        let cross = -d1_k / (2.0 * phi);
+        hess[[k, m]] = cross;
+        hess[[m, k]] = cross;
+    }
+    hess[[m, m]] = parts.dp / (2.0 * phi) - d2ls * phi * phi - dls * phi;
+
+    Ok((grad, hess))
 }
 
 /// REML criterion with optional cached X'WX to avoid O(n*p^2) recomputation

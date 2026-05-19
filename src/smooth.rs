@@ -7,13 +7,15 @@ use crate::linalg::solve;
 pub use crate::reml::ScaleParameterMethod;
 #[cfg(feature = "blas")]
 use crate::reml::{
-    compute_sl_fitchol_step, compute_xtwx_cholesky, gcv_criterion, newton_1d_with_halving,
-    penalty_sqrt, reml_criterion, reml_criterion_multi, reml_criterion_multi_cached,
-    reml_criterion_multi_cached_mgcv_exact, reml_gradient_gamfit4_tdist_analytic,
+    compute_sigma2_at, compute_sl_fitchol_step, compute_xtwx_cholesky, gcv_criterion,
+    newton_1d_with_halving, penalty_sqrt, reml_criterion, reml_criterion_multi,
+    reml_criterion_multi_cached, reml_criterion_multi_cached_mgcv_exact,
+    reml_criterion_multi_cached_mgcv_exact_fixed_sigma2, reml_gradient_gamfit4_tdist_analytic,
     reml_gradient_mgcv_exact_closed_form, reml_gradient_mgcv_exact_ift,
-    reml_gradient_multi_qr_adaptive, reml_gradient_multi_qr_adaptive_cached_edf,
-    reml_hessian_gamfit4_tdist_analytic, reml_hessian_mgcv_exact_closed_form,
-    reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached, reml_joint_gh_gamfit4_tdist_analytic,
+    reml_gradient_mgcv_exact_ift_fixed_sigma2, reml_gradient_multi_qr_adaptive,
+    reml_gradient_multi_qr_adaptive_cached_edf, reml_hessian_gamfit4_tdist_analytic,
+    reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift, reml_hessian_multi_cached,
+    reml_joint_gh_gamfit4_tdist_analytic, reml_joint_logphi_augment_gamfit3_analytic,
     tweedie_theta_derivatives_cached, ExtraKind, ExtraParam, OuterLinearCache, OuterSearchVector,
 };
 #[cfg(not(feature = "blas"))]
@@ -59,7 +61,19 @@ fn use_mgcv_exact_ift_policy(
 
 #[cfg(feature = "blas")]
 fn joint_logphi_scaffold_active(family: crate::pirls::Family) -> bool {
-    std::env::var("MGCV_JOINT_LOGPHI").is_ok() && matches!(family, crate::pirls::Family::Gaussian)
+    std::env::var("MGCV_JOINT_LOGPHI").is_ok()
+        && matches!(
+            family,
+            crate::pirls::Family::Gaussian
+                | crate::pirls::Family::Gamma
+                | crate::pirls::Family::GammaLog
+        )
+}
+
+#[cfg(feature = "blas")]
+fn joint_logphi_fd_active(family: crate::pirls::Family) -> bool {
+    std::env::var("MGCV_JOINT_LOGPHI_FD").is_ok()
+        && matches!(family, crate::pirls::Family::GammaLog)
 }
 
 #[cfg(feature = "blas")]
@@ -465,6 +479,137 @@ fn reml_hessian_finite_diff(
         }
     }
     Ok(hess)
+}
+
+#[cfg(feature = "blas")]
+fn dispatch_reml_score_fixed_logphi_fd(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    log_phi: f64,
+    pirls_callback: &mut Option<PirlsCallback<'_>>,
+) -> Result<f64> {
+    let sigma2 = log_phi.exp().max(1e-300);
+    if let Some(cb) = pirls_callback.as_mut() {
+        let refresh = cb(lambdas)?;
+        let refresh_xtwy = compute_xtwy_helper(x, &refresh.weights, &refresh.working_response);
+        reml_criterion_multi_cached_mgcv_exact_fixed_sigma2(
+            &refresh.working_response,
+            x,
+            &refresh.weights,
+            lambdas,
+            penalties,
+            Some(&refresh.xtwx),
+            Some(&refresh_xtwy),
+            sp.mp,
+            sp.family,
+            sp.y_original.as_ref(),
+            sp.y_original_weights.as_ref(),
+            sigma2,
+        )
+    } else {
+        reml_criterion_multi_cached_mgcv_exact_fixed_sigma2(
+            y,
+            x,
+            w,
+            lambdas,
+            penalties,
+            cached_xtwx,
+            cached_xtwy,
+            sp.mp,
+            sp.family,
+            sp.y_original.as_ref(),
+            sp.y_original_weights.as_ref(),
+            sigma2,
+        )
+    }
+}
+
+#[cfg(feature = "blas")]
+fn reml_joint_logphi_finite_diff(
+    sp: &SmoothingParameter,
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    w: &Array1<f64>,
+    lambdas: &[f64],
+    penalties: &[BlockPenalty],
+    cached_xtwx: Option<&Array2<f64>>,
+    cached_xtwy: Option<&Array1<f64>>,
+    log_phi: f64,
+    pirls_callback: &mut Option<PirlsCallback<'_>>,
+) -> Result<(Array1<f64>, Array2<f64>)> {
+    let m = lambdas.len();
+    let dim = m + 1;
+    let h = 1.0e-4_f64;
+    let log_lambdas: Vec<f64> = lambdas.iter().map(|l| l.ln()).collect();
+    let mut base = log_lambdas.clone();
+    base.push(log_phi);
+
+    let eval = |coords: &[f64], cb: &mut Option<PirlsCallback<'_>>| -> Result<f64> {
+        let lam: Vec<f64> = coords[..m].iter().map(|l| l.exp()).collect();
+        dispatch_reml_score_fixed_logphi_fd(
+            sp,
+            y,
+            x,
+            w,
+            &lam,
+            penalties,
+            cached_xtwx,
+            cached_xtwy,
+            coords[m],
+            cb,
+        )
+    };
+
+    let r0 = eval(&base, pirls_callback)?;
+    let mut r_plus = vec![0.0_f64; dim];
+    let mut r_minus = vec![0.0_f64; dim];
+    let mut grad = Array1::<f64>::zeros(dim);
+    for i in 0..dim {
+        let mut cp = base.clone();
+        let mut cm = base.clone();
+        cp[i] += h;
+        cm[i] -= h;
+        r_plus[i] = eval(&cp, pirls_callback)?;
+        r_minus[i] = eval(&cm, pirls_callback)?;
+        grad[i] = (r_plus[i] - r_minus[i]) / (2.0 * h);
+    }
+
+    let mut hess = Array2::<f64>::zeros((dim, dim));
+    let h2 = h * h;
+    for i in 0..dim {
+        hess[[i, i]] = (r_plus[i] - 2.0 * r0 + r_minus[i]) / h2;
+    }
+    for i in 0..dim {
+        for j in (i + 1)..dim {
+            let mut cpp = base.clone();
+            let mut cpm = base.clone();
+            let mut cmp = base.clone();
+            let mut cmm = base.clone();
+            cpp[i] += h;
+            cpp[j] += h;
+            cpm[i] += h;
+            cpm[j] -= h;
+            cmp[i] -= h;
+            cmp[j] += h;
+            cmm[i] -= h;
+            cmm[j] -= h;
+            let off = (eval(&cpp, pirls_callback)?
+                - eval(&cpm, pirls_callback)?
+                - eval(&cmp, pirls_callback)?
+                + eval(&cmm, pirls_callback)?)
+                / (4.0 * h2);
+            hess[[i, j]] = off;
+            hess[[j, i]] = off;
+        }
+    }
+
+    Ok((grad, hess))
 }
 
 /// Compute X'Wy via element-wise sqrt-weighting. Used to refresh the
@@ -941,7 +1086,7 @@ impl SmoothingParameter {
     #[cfg(feature = "blas")]
     pub(crate) fn build_outer_search_vector(&self, log_lambda: &[f64]) -> OuterSearchVector {
         let mut extras: Vec<ExtraParam> = Vec::new();
-        if joint_logphi_scaffold_active(self.family) {
+        if joint_logphi_scaffold_active(self.family) || joint_logphi_fd_active(self.family) {
             extras.push(ExtraParam {
                 kind: ExtraKind::LogPhi,
                 value: self.log_phi,
@@ -1452,21 +1597,40 @@ impl SmoothingParameter {
         // -------------------------------------------------------------------
         let joint_logphi_active =
             self.mgcv_exact_score && joint_logphi_scaffold_active(self.family);
-        if joint_logphi_active {
-            self.log_phi = gaussian_logphi_profile_from_system(
-                &y_local,
-                &w_local,
-                &xtwx_local,
-                &xtwy_local,
-                &log_lambda,
-                penalties,
-                self.mp,
-            )?;
+        let joint_logphi_fd_active = self.mgcv_exact_score && joint_logphi_fd_active(self.family);
+        if joint_logphi_active || joint_logphi_fd_active {
+            self.log_phi = if matches!(self.family, crate::pirls::Family::Gaussian) {
+                gaussian_logphi_profile_from_system(
+                    &y_local,
+                    &w_local,
+                    &xtwx_local,
+                    &xtwy_local,
+                    &log_lambda,
+                    penalties,
+                    self.mp,
+                )?
+            } else {
+                let lambdas0: Vec<f64> = log_lambda.iter().map(|l| l.exp()).collect();
+                compute_sigma2_at(
+                    &y_local,
+                    x,
+                    &w_local,
+                    &lambdas0,
+                    penalties,
+                    Some(&xtwx_local),
+                    self.family,
+                    self.y_original.as_ref(),
+                    self.y_original_weights.as_ref(),
+                    self.mp,
+                )?
+                .max(1.0e-300)
+                .ln()
+            };
         }
         let joint_tdist_active = self.mgcv_exact_score
             && self.tdist_profile
             && matches!(self.family, crate::pirls::Family::TDist { .. });
-        let joint_active = joint_tdist_active || joint_logphi_active;
+        let joint_active = joint_tdist_active || joint_logphi_active || joint_logphi_fd_active;
         let extras_template: Vec<ExtraParam> = if joint_active {
             self.build_outer_search_vector(&log_lambda).extras
         } else {
@@ -1601,15 +1765,43 @@ impl SmoothingParameter {
             // Compute current REML value for convergence check
             // (dispatches to mgcv-exact formula when mgcv_exact_score=true)
             let current_reml = if joint_logphi_active {
-                gaussian_joint_logphi_score_from_system(
+                if matches!(self.family, crate::pirls::Family::Gaussian) {
+                    gaussian_joint_logphi_score_from_system(
+                        &y_local,
+                        &w_local,
+                        &xtwx_local,
+                        &xtwy_local,
+                        &log_lambda,
+                        penalties,
+                        self.log_phi,
+                        self.mp,
+                    )?
+                } else {
+                    dispatch_reml_score_fixed_logphi_fd(
+                        self,
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        Some(&xtwy_local),
+                        self.log_phi,
+                        &mut pirls_callback,
+                    )?
+                }
+            } else if joint_logphi_fd_active {
+                dispatch_reml_score_fixed_logphi_fd(
+                    self,
                     &y_local,
+                    x,
                     &w_local,
-                    &xtwx_local,
-                    &xtwy_local,
-                    &log_lambda,
+                    &lambdas,
                     penalties,
+                    Some(&xtwx_local),
+                    Some(&xtwy_local),
                     self.log_phi,
-                    self.mp,
+                    &mut pirls_callback,
                 )?
             } else {
                 dispatch_reml_score(
@@ -1665,15 +1857,99 @@ impl SmoothingParameter {
                     self.family,
                 )?)
             } else if joint_logphi_active {
-                Some(gaussian_joint_logphi_gh_from_system(
+                if matches!(self.family, crate::pirls::Family::Gaussian) {
+                    Some(gaussian_joint_logphi_gh_from_system(
+                        &y_local,
+                        &w_local,
+                        &xtwx_local,
+                        &xtwy_local,
+                        &log_lambda,
+                        penalties,
+                        self.log_phi,
+                        self.mp,
+                    )?)
+                } else {
+                    let phi = self.log_phi.exp().max(1.0e-300);
+                    let rho_grad = if use_ift {
+                        reml_gradient_mgcv_exact_ift_fixed_sigma2(
+                            &y_local,
+                            x,
+                            &w_local,
+                            &lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            self.family,
+                            self.y_original.as_ref(),
+                            self.y_original_weights.as_ref(),
+                            phi,
+                            self.mp,
+                        )?
+                    } else {
+                        crate::reml::reml_gradient_mgcv_exact_closed_form_fixed_sigma2(
+                            &y_local,
+                            x,
+                            &w_local,
+                            &lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            Some(&xtwy_local),
+                            self.family,
+                            phi,
+                        )?
+                    };
+                    let rho_hess = if use_ift {
+                        reml_hessian_mgcv_exact_ift(
+                            &y_local,
+                            x,
+                            &w_local,
+                            &lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            self.family,
+                            self.y_original.as_ref(),
+                            Some(phi),
+                        )?
+                    } else {
+                        reml_hessian_mgcv_exact_closed_form(
+                            &y_local,
+                            x,
+                            &w_local,
+                            &lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            Some(&xtwy_local),
+                            self.family,
+                        )?
+                    };
+                    Some(reml_joint_logphi_augment_gamfit3_analytic(
+                        &y_local,
+                        x,
+                        &w_local,
+                        &lambdas,
+                        penalties,
+                        Some(&xtwx_local),
+                        Some(&xtwy_local),
+                        self.family,
+                        self.y_original.as_ref(),
+                        self.y_original_weights.as_ref(),
+                        self.mp,
+                        self.log_phi,
+                        &rho_grad,
+                        &rho_hess,
+                    )?)
+                }
+            } else if joint_logphi_fd_active {
+                Some(reml_joint_logphi_finite_diff(
+                    self,
                     &y_local,
+                    x,
                     &w_local,
-                    &xtwx_local,
-                    &xtwy_local,
-                    &log_lambda,
+                    &lambdas,
                     penalties,
+                    Some(&xtwx_local),
+                    Some(&xtwy_local),
                     self.log_phi,
-                    self.mp,
+                    &mut pirls_callback,
                 )?)
             } else {
                 None
@@ -1815,6 +2091,7 @@ impl SmoothingParameter {
                         Some(&xtwx_local),
                         self.family,
                         self.y_original.as_ref(),
+                        None,
                     )?
                 } else {
                     reml_hessian_mgcv_exact_closed_form(
@@ -2256,7 +2533,7 @@ impl SmoothingParameter {
                 } else {
                     Vec::new()
                 };
-                let trial_log_phi = if joint_logphi_active {
+                let trial_log_phi = if joint_logphi_active || joint_logphi_fd_active {
                     extras_kinds
                         .iter()
                         .position(|&kind| kind == ExtraKind::LogPhi)
@@ -2299,29 +2576,112 @@ impl SmoothingParameter {
                                     refresh.elapsed_micros
                                 );
                             }
-                            dispatch_reml_score(
-                                self,
-                                &refresh.working_response,
-                                x,
-                                &refresh.weights,
-                                &new_lambdas,
-                                penalties,
-                                Some(&refresh.xtwx),
-                                None,
-                            )
+                            if joint_logphi_active {
+                                let refresh_xtwy = compute_xtwy_helper(
+                                    x,
+                                    &refresh.weights,
+                                    &refresh.working_response,
+                                );
+                                if matches!(self.family, crate::pirls::Family::Gaussian) {
+                                    gaussian_joint_logphi_score_from_system(
+                                        &refresh.working_response,
+                                        &refresh.weights,
+                                        &refresh.xtwx,
+                                        &refresh_xtwy,
+                                        &new_log_lambda,
+                                        penalties,
+                                        trial_log_phi,
+                                        self.mp,
+                                    )
+                                } else {
+                                    reml_criterion_multi_cached_mgcv_exact_fixed_sigma2(
+                                        &refresh.working_response,
+                                        x,
+                                        &refresh.weights,
+                                        &new_lambdas,
+                                        penalties,
+                                        Some(&refresh.xtwx),
+                                        Some(&refresh_xtwy),
+                                        self.mp,
+                                        self.family,
+                                        self.y_original.as_ref(),
+                                        self.y_original_weights.as_ref(),
+                                        trial_log_phi.exp().max(1e-300),
+                                    )
+                                }
+                            } else if joint_logphi_fd_active {
+                                let refresh_xtwy = compute_xtwy_helper(
+                                    x,
+                                    &refresh.weights,
+                                    &refresh.working_response,
+                                );
+                                reml_criterion_multi_cached_mgcv_exact_fixed_sigma2(
+                                    &refresh.working_response,
+                                    x,
+                                    &refresh.weights,
+                                    &new_lambdas,
+                                    penalties,
+                                    Some(&refresh.xtwx),
+                                    Some(&refresh_xtwy),
+                                    self.mp,
+                                    self.family,
+                                    self.y_original.as_ref(),
+                                    self.y_original_weights.as_ref(),
+                                    trial_log_phi.exp().max(1e-300),
+                                )
+                            } else {
+                                dispatch_reml_score(
+                                    self,
+                                    &refresh.working_response,
+                                    x,
+                                    &refresh.weights,
+                                    &new_lambdas,
+                                    penalties,
+                                    Some(&refresh.xtwx),
+                                    None,
+                                )
+                            }
                         }
                         Err(e) => Err(e),
                     }
                 } else if joint_logphi_active {
-                    gaussian_joint_logphi_score_from_system(
+                    if matches!(self.family, crate::pirls::Family::Gaussian) {
+                        gaussian_joint_logphi_score_from_system(
+                            &y_local,
+                            &w_local,
+                            &xtwx_local,
+                            &xtwy_local,
+                            &new_log_lambda,
+                            penalties,
+                            trial_log_phi,
+                            self.mp,
+                        )
+                    } else {
+                        dispatch_reml_score_fixed_logphi_fd(
+                            self,
+                            &y_local,
+                            x,
+                            &w_local,
+                            &new_lambdas,
+                            penalties,
+                            Some(&xtwx_local),
+                            Some(&xtwy_local),
+                            trial_log_phi,
+                            &mut pirls_callback,
+                        )
+                    }
+                } else if joint_logphi_fd_active {
+                    dispatch_reml_score_fixed_logphi_fd(
+                        self,
                         &y_local,
+                        x,
                         &w_local,
-                        &xtwx_local,
-                        &xtwy_local,
-                        &new_log_lambda,
+                        &new_lambdas,
                         penalties,
+                        Some(&xtwx_local),
+                        Some(&xtwy_local),
                         trial_log_phi,
-                        self.mp,
+                        &mut pirls_callback,
                     )
                 } else {
                     dispatch_reml_score(
@@ -2479,7 +2839,10 @@ impl SmoothingParameter {
                             .min(extras_hi[k]);
                         *v = updated;
                     }
-                    let mut accepted_sv = self.build_outer_search_vector(&log_lambda);
+                    let mut accepted_sv = OuterSearchVector {
+                        log_lambda: log_lambda.clone(),
+                        extras: extras_template.clone(),
+                    };
                     for (k, &v) in extras_values.iter().enumerate() {
                         accepted_sv.extras[k].value = v;
                     }
@@ -3465,6 +3828,116 @@ mod tests {
         // Their sum is therefore exactly (n - Mp)/2 at fixed rho.
         let expected = (y.len() as f64 - mp as f64) * 0.5;
         assert!((g_joint[1] + h_joint[[1, 1]] - expected).abs() < 1e-10);
+    }
+
+    #[cfg(feature = "blas")]
+    #[test]
+    fn test_gammalog_joint_logphi_analytic_matches_fixed_phi_fd() {
+        use crate::block_penalty::BlockPenalty;
+
+        let y = Array1::from_vec(vec![0.8, 1.1, 1.4, 1.9, 2.7, 3.5, 4.2, 5.1]);
+        let x = Array2::from_shape_fn((8, 3), |(i, j)| {
+            let t = -0.8 + 1.6 * (i as f64) / 7.0;
+            match j {
+                0 => 1.0,
+                1 => t,
+                _ => t * t,
+            }
+        });
+        let w = Array1::ones(8);
+        let xtwx = x.t().dot(&x);
+        let xtwy = x.t().dot(&y);
+        let penalties = vec![BlockPenalty::new(
+            Array2::from_diag(&Array1::from_vec(vec![0.0, 1.0, 1.0])),
+            0,
+            3,
+        )];
+        let lambdas = vec![0.7_f64];
+        let mp = 1_usize;
+        let family = crate::pirls::Family::GammaLog;
+        let phi = compute_sigma2_at(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+            Some(&xtwx),
+            family,
+            Some(&y),
+            None,
+            mp,
+        )
+        .unwrap();
+        let log_phi = phi.ln();
+
+        let rho_grad = reml_gradient_mgcv_exact_ift_fixed_sigma2(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+            Some(&xtwx),
+            family,
+            Some(&y),
+            None,
+            phi,
+            mp,
+        )
+        .unwrap();
+        let rho_hess = reml_hessian_mgcv_exact_ift(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+            Some(&xtwx),
+            family,
+            Some(&y),
+            Some(phi),
+        )
+        .unwrap();
+        let (g_analytic, h_analytic) = reml_joint_logphi_augment_gamfit3_analytic(
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+            Some(&xtwx),
+            Some(&xtwy),
+            family,
+            Some(&y),
+            None,
+            mp,
+            log_phi,
+            &rho_grad,
+            &rho_hess,
+        )
+        .unwrap();
+
+        let mut sp = SmoothingParameter::new(1, OptimizationMethod::REML);
+        sp.mgcv_exact_score = true;
+        sp.family = family;
+        sp.mp = mp;
+        sp.y_original = Some(y.clone());
+        let mut cb = None;
+        let (g_fd, h_fd) = reml_joint_logphi_finite_diff(
+            &sp,
+            &y,
+            &x,
+            &w,
+            &lambdas,
+            &penalties,
+            Some(&xtwx),
+            Some(&xtwy),
+            log_phi,
+            &mut cb,
+        )
+        .unwrap();
+
+        assert!((g_analytic[1] - g_fd[1]).abs() < 1e-5);
+        assert!((h_analytic[[1, 1]] - h_fd[[1, 1]]).abs() < 1e-3);
+        assert!((h_analytic[[0, 1]] - h_fd[[0, 1]]).abs() < 5e-3);
+        assert!((h_analytic[[1, 0]] - h_analytic[[0, 1]]).abs() < 1e-12);
     }
 
     #[cfg(feature = "blas")]

@@ -82,7 +82,11 @@ impl Link {
             Link::Logit { eta_max } => eta.clamp(-eta_max, eta_max),
             Link::Reciprocal { eta_eps } => {
                 if eta.abs() < eta_eps {
-                    if eta >= 0.0 { eta_eps } else { -eta_eps }
+                    if eta >= 0.0 {
+                        eta_eps
+                    } else {
+                        -eta_eps
+                    }
                 } else {
                     eta
                 }
@@ -110,7 +114,11 @@ impl Link {
                 // For reciprocal, μ and η swap roles. The forward path
                 // η = 1/μ needs |μ| ≥ eta_eps to stay bounded.
                 if mu.abs() < eta_eps {
-                    if mu >= 0.0 { eta_eps } else { -eta_eps }
+                    if mu >= 0.0 {
+                        eta_eps
+                    } else {
+                        -eta_eps
+                    }
                 } else {
                     mu
                 }
@@ -227,15 +235,27 @@ mod tests {
             for &eta in &[-50.0, -25.0, -1.0, 0.0, 1.0, 25.0, 50.0, 100.0] {
                 let e_safe = link.safe_eta(eta);
                 // Idempotence: safe_eta(safe_eta(x)) == safe_eta(x)
-                assert_eq!(link.safe_eta(e_safe), e_safe, "{:?} safe_eta non-idempotent at {}", link, eta);
+                assert_eq!(
+                    link.safe_eta(e_safe),
+                    e_safe,
+                    "{:?} safe_eta non-idempotent at {}",
+                    link,
+                    eta
+                );
                 // Conjugation: f(eta) == f(safe_eta(eta))
                 assert_eq!(
-                    link.inverse_link(eta), link.inverse_link(e_safe),
-                    "{:?} inverse_link not invariant under safe_eta at eta={}", link, eta
+                    link.inverse_link(eta),
+                    link.inverse_link(e_safe),
+                    "{:?} inverse_link not invariant under safe_eta at eta={}",
+                    link,
+                    eta
                 );
                 assert_eq!(
-                    link.d_inverse_link(eta), link.d_inverse_link(e_safe),
-                    "{:?} d_inverse_link not invariant under safe_eta at eta={}", link, eta
+                    link.d_inverse_link(eta),
+                    link.d_inverse_link(e_safe),
+                    "{:?} d_inverse_link not invariant under safe_eta at eta={}",
+                    link,
+                    eta
                 );
             }
         }
@@ -259,16 +279,41 @@ mod tests {
             };
             for &mu in test_mus {
                 let m_safe = link.safe_mu(mu);
-                assert_eq!(link.safe_mu(m_safe), m_safe,
-                    "{:?} safe_mu non-idempotent at {}", link, mu);
-                assert_eq!(link.link(mu), link.link(m_safe),
-                    "{:?} link not invariant under safe_mu at mu={}", link, mu);
-                assert_eq!(link.d2_link(mu), link.d2_link(m_safe),
-                    "{:?} d2_link not invariant under safe_mu at mu={}", link, mu);
-                assert_eq!(link.d3_link(mu), link.d3_link(m_safe),
-                    "{:?} d3_link not invariant under safe_mu at mu={}", link, mu);
-                assert_eq!(link.d4_link(mu), link.d4_link(m_safe),
-                    "{:?} d4_link not invariant under safe_mu at mu={}", link, mu);
+                assert_eq!(
+                    link.safe_mu(m_safe),
+                    m_safe,
+                    "{:?} safe_mu non-idempotent at {}",
+                    link,
+                    mu
+                );
+                assert_eq!(
+                    link.link(mu),
+                    link.link(m_safe),
+                    "{:?} link not invariant under safe_mu at mu={}",
+                    link,
+                    mu
+                );
+                assert_eq!(
+                    link.d2_link(mu),
+                    link.d2_link(m_safe),
+                    "{:?} d2_link not invariant under safe_mu at mu={}",
+                    link,
+                    mu
+                );
+                assert_eq!(
+                    link.d3_link(mu),
+                    link.d3_link(m_safe),
+                    "{:?} d3_link not invariant under safe_mu at mu={}",
+                    link,
+                    mu
+                );
+                assert_eq!(
+                    link.d4_link(mu),
+                    link.d4_link(m_safe),
+                    "{:?} d4_link not invariant under safe_mu at mu={}",
+                    link,
+                    mu
+                );
             }
         }
     }
@@ -286,7 +331,14 @@ mod tests {
             let mu = link.inverse_link(eta);
             let v = variance(mu);
             let w = dmu * dmu / v;
-            assert!(w.is_finite(), "w non-finite at eta={}: dmu={} mu={} v={}", eta, dmu, mu, v);
+            assert!(
+                w.is_finite(),
+                "w non-finite at eta={}: dmu={} mu={} v={}",
+                eta,
+                dmu,
+                mu,
+                v
+            );
         }
     }
 

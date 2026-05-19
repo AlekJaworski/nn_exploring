@@ -2,12 +2,17 @@ use mgcv_rust::block_penalty::BlockPenalty;
 use mgcv_rust::pirls::Family;
 use mgcv_rust::reml::{
     compute_xtwx_dispatch, compute_xtwy_dispatch, reml_gradient_mgcv_exact_closed_form,
-    reml_gradient_mgcv_exact_ift, reml_hessian_mgcv_exact_closed_form,
-    reml_hessian_mgcv_exact_ift,
+    reml_gradient_mgcv_exact_ift, reml_hessian_mgcv_exact_closed_form, reml_hessian_mgcv_exact_ift,
 };
 use ndarray::{Array1, Array2};
 
-fn synthetic_gaussian_system() -> (Array1<f64>, Array2<f64>, Array1<f64>, Vec<f64>, Vec<BlockPenalty>) {
+fn synthetic_gaussian_system() -> (
+    Array1<f64>,
+    Array2<f64>,
+    Array1<f64>,
+    Vec<f64>,
+    Vec<BlockPenalty>,
+) {
     let n = 80;
     let d = 2;
     let k = 5;
@@ -22,8 +27,8 @@ fn synthetic_gaussian_system() -> (Array1<f64>, Array2<f64>, Array1<f64>, Vec<f6
             x[[i, kk]] = ((kk + 1) as f64 * std::f64::consts::PI * t0).sin();
             x[[i, k + kk]] = ((kk + 1) as f64 * std::f64::consts::PI * t1).cos();
         }
-        y[i] = (2.0 * std::f64::consts::PI * t0).sin()
-            + 0.5 * (2.0 * std::f64::consts::PI * t1).cos();
+        y[i] =
+            (2.0 * std::f64::consts::PI * t0).sin() + 0.5 * (2.0 * std::f64::consts::PI * t1).cos();
     }
 
     let mut penalties = Vec::new();
@@ -116,19 +121,29 @@ fn closed_form_gradient_hessian_use_reparam_basis() {
         Some(&xtwx),
         Family::Gaussian,
         None,
+        None,
     )
     .expect("IFT Hessian failed");
 
     std::env::remove_var("MGCV_REPARAM");
 
     for (got, want) in grad_closed.iter().zip(grad_ift.iter()) {
-        assert!((got - want).abs() < 1e-6, "gradient mismatch: {got} vs {want}");
+        assert!(
+            (got - want).abs() < 1e-6,
+            "gradient mismatch: {got} vs {want}"
+        );
     }
     for (got, want) in grad_closed.iter().zip(grad_closed_no_cache.iter()) {
-        assert!((got - want).abs() < 1e-12, "cached gradient mismatch: {got} vs {want}");
+        assert!(
+            (got - want).abs() < 1e-12,
+            "cached gradient mismatch: {got} vs {want}"
+        );
     }
     for (got, want) in hess_closed.iter().zip(hess_closed_no_cache.iter()) {
-        assert!((got - want).abs() < 1e-12, "cached hessian mismatch: {got} vs {want}");
+        assert!(
+            (got - want).abs() < 1e-12,
+            "cached hessian mismatch: {got} vs {want}"
+        );
     }
     for value in hess_closed.iter() {
         assert!(value.is_finite(), "non-finite hessian value: {value}");

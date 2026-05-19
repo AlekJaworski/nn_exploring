@@ -203,19 +203,21 @@ impl Family {
     pub fn link_kind(&self) -> crate::link::Link {
         use crate::link::{Link, DEFAULT_ETA_EPS, DEFAULT_ETA_MAX};
         match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => {
-                Link::Identity
-            }
-            Family::Binomial | Family::QuasiBinomial => {
-                Link::Logit { eta_max: DEFAULT_ETA_MAX }
-            }
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => Link::Identity,
+            Family::Binomial | Family::QuasiBinomial => Link::Logit {
+                eta_max: DEFAULT_ETA_MAX,
+            },
             Family::Poisson
             | Family::QuasiPoisson
             | Family::GammaLog
             | Family::Tweedie { .. }
             | Family::InverseGaussian
-            | Family::NegBin { .. } => Link::Log { eta_max: DEFAULT_ETA_MAX },
-            Family::Gamma => Link::Reciprocal { eta_eps: DEFAULT_ETA_EPS },
+            | Family::NegBin { .. } => Link::Log {
+                eta_max: DEFAULT_ETA_MAX,
+            },
+            Family::Gamma => Link::Reciprocal {
+                eta_eps: DEFAULT_ETA_EPS,
+            },
         }
     }
 
@@ -229,6 +231,48 @@ impl Family {
     #[inline]
     pub fn inverse_link(&self, eta: f64) -> f64 {
         self.link_kind().inverse_link(eta)
+    }
+
+    /// mgcv-style `family$valideta`: whether η is inside the link's
+    /// mathematical domain before any numerical safety clamp is applied.
+    #[inline]
+    pub fn valideta(&self, eta: f64) -> bool {
+        if !eta.is_finite() {
+            return false;
+        }
+        match self {
+            Family::Gamma => eta.abs() >= crate::link::DEFAULT_ETA_EPS,
+            _ => true,
+        }
+    }
+
+    /// mgcv-style `family$validmu`: whether μ is inside the family support.
+    #[inline]
+    pub fn validmu(&self, mu: f64) -> bool {
+        if !mu.is_finite() {
+            return false;
+        }
+        match self {
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => true,
+            Family::Binomial | Family::QuasiBinomial => mu > 0.0 && mu < 1.0,
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::Gamma
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => mu > 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn valideta_all(&self, eta: &Array1<f64>) -> bool {
+        eta.iter().all(|&e| self.valideta(e))
+    }
+
+    #[inline]
+    pub fn validmu_all(&self, mu: &Array1<f64>) -> bool {
+        mu.iter().all(|&m| self.validmu(m))
     }
 
     /// Derivative of inverse link function dμ/dη. Evaluated at the
@@ -567,6 +611,43 @@ impl Family {
                     dls += -l_base / phi + dlog_w_drho[i] / phi;
                 }
                 dls
+            }
+        }
+    }
+
+    /// Second derivative of saturated log-likelihood w.r.t. σ².
+    ///
+    /// This is the `ls[3]` term in `gam.fit3.r:631`, used when σ² is an
+    /// independent outer-Newton coordinate (`log.phi` in mgcv).
+    pub fn d2ls_dsigma2(&self, y: &Array1<f64>, scale: f64) -> f64 {
+        let n = y.len() as f64;
+        match self {
+            Family::Gaussian
+            | Family::QuasiPoisson
+            | Family::QuasiBinomial
+            | Family::InverseGaussian
+            | Family::TDist { .. } => n / (2.0 * scale * scale),
+            Family::Poisson | Family::Binomial | Family::NegBin { .. } => 0.0,
+            Family::Gamma | Family::GammaLog => {
+                let inv_phi = 1.0 / scale;
+                let a = digamma(inv_phi) + scale.ln();
+                n * (-trigamma(inv_phi) / scale.powi(4) + (1.0 - 2.0 * a) / scale.powi(3))
+            }
+            Family::Quantile { .. } => 0.0,
+            Family::Tweedie { p } => {
+                if *p > 1.95 {
+                    let inv_phi = 1.0 / scale;
+                    let a = digamma(inv_phi) + scale.ln();
+                    n * (-trigamma(inv_phi) / scale.powi(4) + (1.0 - 2.0 * a) / scale.powi(3))
+                } else {
+                    // Tweedie's saturated likelihood uses the Wright series;
+                    // keep this diagnostic-only derivative numeric until a
+                    // closed-form series second derivative is ported.
+                    let h = (1.0e-5 * scale.abs()).max(1.0e-7);
+                    let lo = (scale - h).max(scale * 0.5).max(1.0e-12);
+                    let hi = scale + h;
+                    (self.dls_dsigma2(y, hi) - self.dls_dsigma2(y, lo)) / (hi - lo)
+                }
             }
         }
     }
@@ -1255,10 +1336,33 @@ pub fn fit_pirls_cached(
 
         // Solve for new coefficients
         let beta_old = beta.clone();
-        beta = solve(a, xtwz)?;
+        let pdev_old = penalised_deviance(
+            &beta_old,
+            penalties,
+            lambda,
+            y,
+            family,
+            prior_weights,
+            |b| x.dot(b),
+        );
+        let beta_proposed = solve(a, xtwz)?;
 
-        // Update linear predictor
-        eta = x.dot(&beta);
+        // mgcv gam.fit3.r:383-441 inner step-halving: reject invalid or
+        // uphill PIRLS β proposals on penalised deviance.
+        let accepted = inner_pirls_step_halving(
+            beta_proposed,
+            &beta_old,
+            pdev_old,
+            penalties,
+            lambda,
+            y,
+            family,
+            prior_weights,
+            |b| x.dot(b),
+            iter == 1,
+        );
+        beta = accepted.0;
+        eta = accepted.1;
 
         // Check convergence
         let max_change = beta
@@ -1439,11 +1543,21 @@ pub fn compute_deviance(y: &Array1<f64>, mu: &Array1<f64>, family: Family) -> f6
         let dev_i = match family {
             Family::Gaussian => (yi - mui).powi(2),
             Family::Binomial | Family::QuasiBinomial => {
-                if yi > 0.0 && yi < 1.0 {
-                    2.0 * (yi * (yi / mui).ln() + (1.0 - yi) * ((1.0 - yi) / (1.0 - mui)).ln())
+                let mu_c = mui.clamp(1e-15, 1.0 - 1e-15);
+                let y_c = yi.clamp(0.0, 1.0);
+                let y_term = if y_c > 0.0 {
+                    y_c * (y_c / mu_c).ln()
                 } else {
                     0.0
-                }
+                };
+                let one_minus_y = 1.0 - y_c;
+                let one_minus_mu = (1.0 - mu_c).max(1e-15);
+                let one_minus_term = if one_minus_y > 0.0 {
+                    one_minus_y * (one_minus_y / one_minus_mu).ln()
+                } else {
+                    0.0
+                };
+                2.0 * (y_term + one_minus_term)
             }
             Family::Poisson | Family::QuasiPoisson => {
                 if yi > 0.0 {
@@ -1546,6 +1660,123 @@ pub fn compute_weighted_deviance(
         dev += prior_weights[i] * compute_deviance(&yi, &mi, family);
     }
     dev
+}
+
+/// Penalised family deviance `dev(y, μ(β)) + β'·(Σₖ λₖ Sₖ)·β`.
+///
+/// Shared helper for any step-control loop that needs mgcv's pdev
+/// (`gam.fit3.r:383-441` inner step-halving, `bam.r:582-602` β-step
+/// blending, `gam.fit5.r` LAML inner halving). The penalty trace uses
+/// the same `BlockPenalty::quadratic_form` path as the rest of the
+/// REML core, so β-coordinate changes (raw vs reparametrised) are
+/// honoured automatically.
+///
+/// `compute_eta` is a closure rather than `&Array2<f64>` so callers
+/// on the discretised path (`fit_pirls_fastreml`) can swap in the
+/// chunked X·β kernel without materialising a dense design.
+pub fn penalised_deviance<F>(
+    beta: &Array1<f64>,
+    sl: &[BlockPenalty],
+    lambdas: &[f64],
+    y: &Array1<f64>,
+    family: Family,
+    prior_weights: Option<&Array1<f64>>,
+    compute_eta: F,
+) -> f64
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let eta = compute_eta(beta);
+    let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
+    let dev = match prior_weights {
+        Some(pw) => compute_weighted_deviance(y, &mu, family, pw),
+        None => compute_deviance(y, &mu, family),
+    };
+    let pen: f64 = sl
+        .iter()
+        .zip(lambdas.iter())
+        .map(|(sk, &lam)| lam * sk.quadratic_form(beta))
+        .sum();
+    dev + pen
+}
+
+fn eta_mu_valid(family: Family, eta: &Array1<f64>) -> bool {
+    if !family.valideta_all(eta) {
+        return false;
+    }
+    let mu: Array1<f64> = eta.iter().map(|&e| family.inverse_link(e)).collect();
+    family.validmu_all(&mu)
+}
+
+/// mgcv `gam.fit3.r:382-441` inner step-halving.
+///
+/// Three guards run sequentially:
+/// 1. **dev non-finite** (`383-396`) — halve `start` toward `coefold` until
+///    `is.finite(dev)`. Runs at every iteration including iter 1.
+/// 2. **valideta/validmu** (`397-413`) — halve `start` toward `coefold` until
+///    the family's link/support guards pass. Runs at every iteration.
+/// 3. **pdev divergence guard** (`425-443`) — halve `start` toward `coefold`
+///    until `pdev <= old.pdev + div.thresh`. At iter 1, mgcv resets
+///    `coefold = null.coef` (`427-429`), the constant-fit baseline.
+///
+/// Our Rust port does not assemble `null.coef`; `beta_old` at iter 1 is
+/// the initial-coefficient slot (typically zeros). Comparing `pdev(β̂_1)`
+/// against `pdev(β=0)` is *not* what mgcv does — for log-link families
+/// with non-constant variance (InvGauss/μ³, Gamma/μ², QuasiBinomial), the
+/// `β=0` baseline lives at `μ=1` and can be arbitrarily worse or better
+/// than `null.coef`'s `μ ≈ mean(y)` baseline. Forcing the divergence
+/// guard to honour that comparison drives the fit back to zeros.
+///
+/// At `iter_one == true` we therefore skip only the third (pdev) guard,
+/// matching mgcv's behaviour when `coefold = null.coef` already lives at
+/// the null-deviance plateau. The two correctness guards (finite dev,
+/// valideta/validmu) always run.
+fn inner_pirls_step_halving<F>(
+    beta_proposed: Array1<f64>,
+    beta_old: &Array1<f64>,
+    pdev_old: f64,
+    sl: &[BlockPenalty],
+    lambdas: &[f64],
+    y: &Array1<f64>,
+    family: Family,
+    prior_weights: Option<&Array1<f64>>,
+    compute_eta: F,
+    iter_one: bool,
+) -> (Array1<f64>, Array1<f64>)
+where
+    F: Fn(&Array1<f64>) -> Array1<f64>,
+{
+    let mut beta = beta_proposed;
+    let mut eta = compute_eta(&beta);
+    let mut pdev = penalised_deviance(&beta, sl, lambdas, y, family, prior_weights, &compute_eta);
+    let div_thresh = 10.0 * (0.1 + pdev_old.abs()) * f64::EPSILON.sqrt();
+    let mut halvings = 0usize;
+
+    let needs_halve = |pdev: f64, eta: &Array1<f64>| -> bool {
+        if !pdev.is_finite() || !eta_mu_valid(family, eta) {
+            return true;
+        }
+        // mgcv divergence guard (gam.fit3.r:425) — only honour it on iter ≥ 2
+        // where `beta_old` is a previously-accepted PIRLS step (mgcv's
+        // `coefold` after the first iteration).
+        !iter_one && pdev - pdev_old > div_thresh
+    };
+
+    while needs_halve(pdev, &eta) && halvings < 100 {
+        for j in 0..beta.len() {
+            beta[j] = 0.5 * (beta[j] + beta_old[j]);
+        }
+        eta = compute_eta(&beta);
+        pdev = penalised_deviance(&beta, sl, lambdas, y, family, prior_weights, &compute_eta);
+        halvings += 1;
+    }
+
+    if needs_halve(pdev, &eta) {
+        let eta_old = compute_eta(beta_old);
+        (beta_old.clone(), eta_old)
+    } else {
+        (beta, eta)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2154,10 +2385,33 @@ pub fn fit_pirls_tdist(
         let xtwz = x.t().dot(&wz);
 
         let beta_old = beta.clone();
-        beta = solve(a, xtwz)?;
+        let family_iter = Family::TDist { df, sigma2 };
+        let pdev_old = penalised_deviance(
+            &beta_old,
+            penalties,
+            lambda,
+            y,
+            family_iter,
+            prior_weights,
+            |b| x.dot(b),
+        );
+        let beta_proposed = solve(a, xtwz)?;
+        let accepted = inner_pirls_step_halving(
+            beta_proposed,
+            &beta_old,
+            pdev_old,
+            penalties,
+            lambda,
+            y,
+            family_iter,
+            prior_weights,
+            |b| x.dot(b),
+            iter == 1,
+        );
+        beta = accepted.0;
 
         // ── Update σ² via method-of-moments ──────────────────────────────
-        let eta_new: Array1<f64> = x.dot(&beta);
+        let eta_new: Array1<f64> = accepted.1;
         let residuals: Vec<f64> = y
             .iter()
             .zip(eta_new.iter())
@@ -2412,11 +2666,34 @@ pub fn fit_pirls_tdist_discrete(
         let xtwz = compute_xtwy_discrete(disc, &w, &z_work);
 
         let beta_old = beta.clone();
-        beta = solve(a, xtwz)?;
+        let family_iter = Family::TDist { df, sigma2 };
+        let pdev_old = penalised_deviance(
+            &beta_old,
+            penalties,
+            lambda,
+            y,
+            family_iter,
+            prior_weights,
+            |b| compute_eta_discrete(disc, b),
+        );
+        let beta_proposed = solve(a, xtwz)?;
+        let accepted = inner_pirls_step_halving(
+            beta_proposed,
+            &beta_old,
+            pdev_old,
+            penalties,
+            lambda,
+            y,
+            family_iter,
+            prior_weights,
+            |b| compute_eta_discrete(disc, b),
+            iter == 1,
+        );
+        beta = accepted.0;
 
         // ── Update σ² via MLE (same per-row math, recompute η on the
         // updated β via the discrete gather) ─────────────────────────────
-        let eta_new: Array1<f64> = compute_eta_discrete(disc, &beta);
+        let eta_new: Array1<f64> = accepted.1;
         let residuals: Vec<f64> = y
             .iter()
             .zip(eta_new.iter())
@@ -4565,30 +4842,17 @@ pub fn fit_pirls_fastreml(
         let additive_gaussian = matches!(family, Family::Gaussian);
         beta = if outer >= 2 && !additive_gaussian {
             let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
-            let pen_at = |b: &Array1<f64>| -> f64 {
-                sl.iter()
-                    .zip(lambdas.iter())
-                    .map(|(sk, &lam)| lam * sk.quadratic_form(b))
-                    .sum()
-            };
             let pdev_at = |b: &Array1<f64>| -> f64 {
-                let eta_b = fastreml_compute_eta(x, discrete, b);
-                let mu_b: Array1<f64> =
-                    eta_b.iter().map(|&e| family.inverse_link(e)).collect();
-                let dev = match prior_weights {
-                    Some(pw) => compute_weighted_deviance(y, &mu_b, family, pw),
-                    None => compute_deviance(y, &mu_b, family),
-                };
-                dev + pen_at(b)
+                penalised_deviance(b, sl, &lambdas, y, family, prior_weights, |bb| {
+                    fastreml_compute_eta(x, discrete, bb)
+                })
             };
             let pdev_old = pdev_at(&beta_iter_start);
             let mut beta_blend = candidate_beta.clone();
             let mut pdev_new = pdev_at(&beta_blend);
             let mut halvings = 0usize;
             const MAX_HALVINGS: usize = 30; // mgcv bam.r:594 `kk < 30`
-            while (!pdev_new.is_finite() || pdev_new > pdev_old)
-                && halvings < MAX_HALVINGS
-            {
+            while (!pdev_new.is_finite() || pdev_new > pdev_old) && halvings < MAX_HALVINGS {
                 // β ← (β₀ + β)/2   (mgcv's istepr=0.5, stepr=2 case)
                 for j in 0..beta_blend.len() {
                     beta_blend[j] = 0.5 * (beta_iter_start[j] + beta_blend[j]);

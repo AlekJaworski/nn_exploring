@@ -1544,6 +1544,7 @@ impl PyGAM {
             None,
             self.inner.family,
             y_orig_array.as_ref(),
+            None,
         )
         .map_err(|e| PyValueError::new_err(format!("ift hessian failed: {}", e)))?;
         Ok(numpy::PyArray2::from_owned_array(py, hess))
@@ -1661,6 +1662,7 @@ impl PyGAM {
             None,
             self.inner.family,
             Some(&y_raw),
+            None,
         )
         .map_err(|e| PyValueError::new_err(format!("ift hessian failed: {}", e)))?;
 
