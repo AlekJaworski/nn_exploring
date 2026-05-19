@@ -184,14 +184,22 @@ def fit_one(case) -> dict[str, Any]:
         r_test = _df_to_r(df_test)
         r_extrap = _df_to_r(df_extrap)
 
-        # Always use `gam`. Our Rust core matches mgcv's `gam.fit3.r`
+        # Default: use `gam`. Our Rust core matches mgcv's `gam.fit3.r`
         # outer-Newton path exactly (Newton-B1..B5 + Newton-SF + N12).
         # `bam` uses a BFGS-style smoothing-parameter optimizer that
         # converges to slightly different ρ in flat-score regimes (e.g.
         # gamma+log small-n), so bam-generated fixtures don't match our
         # Rust even when our Rust is gam-correct. `gam` is slower but
         # the fixture build is offline and one-shot.
-        fitter = mgcv.gam
+        #
+        # Exception: `method='fREML'` is bam-only. mgcv.gam silently
+        # coerces fREML→REML, which mis-targets the parity reference —
+        # our Rust dispatches fREML through `fit_pirls_fastreml` (the
+        # bam.r port), so the fREML cases must fit with bam to match.
+        if case.method == "fREML":
+            fitter = mgcv.bam
+        else:
+            fitter = mgcv.gam
         # mgcv calls the GCV method "GCV.Cp" (its full name); our Rust
         # core uses the shorter "GCV". Translate so cases.py can stay
         # neutral (the case carries the Rust spelling).

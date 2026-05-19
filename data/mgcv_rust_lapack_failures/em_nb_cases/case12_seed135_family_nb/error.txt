@@ -1,0 +1,12 @@
+ValueError: Invalid parameter: clamped_newton_step: non-finite gradient
+
+Traceback (most recent call last):
+  File "/tmp/export_nb_cases.py", line 85, in attempt_fit
+    gam.fit(X_shifted, y)
+  File "/tmp/mgcv_swap_venv/lib/python3.11/site-packages/mgcv_rust/_fitter.py", line 480, in fit
+    self._auto_fit_k(X_arr, y_arr)
+  File "/tmp/mgcv_swap_venv/lib/python3.11/site-packages/mgcv_rust/_fitter.py", line 744, in _auto_fit_k
+    self._single_fit(X_arr, y_arr, ks)
+  File "/tmp/mgcv_swap_venv/lib/python3.11/site-packages/mgcv_rust/_fitter.py", line 649, in _single_fit
+    self._native.fit(
+ValueError: Invalid parameter: clamped_newton_step: non-finite gradient

@@ -1,0 +1,23 @@
+{
+  "predictors": [
+    "x1"
+  ],
+  "family": "gaussian",
+  "link": "identity",
+  "method": "fREML",
+  "k_default": 4,
+  "min_k": 3,
+  "n_obs": 1000,
+  "x1_shift": 51.17459171143397,
+  "y_range": [
+    0.0,
+    119.36488372276204
+  ],
+  "x1_range_post_shift": [
+    -50.91731791430381,
+    48.63318751698544
+  ],
+  "seed": 161,
+  "case_idx": 38,
+  "fit_ok": true
+}

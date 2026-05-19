@@ -1,0 +1,45 @@
+{
+  "predictors": [
+    "current_list_price",
+    "price_change_pct_from_original",
+    "cum_dom_before_current_regime",
+    "days_in_current_price_regime",
+    "monthly_index",
+    "at_least_1_price_drop",
+    "at_least_2_price_drops",
+    "at_least_3_price_drops"
+  ],
+  "target": "sale_to_list_price_ratio",
+  "family": "t-dist",
+  "method": "fREML",
+  "link": "identity",
+  "discrete": true,
+  "term_k_mapping": {
+    "current_list_price": 7,
+    "price_change_pct_from_original": 7,
+    "cum_dom_before_current_regime": 7,
+    "days_in_current_price_regime": 4,
+    "monthly_index": 5
+  },
+  "predictor_basis_map": {
+    "current_list_price": "cr",
+    "price_change_pct_from_original": "cr",
+    "cum_dom_before_current_regime": "cr",
+    "days_in_current_price_regime": "cr",
+    "monthly_index": "cr",
+    "at_least_1_price_drop": "parametric",
+    "at_least_2_price_drops": "parametric",
+    "at_least_3_price_drops": "parametric"
+  },
+  "n_obs": 100,
+  "n_unique_per_predictor": {
+    "current_list_price": 100,
+    "price_change_pct_from_original": 12,
+    "cum_dom_before_current_regime": 45,
+    "days_in_current_price_regime": 4,
+    "monthly_index": 5,
+    "at_least_1_price_drop": 2,
+    "at_least_2_price_drops": 2,
+    "at_least_3_price_drops": 2
+  }
+}

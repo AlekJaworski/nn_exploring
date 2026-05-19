@@ -1,0 +1,362 @@
+[
+  {
+    "case_idx": 0,
+    "family": "nb",
+    "link": "log",
+    "seed": 123,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 1,
+    "family": "nb",
+    "link": "log",
+    "seed": 124,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 2,
+    "family": "nb",
+    "link": "log",
+    "seed": 125,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 3,
+    "family": "nb",
+    "link": "log",
+    "seed": 126,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 4,
+    "family": "nb",
+    "link": "log",
+    "seed": 127,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 5,
+    "family": "nb",
+    "link": "log",
+    "seed": 128,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 6,
+    "family": "nb",
+    "link": "log",
+    "seed": 129,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 7,
+    "family": "nb",
+    "link": "log",
+    "seed": 130,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 8,
+    "family": "nb",
+    "link": "log",
+    "seed": 131,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 9,
+    "family": "nb",
+    "link": "log",
+    "seed": 132,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 10,
+    "family": "nb",
+    "link": "log",
+    "seed": 133,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 11,
+    "family": "nb",
+    "link": "log",
+    "seed": 134,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 12,
+    "family": "nb",
+    "link": "log",
+    "seed": 135,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 13,
+    "family": "nb",
+    "link": "log",
+    "seed": 136,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 14,
+    "family": "nb",
+    "link": "log",
+    "seed": 137,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 15,
+    "family": "nb",
+    "link": "log",
+    "seed": 138,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 16,
+    "family": "nb",
+    "link": "log",
+    "seed": 139,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 17,
+    "family": "nb",
+    "link": "log",
+    "seed": 140,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 18,
+    "family": "nb",
+    "link": "log",
+    "seed": 141,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 19,
+    "family": "nb",
+    "link": "log",
+    "seed": 142,
+    "n_obs": 1000,
+    "fit_ok": false,
+    "error_class": "ValueError: Invalid parameter: clamped_newton_step: non-finite gradient"
+  },
+  {
+    "case_idx": 20,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 143,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 21,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 144,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 22,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 145,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 23,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 146,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 24,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 147,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 25,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 148,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 26,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 149,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 27,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 150,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 28,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 151,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 29,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 152,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 30,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 153,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 31,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 154,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 32,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 155,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 33,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 156,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 34,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 157,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 35,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 158,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 36,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 159,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 37,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 160,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 38,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 161,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  },
+  {
+    "case_idx": 39,
+    "family": "gaussian",
+    "link": "identity",
+    "seed": 162,
+    "n_obs": 1000,
+    "fit_ok": true,
+    "error_class": ""
+  }
+]

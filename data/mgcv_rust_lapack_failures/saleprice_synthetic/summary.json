@@ -1,0 +1,102 @@
+[
+  {
+    "case": "case_20x5_main_fixture",
+    "n_listings": 20,
+    "obs_per_listing": 5,
+    "n_obs": 100,
+    "fit_ok": true,
+    "k_values": {
+      "current_list_price": 7,
+      "price_change_pct_from_original": 7,
+      "cum_dom_before_current_regime": 7,
+      "days_in_current_price_regime": 5,
+      "monthly_index": 4
+    },
+    "n_unique": {
+      "current_list_price": 100,
+      "price_change_pct_from_original": 12,
+      "cum_dom_before_current_regime": 43,
+      "days_in_current_price_regime": 5,
+      "monthly_index": 4,
+      "at_least_1_price_drop": 2,
+      "at_least_2_price_drops": 2,
+      "at_least_3_price_drops": 2
+    },
+    "error_class": ""
+  },
+  {
+    "case": "case_10x5",
+    "n_listings": 10,
+    "obs_per_listing": 5,
+    "n_obs": 50,
+    "fit_ok": true,
+    "k_values": {
+      "current_list_price": 7,
+      "price_change_pct_from_original": 7,
+      "cum_dom_before_current_regime": 7,
+      "days_in_current_price_regime": 5,
+      "monthly_index": 2
+    },
+    "n_unique": {
+      "current_list_price": 50,
+      "price_change_pct_from_original": 12,
+      "cum_dom_before_current_regime": 23,
+      "days_in_current_price_regime": 5,
+      "monthly_index": 2,
+      "at_least_1_price_drop": 2,
+      "at_least_2_price_drops": 2,
+      "at_least_3_price_drops": 2
+    },
+    "error_class": ""
+  },
+  {
+    "case": "case_25x4",
+    "n_listings": 25,
+    "obs_per_listing": 4,
+    "n_obs": 100,
+    "fit_ok": true,
+    "k_values": {
+      "current_list_price": 7,
+      "price_change_pct_from_original": 7,
+      "cum_dom_before_current_regime": 7,
+      "days_in_current_price_regime": 4,
+      "monthly_index": 5
+    },
+    "n_unique": {
+      "current_list_price": 100,
+      "price_change_pct_from_original": 12,
+      "cum_dom_before_current_regime": 45,
+      "days_in_current_price_regime": 4,
+      "monthly_index": 5,
+      "at_least_1_price_drop": 2,
+      "at_least_2_price_drops": 2,
+      "at_least_3_price_drops": 2
+    },
+    "error_class": ""
+  },
+  {
+    "case": "case_50x3",
+    "n_listings": 50,
+    "obs_per_listing": 3,
+    "n_obs": 150,
+    "fit_ok": true,
+    "k_values": {
+      "current_list_price": 7,
+      "price_change_pct_from_original": 7,
+      "cum_dom_before_current_regime": 7,
+      "days_in_current_price_regime": 3,
+      "monthly_index": 5
+    },
+    "n_unique": {
+      "current_list_price": 150,
+      "price_change_pct_from_original": 12,
+      "cum_dom_before_current_regime": 45,
+      "days_in_current_price_regime": 3,
+      "monthly_index": 10,
+      "at_least_1_price_drop": 2,
+      "at_least_2_price_drops": 2,
+      "at_least_3_price_drops": 2
+    },
+    "error_class": ""
+  }
+]

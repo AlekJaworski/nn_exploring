@@ -14,9 +14,13 @@ no R-side rng involvement.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_EM_NB_DIR = _REPO_ROOT / "data" / "mgcv_rust_lapack_failures" / "em_nb_cases"
 
 
 # --------------------------------------------------------------------- #
@@ -119,6 +123,83 @@ def _extrap_one_dim_correlated_slices(
     return np.vstack(rows)
 
 
+def _gen_5d_sale_price_correlated(
+    rng: np.random.Generator,
+    n: int,
+    *,
+    drop_high_leverage: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sale-price-shaped correlated features for extrapolation slices.
+
+    The feature order mirrors the production plot concern: cumulative DOM,
+    log current list price, days in current price regime, monthly index, and
+    a quality proxy. The drop variant removes high-DOM / high-price leverage
+    rows before sampling the final training set, matching the failure mode
+    where slice plots are rebuilt after deterministic row filters.
+    """
+    pool_n = n * (4 if drop_high_leverage else 1)
+    monthly_index = rng.uniform(0.0, 1.0, pool_n)
+    quality = np.clip(rng.normal(0.0, 1.0, pool_n), -2.5, 2.5)
+    raw_list_price = np.exp(
+        12.0 + 0.33 * quality + 0.16 * monthly_index + rng.normal(0.0, 0.18, pool_n)
+    )
+    current_list_price = np.log(raw_list_price)
+    days_in_regime = np.clip(
+        rng.gamma(2.0, 18.0, pool_n) + 16.0 * np.maximum(quality, 0.0),
+        0.0,
+        180.0,
+    )
+    cum_dom = np.clip(
+        days_in_regime + rng.gamma(2.3, 24.0, pool_n) - 18.0 * quality,
+        0.0,
+        365.0,
+    )
+
+    if drop_high_leverage:
+        keep = ~(
+            (cum_dom > np.quantile(cum_dom, 0.82))
+            & (raw_list_price > np.quantile(raw_list_price, 0.78))
+        )
+        cum_dom = cum_dom[keep]
+        current_list_price = current_list_price[keep]
+        days_in_regime = days_in_regime[keep]
+        monthly_index = monthly_index[keep]
+        quality = quality[keep]
+        if cum_dom.size < n:
+            raise ValueError("not enough rows after deterministic sale-price drop")
+
+    idx = rng.choice(cum_dom.size, size=n, replace=False)
+    cum_dom = cum_dom[idx]
+    current_list_price = current_list_price[idx]
+    days_in_regime = days_in_regime[idx]
+    monthly_index = monthly_index[idx]
+    quality = quality[idx]
+
+    y = (
+        0.0007 * (cum_dom - 80.0)
+        - 0.0018 * days_in_regime
+        + 0.55 * (monthly_index - 0.5)
+        + 0.08 * np.sin(2.0 * np.pi * monthly_index)
+        + 0.28 * (current_list_price - 12.0)
+        + 0.05 * quality**2
+        + rng.normal(0.0, 0.07, n)
+    )
+    x = np.column_stack([cum_dom, current_list_price, days_in_regime, monthly_index, quality])
+    return x, y
+
+
+def _gen_5d_sale_price_correlated_no_drops(
+    rng: np.random.Generator, n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    return _gen_5d_sale_price_correlated(rng, n, drop_high_leverage=False)
+
+
+def _gen_5d_sale_price_correlated_high_leverage_drops(
+    rng: np.random.Generator, n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    return _gen_5d_sale_price_correlated(rng, n, drop_high_leverage=True)
+
+
 def _gen_binomial_logit(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
     x = rng.uniform(0.0, 1.0, (n, 2))
     eta = 2.0 * np.sin(2 * np.pi * x[:, 0]) + 1.5 * (x[:, 1] - 0.5)
@@ -158,6 +239,36 @@ def _gen_nb_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarra
     p_success = theta / (theta + mu)
     y = rng.negative_binomial(theta, p_success).astype(float)
     return x, y
+
+
+def _make_em_nb_loader(case_idx: int, seed: int) -> Callable:
+    """Return a generator that loads training data from the captured
+    `em_nb_cases` parquet for the given case index. The parquet contains
+    a 1D, 1000-row (x1, y) sample that exposes the historic nb-family
+    fREML failure (clamped_newton_step non-finite gradient at k=4). The
+    x is mean-centered to match the production wrapper's pre-fit shift.
+    For n != 1000 (test/extrap draws), we synthesize a uniform sample
+    inside the training x range — the y is unused for those rows.
+    """
+    case_dir = _EM_NB_DIR / f"case{case_idx:02d}_seed{seed}_family_nb"
+
+    def _gen(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+        import pandas as pd  # localised: keep cases.py importable without pandas
+        df = pd.read_parquet(case_dir / "train.parquet")
+        x_full = df[["x1"]].to_numpy(dtype=float)
+        y_full = df["y"].to_numpy(dtype=float)
+        x_full = x_full - x_full.mean(axis=0)
+        if n == x_full.shape[0]:
+            return x_full, y_full
+        # Smaller draw (test set): uniform sample inside the training x
+        # range. y is unused by `realize()` for the test draw.
+        x_lo = float(x_full.min())
+        x_hi = float(x_full.max())
+        x = rng.uniform(x_lo, x_hi, (n, 1))
+        y = np.full(n, float(np.median(y_full)))
+        return x, y
+
+    return _gen
 
 
 def _gen_invgauss_log(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -746,6 +857,24 @@ CASES: list[Case] = [
         n_extrap=108,
         extrap_fn=_extrap_one_dim_correlated_slices,
     ),
+    Case(
+        name="5d_sale_price_correlated_extrap_no_drops_n1200_k8_cr",
+        description="Sale-price correlated features, no row drops, one-feature extrapolation slices",
+        seed=60, n=1200, d=5, k=[8, 8, 8, 8, 8], bs=["cr"] * 5,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_5d_sale_price_correlated_no_drops,
+        n_extrap=135,
+        extrap_fn=_extrap_one_dim_correlated_slices,
+    ),
+    Case(
+        name="5d_sale_price_correlated_extrap_high_leverage_drops_n1200_k8_cr",
+        description="Sale-price correlated features after high-leverage row drops, one-feature extrapolation slices",
+        seed=61, n=1200, d=5, k=[8, 8, 8, 8, 8], bs=["cr"] * 5,
+        family="gaussian", link="identity", method="REML",
+        generator=_gen_5d_sale_price_correlated_high_leverage_drops,
+        n_extrap=135,
+        extrap_fn=_extrap_one_dim_correlated_slices,
+    ),
 
     # ---- Non-Gaussian families ----------------------------------------
     Case(
@@ -1096,6 +1225,39 @@ CASES: list[Case] = [
         # weighted fit visibly differs from the unweighted fit.
         weights_fn=lambda rng, x: 1.0 + np.abs(x[:, 0] - 0.5),
     ),
+    # ================================================================== #
+    # em_nb regression fixtures (captured 2026-05-17→18)                 #
+    # 1D, 1000-row negbin(log) fits with continuous (non-count) y in     #
+    # [0,123] and x in [-50, 50] after mean-centering. The production    #
+    # setting was method='fREML', k=4, where 7 of these seeds previously #
+    # failed with `clamped_newton_step: non-finite gradient` (root cause:#
+    # log-link `inverse_link` clamped at eta≤20 but `d_inverse_link` did #
+    # not, producing inf working weights for over-shooting iterates).    #
+    # All 20 now fit. We pin parity under REML (where mgcv.gam and our   #
+    # Rust core agree byte-for-byte) and run a separate fREML smoke test #
+    # for the original failure mode — see                                #
+    # tests/regression/test_em_nb_freml_smoke.py.                        #
+    # See data/mgcv_rust_lapack_failures/README.md for capture context.  #
+    # ================================================================== #
+] + [
+    Case(
+        name=f"1d_em_nb_seed{seed}_n1000_k4_cr",
+        description=(
+            f"em_nb regression fixture (case{idx:02d}, seed={seed}): nb(log) "
+            "fit with continuous y and mean-centered x in [-50,50] — "
+            "previously failed under fREML at k=4."
+        ),
+        seed=seed,
+        n=1000,
+        d=1,
+        k=[4],
+        bs=["cr"],
+        family="negative.binomial",  # fixed θ=2 (mgcv::negbin) for clean parity
+        link="log",
+        method="REML",
+        generator=_make_em_nb_loader(idx, seed),
+    )
+    for idx, seed in enumerate(range(123, 143))
 ]
 
 

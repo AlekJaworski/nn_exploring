@@ -1,0 +1,23 @@
+{
+  "predictors": [
+    "x1"
+  ],
+  "family": "nb",
+  "link": "log",
+  "method": "fREML",
+  "k_default": 4,
+  "min_k": 3,
+  "n_obs": 1000,
+  "x1_shift": 51.16736580850727,
+  "y_range": [
+    0.0,
+    114.6944243928216
+  ],
+  "x1_range_post_shift": [
+    -51.15196254413876,
+    48.7328955861738
+  ],
+  "seed": 142,
+  "case_idx": 19,
+  "fit_ok": false
+}

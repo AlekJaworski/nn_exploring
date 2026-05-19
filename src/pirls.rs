@@ -193,61 +193,50 @@ impl Family {
         }
     }
 
+    /// The [`crate::link::Link`] kind for this family. Single source
+    /// of truth for link math — `link`, `inverse_link`,
+    /// `d_inverse_link`, `d2link`, `d3link`, `d4link` all delegate
+    /// here so any safety clamp lives in exactly one place
+    /// (`Link::safe_eta` / `Link::safe_mu`). See the module-level docs
+    /// on [`crate::link`] for the conjugation invariant the delegation
+    /// enforces.
+    pub fn link_kind(&self) -> crate::link::Link {
+        use crate::link::{Link, DEFAULT_ETA_EPS, DEFAULT_ETA_MAX};
+        match self {
+            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => {
+                Link::Identity
+            }
+            Family::Binomial | Family::QuasiBinomial => {
+                Link::Logit { eta_max: DEFAULT_ETA_MAX }
+            }
+            Family::Poisson
+            | Family::QuasiPoisson
+            | Family::GammaLog
+            | Family::Tweedie { .. }
+            | Family::InverseGaussian
+            | Family::NegBin { .. } => Link::Log { eta_max: DEFAULT_ETA_MAX },
+            Family::Gamma => Link::Reciprocal { eta_eps: DEFAULT_ETA_EPS },
+        }
+    }
+
     /// Link function g(μ).
+    #[inline]
     pub fn link(&self, mu: f64) -> f64 {
-        match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => mu,
-            Family::Binomial | Family::QuasiBinomial => (mu / (1.0 - mu)).ln(),
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => mu.ln(),
-            Family::Gamma => 1.0 / mu,
-        }
+        self.link_kind().link(mu)
     }
 
-    /// Inverse link function g^(-1)(η).
+    /// Inverse link function g⁻¹(η).
+    #[inline]
     pub fn inverse_link(&self, eta: f64) -> f64 {
-        match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => eta,
-            Family::Binomial | Family::QuasiBinomial => {
-                let eta_safe = eta.max(-20.0).min(20.0);
-                1.0 / (1.0 + (-eta_safe).exp())
-            }
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => {
-                let eta_safe = eta.min(20.0);
-                eta_safe.exp()
-            }
-            Family::Gamma => {
-                let eta_safe = if eta.abs() < 1e-10 { 1e-10 } else { eta };
-                1.0 / eta_safe
-            }
-        }
+        self.link_kind().inverse_link(eta)
     }
 
-    /// Derivative of inverse link function dμ/dη.
+    /// Derivative of inverse link function dμ/dη. Evaluated at the
+    /// same `safe_eta(eta)` as `inverse_link` — see the conjugation
+    /// invariant on [`crate::link::Link`].
+    #[inline]
     pub fn d_inverse_link(&self, eta: f64) -> f64 {
-        match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 1.0,
-            Family::Binomial | Family::QuasiBinomial => {
-                let mu = self.inverse_link(eta);
-                mu * (1.0 - mu)
-            }
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => eta.exp(),
-            Family::Gamma => -1.0 / (eta * eta),
-        }
+        self.link_kind().d_inverse_link(eta)
     }
 
     /// First derivative of variance function: dV/dμ.
@@ -284,40 +273,19 @@ impl Family {
         }
     }
 
-    /// Second derivative of link function: d²g/dμ².
+    /// Second derivative of link function: d²g/dμ². Evaluated at
+    /// `safe_mu(mu)` — same as `link` — so the chain rule stays
+    /// consistent (conjugation invariant).
+    #[inline]
     pub fn d2link(&self, mu: f64) -> f64 {
-        match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
-            Family::Binomial | Family::QuasiBinomial => {
-                let one_minus = 1.0 - mu;
-                -1.0 / (mu * mu) + 1.0 / (one_minus * one_minus)
-            }
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => -1.0 / (mu * mu),
-            Family::Gamma => 2.0 / (mu * mu * mu),
-        }
+        self.link_kind().d2_link(mu)
     }
 
-    /// Third derivative of link function: d³g/dμ³.
+    /// Third derivative of link function: d³g/dμ³. Evaluated at
+    /// `safe_mu(mu)`.
+    #[inline]
     pub fn d3link(&self, mu: f64) -> f64 {
-        match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
-            Family::Binomial | Family::QuasiBinomial => {
-                let one_minus = 1.0 - mu;
-                2.0 / (mu * mu * mu) + 2.0 / (one_minus * one_minus * one_minus)
-            }
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => 2.0 / (mu * mu * mu),
-            Family::Gamma => -6.0 / (mu * mu * mu * mu),
-        }
+        self.link_kind().d3_link(mu)
     }
 
     /// Third derivative of variance function: d³V/dμ³.
@@ -336,36 +304,13 @@ impl Family {
         }
     }
 
-    /// Fourth derivative of link function: d⁴g/dμ⁴.
-    /// Used by mgcv's α₂ derivative (`gdi.c:2546`) — the analytical Tk·KK'
-    /// Hessian contribution under the full Newton path.
+    /// Fourth derivative of link function: d⁴g/dμ⁴. Used by mgcv's
+    /// α₂ derivative (`gdi.c:2546`) — the analytical Tk·KK' Hessian
+    /// contribution under the full Newton path. Evaluated at
+    /// `safe_mu(mu)`.
+    #[inline]
     pub fn d4link(&self, mu: f64) -> f64 {
-        match self {
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => 0.0,
-            Family::Binomial | Family::QuasiBinomial => {
-                // d3link = 2/μ³ + 2/(1-μ)³
-                // d4link = -6/μ⁴ + d/dμ[2(1-μ)⁻³] = -6/μ⁴ + 6/(1-μ)⁴
-                let one_minus = 1.0 - mu;
-                let m2 = mu * mu;
-                let om2 = one_minus * one_minus;
-                -6.0 / (m2 * m2) + 6.0 / (om2 * om2)
-            }
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => {
-                // d3link = 2/μ³ → d4link = -6/μ⁴
-                let m2 = mu * mu;
-                -6.0 / (m2 * m2)
-            }
-            Family::Gamma => {
-                // d3link = -6/μ⁴ → d4link = 24/μ⁵
-                let m2 = mu * mu;
-                24.0 / (m2 * m2 * mu)
-            }
-        }
+        self.link_kind().d4_link(mu)
     }
 
     /// Which REML/LAML score formula this family uses.

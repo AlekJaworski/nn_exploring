@@ -13,6 +13,7 @@ pub mod family_theta;
 pub mod gam;
 pub mod gam_optimized;
 pub mod linalg;
+pub mod link;
 #[cfg(feature = "blas")]
 pub mod newton_optimizer;
 pub mod penalty;
