@@ -4082,10 +4082,40 @@ pub fn fit_pirls_discretized(
         let xtwz = compute_xtwy_discrete(disc, &w, &z);
 
         let beta_old = beta.clone();
-        beta = solve(a, xtwz)?;
+        let pdev_old = penalised_deviance(
+            &beta_old,
+            penalties,
+            lambda,
+            y,
+            family,
+            prior_weights,
+            |b| compute_eta_discrete(disc, b),
+        );
+        let beta_proposed = solve(a, xtwz)?;
 
-        // eta via compressed gather
-        eta = compute_eta_discrete(disc, &beta);
+        // mgcv gam.fit3.r:382-441 inner step-halving — port from the
+        // un-binned `fit_pirls_cached` loop. The discretised path was
+        // previously vulnerable to the same iter-1 collapse seen on
+        // log-link families with V(μ) growing faster than μ: a too-large
+        // first-IRLS step pushes η past the link's safe range, the
+        // working weights blow up, and PIRLS converges to a β that
+        // misleads the outer REML score into picking λ=0 (no
+        // regularisation). The valideta/validmu guards + iter-1
+        // divergence-guard suppression mirror the un-binned helper.
+        let accepted = inner_pirls_step_halving(
+            beta_proposed,
+            &beta_old,
+            pdev_old,
+            penalties,
+            lambda,
+            y,
+            family,
+            prior_weights,
+            |b| compute_eta_discrete(disc, b),
+            iter == 1,
+        );
+        beta = accepted.0;
+        eta = accepted.1;
 
         let max_change = beta
             .iter()

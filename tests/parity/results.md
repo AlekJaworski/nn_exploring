@@ -123,9 +123,9 @@ Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. Bar at 1e
 | 1d_poisson_weighted_n500_k10_cr | 1.10e-05 | 9.52e+01 | 9.52e+01 | 1.00e+00 |
 | 1d_tw_log_n400_k20_cr | 3.02e-06 | 1.28e+03 | 1.28e+03 | 1.00e+00 |
 | 1d_tweedie_log_n400_k20_cr_p15 | 2.28e-06 | 1.21e+03 | 1.21e+03 | 1.00e+00 |
-| 2d_binomial_logit_n1000_k10_cr | 3.08e-05 | 2.37e+01 | 2.37e+01 | 1.00e+00 |
+| 2d_binomial_logit_n1000_k10_cr | 1.29e-05 | 2.37e+01 | 2.37e+01 | 1.00e+00 |
 | 2d_binomial_logit_n200_k10_cr | 4.61e-05 | 7.17e+00 | 7.17e+00 | 9.99e-01 |
-| 2d_binomial_logit_n5000_k10_cr | 1.28e-06 | 3.17e+01 | 3.17e+01 | 1.00e+00 |
+| 2d_binomial_logit_n5000_k10_cr | 8.66e-06 | 3.17e+01 | 3.17e+01 | 1.00e+00 |
 | 2d_gamma_inverse_n1000_k10_cr | 6.07e-04 | 3.16e+02 | 3.13e+02 | 9.93e-01 |
 | 2d_gamma_log_n1000_k10_cr | 4.06e-05 | 7.65e+01 | 7.65e+01 | 1.00e+00 |
 | 2d_gamma_log_n200_k10_cr | 1.13e-04 | 7.56e+01 | 7.56e+01 | 1.00e+00 |
@@ -139,7 +139,7 @@ Predictions in mgcv_exact mode (pre-Z normalisation) compared to mgcv. Bar at 1e
 | 2d_poisson_log_n1000_k10_cr | 1.61e-04 | 1.63e+02 | 1.63e+02 | 9.99e-01 |
 | 2d_poisson_log_n200_k10_cr | 4.96e-04 | 1.40e+02 | 1.40e+02 | 9.98e-01 |
 | 2d_poisson_log_n5000_k10_cr | 7.25e-04 | 2.14e+02 | 2.13e+02 | 1.00e+00 |
-| 2d_quasibinomial_logit_n1000_k10_cr | 6.71e-06 | 2.19e+01 | 2.19e+01 | 1.00e+00 |
+| 2d_quasibinomial_logit_n1000_k10_cr | 1.07e-05 | 2.19e+01 | 2.19e+01 | 1.00e+00 |
 | 2d_quasipoisson_log_n1000_k10_cr | 3.12e-03 | 3.93e+02 | 3.91e+02 | 9.94e-01 |
 | 3d_gaussian_mixed_n800_k10_cr | 3.76e-06 | 5.22e+00 | 5.22e+00 | 1.00e+00 |
 | 3d_poisson_log_n2000_k10_cr | 1.30e-03 | 2.52e+02 | 2.52e+02 | 9.99e-01 |
@@ -202,9 +202,9 @@ First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's 
 | 1d_scat_weighted_n300_k10_cr | 7 | 9 | 1 | 1.58e+01 | 1.45e+01 |
 | 1d_tw_log_n400_k20_cr | 6 | 7 | 1 | 6.51e+02 | 6.51e+02 |
 | 1d_tweedie_log_n400_k20_cr_p15 | 6 | 6 | — | 6.51e+02 | 6.53e+02 |
-| 2d_binomial_logit_n1000_k10_cr | 7 | 4 | 1 | 5.23e+02 | 5.23e+02 |
+| 2d_binomial_logit_n1000_k10_cr | 6 | 4 | 1 | 5.23e+02 | 5.23e+02 |
 | 2d_binomial_logit_n200_k10_cr | 10 | 9 | 1 | 9.58e+01 | 9.58e+01 |
-| 2d_binomial_logit_n5000_k10_cr | 12 | 7 | 1 | 2.53e+03 | 2.53e+03 |
+| 2d_binomial_logit_n5000_k10_cr | 10 | 7 | 1 | 2.53e+03 | 2.53e+03 |
 | 2d_gamma_inverse_n1000_k10_cr | 11 | 7 | — | 1.28e+03 | 1.28e+03 |
 | 2d_gamma_log_n1000_k10_cr | 10 | 8 | 1 | 1.84e+03 | 1.83e+03 |
 | 2d_gamma_log_n200_k10_cr | 7 | 5 | 1 | 3.58e+02 | 3.54e+02 |
@@ -218,7 +218,7 @@ First Newton iter where rust's REML score diverges from mgcv's by >5% of mgcv's 
 | 2d_poisson_log_n1000_k10_cr | 9 | 7 | 1 | 2.30e+03 | 2.30e+03 |
 | 2d_poisson_log_n200_k10_cr | 11 | 9 | 1 | 4.36e+02 | 4.36e+02 |
 | 2d_poisson_log_n5000_k10_cr | 9 | 6 | 1 | 1.14e+04 | 1.14e+04 |
-| 2d_quasibinomial_logit_n1000_k10_cr | 10 | 10 | 1 | 1.44e+03 | 5.19e+02 |
+| 2d_quasibinomial_logit_n1000_k10_cr | 9 | 10 | 1 | 1.44e+03 | 5.19e+02 |
 | 2d_quasipoisson_log_n1000_k10_cr | 6 | 6 | 1 | 2.09e+03 | 1.17e+03 |
 | 3d_gaussian_mixed_n800_k10_cr | 8 | 6 | 1 | -1.14e+02 | -1.14e+02 |
 | 3d_poisson_log_n2000_k10_cr | 10 | 6 | 1 | 4.31e+03 | 4.31e+03 |
