@@ -292,6 +292,7 @@ impl FitCache {
             cached_xtx,
             false,
             prior_weights,
+            None,
         )
     }
 
@@ -301,6 +302,15 @@ impl FitCache {
     /// MLE iteration. This is the gam.fit5 path — required for the outer
     /// LAML Newton on log σ² to actually move the σ² value (otherwise the
     /// inner MLE would overwrite each trial value).
+    ///
+    /// `initial_beta` (Wood 2011 Phase 5 warm-start): when `Some`, the
+    /// dense `fit_pirls_cached` path starts from η = X·β₀ instead of the
+    /// per-family null-init. Outer-Newton line-search trial λs are close
+    /// to the accepted λ, so reusing the accepted β as warm start cuts
+    /// inner PIRLS iterations dramatically without changing the converged
+    /// β (the inner step-halving still defends against pathological warm
+    /// starts via valideta/validmu guards). Discretised, TDist, and
+    /// Quantile paths ignore the warm-start for now.
     fn run_pirls_with_options(
         &self,
         y: &Array1<f64>,
@@ -311,6 +321,7 @@ impl FitCache {
         cached_xtx: Option<&Array2<f64>>,
         tdist_outer_sigma2: bool,
         prior_weights: Option<&Array1<f64>>,
+        initial_beta: Option<&Array1<f64>>,
     ) -> Result<crate::pirls::PiRLSResult> {
         // t-dist family needs a specialised fitter. df sentinel: 0.0 ⟹
         // PIRLS profiles df via internal 1D Brent (auto-mode, the default
@@ -407,6 +418,7 @@ impl FitCache {
                 tolerance,
                 cached_xtx,
                 prior_weights,
+                initial_beta,
             )
         }
     }
@@ -985,6 +997,7 @@ impl GAM {
                 xtx_ref,
                 self.tdist_profile,
                 prior_weights_ref,
+                None,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
             weights = pirls_result.weights.clone();
@@ -1053,20 +1066,25 @@ impl GAM {
                 let y_ref = y;
                 let family_cell_ref = std::sync::Arc::clone(&family_cell);
                 let outer_sigma2_profile = self.tdist_profile;
-                // NOTE: warm-start beta threading via run_pirls_quantile_warm is
-                // available but disabled here. Using the initial FS beta as a
-                // warm-start causes Newton line-search instability: trial λ values
-                // can differ substantially from the initial λ, and the FS beta at
-                // the initial λ produces degenerate ELF weights at very different λ.
-                // Correct warm-start requires lambda-aware gating (e.g. only warm-
-                // start when |Δλ/λ| < threshold, or track the ACCEPTED outer-iter
-                // beta separately from line-search trials). Deferred to Phase 3.
+                // Wood 2011 Phase 5 warm-start: track the latest converged β
+                // from the previous PIRLS refresh and pass it as `initial_beta`
+                // to the next trial-λ refresh. Trial λ inside Newton's
+                // line-search ladder is close to the accepted λ, so a warm
+                // start cuts inner PIRLS iterations from ~20 to ~3-5 without
+                // changing the converged β (the inner-PIRLS step-halving
+                // valideta/validmu/finite-dev guards still defend against
+                // pathological warm starts). Bootstrapped from the initial
+                // PIRLS β so the very first trial λ doesn't pay the full
+                // null-init cost.
+                let warm_beta: std::cell::RefCell<Option<ndarray::Array1<f64>>> =
+                    std::cell::RefCell::new(Some(pirls_result.coefficients.clone()));
                 let mut callback = |trial_lambdas: &[f64]| -> Result<crate::smooth::PirlsRefresh> {
                     callback_pirls_calls += 1;
                     // Read the latest family from the shared cell — the outer
                     // Newton loop publishes fresh df/σ²/p/θ here between iters.
                     let family = *family_cell_ref.lock().expect("family_cell mutex poisoned");
                     let refresh_start = std::time::Instant::now();
+                    let warm = warm_beta.borrow();
                     let res = cache_ref.run_pirls_with_options(
                         y_ref,
                         trial_lambdas,
@@ -1076,7 +1094,10 @@ impl GAM {
                         xtx_ref,
                         outer_sigma2_profile,
                         prior_weights_ref,
+                        warm.as_ref(),
                     )?;
+                    drop(warm);
+                    *warm_beta.borrow_mut() = Some(res.coefficients.clone());
                     let elapsed_micros = refresh_start.elapsed().as_micros();
                     callback_pirls_iters += res.iterations;
                     let xtwx = compute_xtwx_dispatch(
@@ -1147,6 +1168,7 @@ impl GAM {
                 xtx_ref,
                 self.tdist_profile,
                 prior_weights_ref,
+                None,
             )?;
             total_pirls_time += pirls_start.elapsed().as_secs_f64() * 1000.0;
 

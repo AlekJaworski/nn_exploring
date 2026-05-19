@@ -1204,7 +1204,7 @@ pub fn fit_pirls(
     tolerance: f64,
 ) -> Result<PiRLSResult> {
     fit_pirls_cached(
-        y, x, lambda, penalties, family, max_iter, tolerance, None, None,
+        y, x, lambda, penalties, family, max_iter, tolerance, None, None, None,
     )
 }
 
@@ -1225,6 +1225,7 @@ pub fn fit_pirls_cached(
     tolerance: f64,
     cached_xtx: Option<&Array2<f64>>,
     prior_weights: Option<&Array1<f64>>,
+    initial_beta: Option<&Array1<f64>>,
 ) -> Result<PiRLSResult> {
     let n = y.len();
     let p = x.ncols();
@@ -1260,25 +1261,50 @@ pub fn fit_pirls_cached(
     }
 
     // General IRLS path for non-Gaussian families
-    // Initialize coefficients and linear predictor
-    let mut beta = Array1::zeros(p);
+    // Initialize coefficients and linear predictor.
+    //
+    // Warm-start (Wood 2011 Phase 5): `initial_beta=Some(β₀)` starts the
+    // PIRLS loop at η = X·β₀ instead of the per-family `family.link(safe_y)`
+    // null-init. mgcv's gam.fit3.r `coefold/etaold` shortcut: the
+    // accepted-outer β at the previous Newton iteration is reused as the
+    // PIRLS starting point for the new trial λ since the smoothing
+    // structure changes slowly across line-search steps. The inner-PIRLS
+    // step-halving guards (`inner_pirls_step_halving`) still defend
+    // against pathological warm-starts via the valideta/validmu/finite-dev
+    // checks at every iteration.
+    let mut beta = if let Some(b0) = initial_beta {
+        if b0.len() != p {
+            return Err(GAMError::DimensionMismatch(format!(
+                "initial_beta length ({}) must match p ({})",
+                b0.len(),
+                p
+            )));
+        }
+        b0.clone()
+    } else {
+        Array1::zeros(p)
+    };
     let mut eta = x.dot(&beta);
 
-    // Initialize eta based on family
-    for i in 0..n {
-        let safe_y = match family {
-            Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
-            Family::Poisson
-            | Family::QuasiPoisson
-            | Family::Gamma
-            | Family::GammaLog
-            | Family::Tweedie { .. }
-            | Family::InverseGaussian
-            | Family::NegBin { .. } => y[i].max(0.1),
-            // Identity-link families: initialize η = y directly.
-            Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
-        };
-        eta[i] = family.link(safe_y);
+    // When no warm-start, replace the X·0 = 0 η with the per-family
+    // null-eta init. With warm-start, η = X·β₀ already lives inside the
+    // family support (assuming β₀ was a previously-accepted PIRLS state).
+    if initial_beta.is_none() {
+        for i in 0..n {
+            let safe_y = match family {
+                Family::Binomial | Family::QuasiBinomial => y[i].max(0.01).min(0.99),
+                Family::Poisson
+                | Family::QuasiPoisson
+                | Family::Gamma
+                | Family::GammaLog
+                | Family::Tweedie { .. }
+                | Family::InverseGaussian
+                | Family::NegBin { .. } => y[i].max(0.1),
+                // Identity-link families: initialize η = y directly.
+                Family::Gaussian | Family::TDist { .. } | Family::Quantile { .. } => y[i],
+            };
+            eta[i] = family.link(safe_y);
+        }
     }
 
     let mut converged = false;
