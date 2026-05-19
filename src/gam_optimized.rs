@@ -1066,25 +1066,84 @@ impl GAM {
                 let y_ref = y;
                 let family_cell_ref = std::sync::Arc::clone(&family_cell);
                 let outer_sigma2_profile = self.tdist_profile;
-                // Wood 2011 Phase 5 warm-start: track the latest converged β
-                // from the previous PIRLS refresh and pass it as `initial_beta`
-                // to the next trial-λ refresh. Trial λ inside Newton's
-                // line-search ladder is close to the accepted λ, so a warm
-                // start cuts inner PIRLS iterations from ~20 to ~3-5 without
-                // changing the converged β (the inner-PIRLS step-halving
-                // valideta/validmu/finite-dev guards still defend against
-                // pathological warm starts). Bootstrapped from the initial
-                // PIRLS β so the very first trial λ doesn't pay the full
-                // null-init cost.
-                let warm_beta: std::cell::RefCell<Option<ndarray::Array1<f64>>> =
-                    std::cell::RefCell::new(Some(pirls_result.coefficients.clone()));
+                // Wood 2011 §4.2 — warm-start + first-order IFT line search.
+                //
+                // Two layers of trial-λ acceleration vs cold-start PIRLS:
+                //  1. Warm-start: the previous converged β is reused as
+                //     `initial_beta` for the next trial-λ PIRLS, cutting inner
+                //     IRLS iterations from ~20 to ~4-6.
+                //  2. IFT propagation (Wood 2011): given (β, b1=dβ/dρ) at
+                //     the accepted point, β_trial = β + Σ_k b1[:,k]·Δρ_k is a
+                //     first-order estimate of β(λ_trial). Used as `initial_beta`
+                //     when the η it implies is finite + inside the family's
+                //     valideta/validmu support, otherwise we fall back to plain
+                //     warm-start. mgcv-gam.fit3.r:1410 uses the same shortcut
+                //     when stepping in (ρ, log φ) space.
+                //
+                // b1 is recomputed at each refresh's converged state — A =
+                // X'WX + Σ λ_k S_k is factorised once per call (pivoted
+                // Cholesky in `linalg.rs`), then back-substituted k times
+                // to populate b1's k columns. For p ≲ 200 and k ≲ 5 this is
+                // O(p³ + k·p²) per call, negligible against a single PIRLS
+                // iteration's O(n·p²).
+                let warm_state: std::cell::RefCell<
+                    Option<(
+                        ndarray::Array1<f64>,
+                        ndarray::Array2<f64>,
+                        Vec<f64>,
+                    )>,
+                > = std::cell::RefCell::new(None);
                 let mut callback = |trial_lambdas: &[f64]| -> Result<crate::smooth::PirlsRefresh> {
                     callback_pirls_calls += 1;
                     // Read the latest family from the shared cell — the outer
                     // Newton loop publishes fresh df/σ²/p/θ here between iters.
                     let family = *family_cell_ref.lock().expect("family_cell mutex poisoned");
                     let refresh_start = std::time::Instant::now();
-                    let warm = warm_beta.borrow();
+
+                    // ── Build the warm-start vector ─────────────────────────
+                    // Pull the saved (β, b1, λ) from the previous refresh.
+                    // For the very first call (no saved state) we bootstrap
+                    // from the initial outer PIRLS β.
+                    let warm_beta: ndarray::Array1<f64> = {
+                        let st = warm_state.borrow();
+                        if let Some((beta_prev, b1_prev, lambdas_prev)) = st.as_ref() {
+                            if b1_prev.ncols() == trial_lambdas.len()
+                                && lambdas_prev.len() == trial_lambdas.len()
+                            {
+                                let mut bt = beta_prev.clone();
+                                for k in 0..trial_lambdas.len() {
+                                    // mgcv works in ρ = log(λ) space, so
+                                    // Δρ_k = log(λ_trial_k / λ_saved_k).
+                                    let l_trial = trial_lambdas[k].max(1.0e-300);
+                                    let l_saved = lambdas_prev[k].max(1.0e-300);
+                                    let drho = (l_trial / l_saved).ln();
+                                    for r in 0..bt.len() {
+                                        bt[r] += b1_prev[[r, k]] * drho;
+                                    }
+                                }
+                                // Family-support guardrail: if the IFT step
+                                // pushes η past valideta/validmu (e.g. saturating
+                                // λ on log-link binomial), drop the IFT term
+                                // and rely on plain β warm-start.
+                                let eta_trial = cache_ref.design_matrix.dot(&bt);
+                                let mu_trial: ndarray::Array1<f64> =
+                                    eta_trial.iter().map(|&e| family.inverse_link(e)).collect();
+                                if family.valideta_all(&eta_trial)
+                                    && family.validmu_all(&mu_trial)
+                                    && bt.iter().all(|x| x.is_finite())
+                                {
+                                    bt
+                                } else {
+                                    beta_prev.clone()
+                                }
+                            } else {
+                                beta_prev.clone()
+                            }
+                        } else {
+                            pirls_result.coefficients.clone()
+                        }
+                    };
+
                     let res = cache_ref.run_pirls_with_options(
                         y_ref,
                         trial_lambdas,
@@ -1094,17 +1153,65 @@ impl GAM {
                         xtx_ref,
                         outer_sigma2_profile,
                         prior_weights_ref,
-                        warm.as_ref(),
+                        Some(&warm_beta),
                     )?;
-                    drop(warm);
-                    *warm_beta.borrow_mut() = Some(res.coefficients.clone());
-                    let elapsed_micros = refresh_start.elapsed().as_micros();
-                    callback_pirls_iters += res.iterations;
+
+                    // ── Update saved (β, b1, λ) for the next call ───────────
+                    // b1[:,k] = -λ_k · A⁻¹ · S_k · β, where A = X'WX + S(λ).
                     let xtwx = compute_xtwx_dispatch(
                         cache_ref.discrete.as_ref(),
                         &cache_ref.design_matrix,
                         &res.weights,
                     );
+                    let p = xtwx.nrows();
+                    let mut a = xtwx.clone();
+                    for (lam, pen) in trial_lambdas.iter().zip(cache_ref.penalties.iter()) {
+                        pen.scaled_add_to(&mut a, *lam);
+                    }
+                    let b1_opt: Option<ndarray::Array2<f64>> =
+                        match crate::linalg::pivoted_cholesky(&a, -1.0) {
+                            Ok(pc) => {
+                                let mut b1 = ndarray::Array2::<f64>::zeros((p, trial_lambdas.len()));
+                                let mut all_ok = true;
+                                for (k, (lam, pen)) in trial_lambdas
+                                    .iter()
+                                    .zip(cache_ref.penalties.iter())
+                                    .enumerate()
+                                {
+                                    let s_k_beta = pen.dot_vec(&res.coefficients);
+                                    match crate::linalg::pivoted_cholesky_solve(&pc, &s_k_beta) {
+                                        Ok(x) => {
+                                            for r in 0..p {
+                                                b1[[r, k]] = -lam * x[r];
+                                            }
+                                        }
+                                        Err(_) => {
+                                            all_ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if all_ok {
+                                    Some(b1)
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(_) => None,
+                        };
+                    if let Some(b1) = b1_opt {
+                        *warm_state.borrow_mut() =
+                            Some((res.coefficients.clone(), b1, trial_lambdas.to_vec()));
+                    } else {
+                        // Cholesky failed (e.g. rank-deficient A) — fall back
+                        // to plain warm-start by clearing b1 but keeping β.
+                        let zero_b1 = ndarray::Array2::<f64>::zeros((p, trial_lambdas.len()));
+                        *warm_state.borrow_mut() =
+                            Some((res.coefficients.clone(), zero_b1, trial_lambdas.to_vec()));
+                    }
+
+                    let elapsed_micros = refresh_start.elapsed().as_micros();
+                    callback_pirls_iters += res.iterations;
                     let sigma2 = res.sigma2;
                     let df = res.df;
                     Ok(crate::smooth::PirlsRefresh {
