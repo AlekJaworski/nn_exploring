@@ -532,7 +532,7 @@ impl Family {
                     let sum_log_y: f64 = y.iter().filter(|&&yi| yi > 0.0).map(|&yi| yi.ln()).sum();
                     return n_f * ls_per_obs - sum_log_y;
                 }
-                let (log_w, _, _) = tweedie_series(y, phi, *p);
+                let (log_w, _, _, _) = tweedie_series(y, phi, *p);
                 let mut ls = 0.0f64;
                 for (i, &yi) in y.iter().enumerate() {
                     if yi <= 0.0 {
@@ -596,7 +596,7 @@ impl Family {
                     let inv_phi = 1.0 / phi;
                     return n * (digamma(inv_phi) + phi.ln()) / (phi * phi);
                 }
-                let (log_w, dlog_w_drho, _) = tweedie_series(y, phi, *p);
+                let (log_w, dlog_w_drho, _, _) = tweedie_series(y, phi, *p);
                 let _ = log_w; // log_w already used for ls; here we only need derivs
                 let mut dls = 0.0f64;
                 for (i, &yi) in y.iter().enumerate() {
@@ -635,19 +635,41 @@ impl Family {
             }
             Family::Quantile { .. } => 0.0,
             Family::Tweedie { p } => {
+                let phi = scale;
+                // Near p=2: use the Gamma-limit (Tweedie → Gamma as p→2). The
+                // series is intractable in this regime (j_max → ∞) and the
+                // saturated ls / its derivatives use the Gamma closed form.
                 if *p > 1.95 {
-                    let inv_phi = 1.0 / scale;
-                    let a = digamma(inv_phi) + scale.ln();
-                    n * (-trigamma(inv_phi) / scale.powi(4) + (1.0 - 2.0 * a) / scale.powi(3))
-                } else {
-                    // Tweedie's saturated likelihood uses the Wright series;
-                    // keep this diagnostic-only derivative numeric until a
-                    // closed-form series second derivative is ported.
-                    let h = (1.0e-5 * scale.abs()).max(1.0e-7);
-                    let lo = (scale - h).max(scale * 0.5).max(1.0e-12);
-                    let hi = scale + h;
-                    (self.dls_dsigma2(y, hi) - self.dls_dsigma2(y, lo)) / (hi - lo)
+                    let inv_phi = 1.0 / phi;
+                    let a = digamma(inv_phi) + phi.ln();
+                    return n
+                        * (-trigamma(inv_phi) / phi.powi(4) + (1.0 - 2.0 * a) / phi.powi(3));
                 }
+                // mgcv gam.fit3.r:2982 + misc.c's w2 series sum, evaluated at
+                // μ=y so the analytic part collapses to the Dunn-Smyth
+                // boundary form.
+                //
+                // Per observation (y > 0):
+                //   d²log f / dφ² = 2·l_base/φ² + (1/φ²)·(d²logW/dρ² − dlogW/dρ)
+                //                 = (1/φ²) · (2·l_base + d²logW/dρ² − dlogW/dρ)
+                // where l_base = y^(2-p)·(1/(1-p) − 1/(2-p))/φ at μ=y, and the
+                // ρ→φ conversion follows gam.fit3.r:2964 (`oo$w2 ← oo$w2/φ² −
+                // oo$w1/φ²`). For y=0: l_base_0 = −μ^(2-p)/(φ·(2-p)) at μ=y=0
+                // is 0, and the series contribution vanishes.
+                let (_log_w, dlog_w_drho, d2_log_w_drho2, _dlog_w_dp) =
+                    tweedie_series(y, phi, *p);
+                let mut d2ls = 0.0_f64;
+                for (i, &yi) in y.iter().enumerate() {
+                    if yi <= 0.0 {
+                        continue;
+                    }
+                    let onep = 1.0 - p;
+                    let twop = 2.0 - p;
+                    let l_base = yi.powf(onep) * yi * (1.0 / onep - 1.0 / twop) / phi;
+                    let series = d2_log_w_drho2[i] - dlog_w_drho[i];
+                    d2ls += (2.0 * l_base + series) / (phi * phi);
+                }
+                d2ls
             }
         }
     }
@@ -864,24 +886,41 @@ pub(crate) fn log_gamma(x: f64) -> f64 {
 /// For y=0 entries: returns (0.0, 0.0) — the density for y=0 doesn't need the series.
 /// Dunn-Smyth (2005) series for the Tweedie log-density (1 < p < 2).
 ///
-/// Returns `(log_W, dlog_W_drho, dlog_W_dp)` per observation, where:
+/// Returns `(log_W, dlog_W_drho, d2_log_W_drho2, dlog_W_dp)` per observation,
+/// where:
 /// - `log_W[i]` = log of the series sum W = Σ_j W_j for y[i]
 /// - `dlog_W_drho[i]` = d(log W)/d(rho) where rho = log(phi)
+/// - `d2_log_W_drho2[i]` = d²(log W)/d(rho)² — needed for the joint
+///   (ρ, log φ) outer Newton's analytic log-φ row (gam.fit3.r:2982 +
+///   misc.c:503's `w2[i]`).
 /// - `dlog_W_dp[i]` = d(log W)/dp (used for profile-p Newton step on theta)
+///
+/// Identities used for the rho derivatives (W_j depends on rho linearly via
+/// `j·rho/(1-p)`, so all rho-derivatives factor cleanly through (1/(1-p))·j):
+///   W'  = Σ_j W_j · (j/(1-p))         = (1/(1-p)) · S₁,  S_k = Σ_j j^k W_j
+///   W'' = Σ_j W_j · (j/(1-p))²        = (1/(1-p))² · S₂
+///   dlog W /drho  = W'/W              = (1/(1-p)) · E_W[j]
+///   d²log W/drho² = W''/W − (W'/W)²   = (1/(1-p))² · Var_W[j]
 ///
 /// The wp_base term for dlogW/dp comes from misc.c:231:
 ///   wp_base = (log(-(1-p)) + rho) / (1-p)^2 - alpha/(1-p) + 1/(2-p)
 /// Per j: wp1_j_base = j * wp_base + (j/(1-p)^2) * digamma(-j*alpha)
 /// Per observation: subtract j * log(y) / (1-p)^2 to get the full wp1_j
 /// Then dlogW/dp = sum(wj_scaled * wp1j) / wi  (C misc.c:503: w1p[i] = wdlogwdp/wi)
-fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+fn tweedie_series(
+    y: &Array1<f64>,
+    phi: f64,
+    p: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = y.len();
     let mut log_w_out = vec![0.0f64; n];
     let mut dlog_w_drho_out = vec![0.0f64; n];
+    let mut d2_log_w_drho2_out = vec![0.0f64; n];
     let mut dlog_w_dp_out = vec![0.0f64; n];
 
     let onep = 1.0 - p;
     let onep2 = onep * onep; // (1-p)^2
+    let inv_onep2 = 1.0 / onep2; // (1/(1-p))² — d²logW/drho² scale factor
     let twop = 2.0 - p;
     let alpha = twop / onep; // (2-p)/(1-p), negative for 1<p<2
     let rho = phi.ln();
@@ -975,11 +1014,13 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
         let wmin = wmax_val + log_eps_ln;
 
         // Accumulate sums (scaled by exp(-wmax)):
-        // wi = Σ exp(wj - wmax) = W / exp(wmax)
-        // w1i = Σ exp(wj - wmax) * wb1_j  (for dlogW/drho numerator)
-        // wdlogwdp = Σ exp(wj - wmax) * wp1_j  (for dlogW/dp numerator)
+        // wi  = Σ exp(wj - wmax) = W / exp(wmax)              (zeroth moment of W_j)
+        // w1i = Σ exp(wj - wmax) · wb1_j   = wb1_base · S₁'  (first moment via wb1)
+        // s2i = Σ exp(wj - wmax) · j²                          (second moment of j)
+        // wdlogwdp = Σ exp(wj - wmax) · wp1_j  (for dlogW/dp numerator)
         let mut wi = 0.0f64;
         let mut w1i = 0.0f64;
+        let mut s2i = 0.0f64;
         let mut wdlogwdp = 0.0f64;
 
         // Upsweep from j_max upward until wj < wmin
@@ -990,6 +1031,7 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
             let wj_scaled = (wj - wmax_val).exp();
             wi += wj_scaled;
             w1i += wj_scaled * jf * wb1_base; // wb1_j = j * (-1/onep)
+            s2i += wj_scaled * jf * jf;
             let wp1 = wp1_const_at(j) - jf * logy1p2_i;
             wdlogwdp += wj_scaled * wp1;
             if wj < wmin {
@@ -1012,6 +1054,7 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
                 let wj_scaled = (wj - wmax_val).exp();
                 wi += wj_scaled;
                 w1i += wj_scaled * jf * wb1_base;
+                s2i += wj_scaled * jf * jf;
                 let wp1 = wp1_const_at(ju) - jf * logy1p2_i;
                 wdlogwdp += wj_scaled * wp1;
                 if wj < wmin {
@@ -1025,11 +1068,19 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
         log_w_out[i] = wmax_val + wi.ln();
         // d(log W)/d(rho): w1[i] = -w1i/wi  (misc.c:502)
         dlog_w_drho_out[i] = -w1i / wi;
+        // d²(log W)/d(rho)² = (1/(1-p))² · Var_W[j]
+        //                   = (1/(1-p))² · (E_W[j²] - E_W[j]²)
+        // E_W[j]  = (Σ j·W_j) / W  = (w1i / wb1_base) / wi = -onep · w1i / wi
+        //         (since wb1_base = -1/onep so 1/wb1_base = -onep)
+        // E_W[j²] = s2i / wi
+        let e_j = -onep * w1i / wi;
+        let e_j_sq = s2i / wi;
+        d2_log_w_drho2_out[i] = inv_onep2 * (e_j_sq - e_j * e_j);
         // d(log W)/dp: w1p[i] = wdlogwdp / wi  (misc.c:503)
         dlog_w_dp_out[i] = wdlogwdp / wi;
     }
 
-    (log_w_out, dlog_w_drho_out, dlog_w_dp_out)
+    (log_w_out, dlog_w_drho_out, d2_log_w_drho2_out, dlog_w_dp_out)
 }
 
 /// Compute dls/dp for the Tweedie family — the derivative of the saturated
@@ -1041,7 +1092,7 @@ fn tweedie_series(y: &Array1<f64>, phi: f64, p: f64) -> (Vec<f64>, Vec<f64>, Vec
 /// For y=0: from gam.fit3.r:2924:
 ///   dls_i/dp = -ls_i * (log(y) - 1/(2-p))  ... but ls_i = 0 at y=0 so dls=0.
 pub(crate) fn tweedie_dls_dp(y: &Array1<f64>, phi: f64, p: f64) -> f64 {
-    let (_log_w, _dlog_w_drho, dlog_w_dp) = tweedie_series(y, phi, p);
+    let (_log_w, _dlog_w_drho, _d2_log_w_drho2, dlog_w_dp) = tweedie_series(y, phi, p);
     let twop = 2.0 - p;
     let onep = 1.0 - p;
     let mut dls = 0.0f64;
@@ -5001,6 +5052,35 @@ mod tests {
         let family = Family::Poisson;
         assert!((family.variance(2.0) - 2.0).abs() < 1e-10);
         assert!((family.inverse_link(0.0) - 1.0).abs() < 1e-10);
+    }
+
+    /// Analytic Tweedie d²ls/dσ² (the ldTweedie ld[,3] term at μ=y)
+    /// must agree with central-FD on dls/dσ² across the (1, 1.95) range
+    /// where the Dunn-Smyth series carries the dispersion derivatives.
+    /// Above p ≈ 1.95 we use the Gamma-limit closed form; FD agreement
+    /// there is verified separately by the Gamma branch tests.
+    #[test]
+    fn test_tweedie_d2ls_dsigma2_matches_fd() {
+        // Synthetic Tweedie-shaped data with some exact zeros (the standard
+        // tw() use case) and positive y values that drive the series.
+        let y = Array1::from(vec![
+            0.0, 0.0, 0.0, 0.3, 0.7, 1.2, 2.5, 4.1, 0.0, 5.8, 1.0, 0.4,
+        ]);
+        for &p in &[1.2_f64, 1.5, 1.7, 1.9] {
+            for &phi in &[0.3_f64, 1.0, 3.0] {
+                let fam = Family::Tweedie { p };
+                let analytic = fam.d2ls_dsigma2(&y, phi);
+                let h = (1.0e-5 * phi).max(1.0e-7);
+                let fd = (fam.dls_dsigma2(&y, phi + h) - fam.dls_dsigma2(&y, phi - h))
+                    / (2.0 * h);
+                assert_close(
+                    analytic,
+                    fd,
+                    1e-4,
+                    &format!("Tweedie d²ls/dσ² mismatch at p={p}, φ={phi}"),
+                );
+            }
+        }
     }
 
     /// Central-difference helper.
