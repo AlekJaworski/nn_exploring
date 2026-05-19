@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+**→ Read [`AGENTS.md`](./AGENTS.md) first.** It's the source-of-truth for project context, Obsidian references, and the active numerical-step-control epic. This file mirrors its build / test / architecture sections for tools that auto-load `CLAUDE.md` specifically, but anything Obsidian-related or epic-related lives in `AGENTS.md`.
+
+In particular: **before working on any numerical-algorithm task (REML/fREML, PIRLS step control, joint Newton on smoothing+scale, β̇ IFT propagation), open `~/ObsidianVault/Projects/mgcv_rust/mgcv_rust - Epic Numerical Step Control 2026-05-19.md` and the linked plan notes.** Don't infer history from `git log` — the *why* lives in Obsidian.
 
 ## Project Overview
 
