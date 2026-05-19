@@ -13,8 +13,11 @@ from schema import Fixture
 
 
 HERE = Path(__file__).resolve().parent
-FIXTURE_NAME = "4d_gaussian_correlated_extrap_slices_n800_k10_cr"
-FIXTURE_PATH = HERE / "fixtures" / f"{FIXTURE_NAME}.json"
+FIXTURE_NAMES = [
+    "4d_gaussian_correlated_extrap_slices_n800_k10_cr",
+    "5d_sale_price_correlated_extrap_no_drops_n1200_k8_cr",
+    "5d_sale_price_correlated_extrap_high_leverage_drops_n1200_k8_cr",
+]
 
 
 def _fit_fixture(fix: Fixture):
@@ -29,15 +32,21 @@ def _fit_fixture(fix: Fixture):
     return g
 
 
-@pytest.mark.skipif(not FIXTURE_PATH.exists(), reason="missing correlated extrapolation fixture")
-def test_correlated_one_feature_extrapolation_slices_match_mgcv_by_block() -> None:
+@pytest.mark.parametrize("fixture_name", FIXTURE_NAMES)
+def test_correlated_one_feature_extrapolation_slices_match_mgcv_by_block(
+    fixture_name: str,
+) -> None:
     """Compare R/mgcv vs Rust per one-feature slice block.
 
     Fixture block layout is dim-major, then low / in-domain / high blocks, with
     nine rows per block. This catches extrapolation-tail drift that aggregate
     train/test metrics can hide when features are correlated.
     """
-    fix = Fixture.load(FIXTURE_PATH)
+    fixture_path = HERE / "fixtures" / f"{fixture_name}.json"
+    if not fixture_path.exists():
+        pytest.skip(f"missing correlated extrapolation fixture: {fixture_name}")
+
+    fix = Fixture.load(fixture_path)
     gam = _fit_fixture(fix)
     x_extrap = np.asarray(fix.inputs.x_extrap, dtype=float)
     rust = np.asarray(gam.predict(x_extrap), dtype=float)
