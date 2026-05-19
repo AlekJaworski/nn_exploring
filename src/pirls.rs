@@ -4199,6 +4199,72 @@ pub fn fit_pirls_fastreml(
     let y_mean: f64 = y.iter().sum::<f64>() / (n as f64).max(1.0);
     let y_var: f64 =
         y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
+
+    // ───── C2-init: seed the intercept from y so the first IRLS step
+    // ─────         doesn't shoot eta into the [`crate::link::Link`]
+    // ─────         saturation plateau.
+    //
+    // mgcv's gam.fit3 calls `family$initialize` (efam.r: `negbin$initialize`
+    // sets `mustart = y + (y == 0)/6`, `etastart = link(mustart)`) before
+    // the IRLS loop runs, so the very first working pair (w, z) lives in
+    // a sensible η range. Our fREML port starts from β = 0 → η = 0,
+    // which for log-link families means μ = 1 everywhere — for a y with
+    // mean far from 1 (link(y_mean) → large), the first solve over-shoots
+    // into η > eta_max (the log-link safety clamp) and converges to a
+    // degenerate β on the saturation plateau (the score is flat there
+    // because μ is clamped, so Newton has nothing to gradient on).
+    //
+    // **Why this is gated.** Setting the intercept unconditionally shifts
+    // the optimizer trajectory in flat-REML regions and breaks byte
+    // parity on fixtures where β = 0 already starts inside a
+    // well-conditioned region (e.g. Gamma(log) with y_mean ≈ 3 or scat
+    // with y_mean ≈ 0). We only apply the init when the natural starting
+    // η = 0 is *far enough* from `link(y_mean)` that the first solve
+    // could plausibly land in saturation — operationalized as
+    // `|link(y_mean_safe)| > eta_max · 0.15`, i.e. ≥ 15 % of the way to
+    // the safety clamp. For eta_max = 20 the cutoff is `|η_init| > 3`,
+    // which catches the em_nb regime (`log(63) ≈ 4.1`) while preserving
+    // existing parity on the Poisson / Gamma / Tweedie / Inverse-Gauss
+    // fixtures whose `|log(y_mean)|` is well under 3.
+    //
+    // We set only the intercept (column 0 of the design matrix, which
+    // is all-ones — see `Gam::build_lpmatrix`); the smooth coefficients
+    // stay at 0 so initial η is constant ≈ link(mean(y)) for every row.
+    // The first IRLS solve then opens up the smooths from a
+    // well-conditioned baseline.
+    if p > 0 {
+        let link_kind = family.link_kind();
+        let mu_init: Option<f64> = match link_kind {
+            crate::link::Link::Log { .. } => {
+                let n_f = n as f64;
+                let safe_sum: f64 = y
+                    .iter()
+                    .map(|&yi| if yi <= 0.0 { 1.0 / 6.0 } else { yi })
+                    .sum();
+                Some((safe_sum / n_f).max(1e-3))
+            }
+            crate::link::Link::Logit { .. } => Some(y_mean.clamp(1e-3, 1.0 - 1e-3)),
+            // Identity / Reciprocal: β = 0 init has worked fine and the
+            // saturation pathology doesn't apply (no exp in the
+            // inverse link). Leave the intercept at 0 to preserve
+            // existing parity trajectories.
+            crate::link::Link::Identity | crate::link::Link::Reciprocal { .. } => None,
+        };
+        if let Some(mu) = mu_init {
+            let eta_init = family.link(mu);
+            let eta_max_kind = match link_kind {
+                crate::link::Link::Log { eta_max } => eta_max,
+                crate::link::Link::Logit { eta_max } => eta_max,
+                _ => 20.0,
+            };
+            // Only adopt the init when it materially differs from 0
+            // — otherwise the optimizer's trajectory under β = 0
+            // is identical and we get free parity preservation.
+            if eta_init.abs() > 0.15 * eta_max_kind {
+                beta[0] = eta_init;
+            }
+        }
+    }
     let mut log_phi = config.log_phi_init.unwrap_or_else(|| {
         if config.phi_fixed {
             // Known-φ families: φ ≡ 1 per bam.r:696 (`log.phi = log(scale)` with
@@ -4385,8 +4451,7 @@ pub fn fit_pirls_fastreml(
                 outer
             )));
         }
-        // Silence "unused" warnings on the retry path's temp bindings.
-        let _ = beta_iter_start;
+        // `beta_iter_start` is now consumed by the β-step blending in C14.
 
         // ─── C13: mgcv-style step-blending. On the first iter we accept the
         // proposal as-is (`Nstep == 0` at start). Subsequently, the bam.r
@@ -4443,8 +4508,106 @@ pub fn fit_pirls_fastreml(
             last_log_phi_step = 0.0;
         }
 
-        // ─── C14: update β from the (possibly refreshed) proposal. ──────────
-        beta = accepted_prop.beta.clone();
+        // ─── C14: update β from the (possibly refreshed) proposal, with
+        // ───      mgcv-style deviance-based β-step blending. ─────────────
+        //
+        // bam.r:586-604: when the proposed β at the new (ρ, log φ) gives a
+        // *worse* family deviance than `beta_iter_start` (the β we entered
+        // this outer iter with), halve toward `beta_iter_start` until the
+        // deviance improves — up to 25 halvings, mirroring mgcv's
+        // `step.halve` bound. Skipped on `outer < 2` (mgcv's `c.iter=2`
+        // guard) so the legitimate λ bedding-in phase isn't damped.
+        //
+        // **Why this matters for log-link saturation.** Even with the
+        // [`crate::link`] conjugation invariant making the IRLS working
+        // pair finite past η > eta_max, the *score there is flat*: μ
+        // saturates at exp(eta_max), so the family deviance plateaus.
+        // If the inner solve over-shoots into this plateau, the new β
+        // is finite but the *fit is worse* (more mass in saturation =
+        // bigger Σ d_i). Without the deviance check, the optimizer
+        // happily keeps β in the plateau and reports "converged" at a
+        // degenerate point. The deviance step-halving catches the
+        // pathology by rejecting any step that worsens the per-row
+        // deviance — symmetrically to mgcv's bam.r path which has the
+        // same guard for the same reason.
+        let candidate_beta = accepted_prop.beta.clone();
+        // mgcv bam.r:582-602 β-step blending — halve toward β₀ while
+        // the **penalised** deviance `dev + β'·(Σ λ_k S_k)·β` has not
+        // improved, up to `kk < 30` halvings.
+        //
+        //   if ((!is.finite(dev) || dev0 + bSb0 < dev + bSb) && kk < 30)
+        //     coef <- coef0*istepr + coef/stepr     # istepr=0.5
+        //     ...
+        //
+        // **Why penalised, not raw, deviance.** The Newton step on
+        // (ρ, log φ) shifts the penalty trace `β'Sβ` and the raw
+        // deviance simultaneously — they trade off. Raw-deviance
+        // halving rejects legitimate moves that improve the *score*
+        // (= dev + penalty) by trading a tiny raw-deviance increase
+        // for a larger penalty drop. mgcv uses penalised deviance.
+        //
+        // **Gate (outer ≥ 2)**: mirrors mgcv's `c.iter = 2` guard so
+        // the legitimate λ bedding-in phase at outer 0/1 isn't damped.
+        //
+        // **Gaussian skip**: mgcv's bam.r:567 wraps the IRLS step (and
+        // the blending inside it) in `if (iter==1 || !additive)`, where
+        // `additive = TRUE` iff `family == "gaussian" && link == "identity"`
+        // (bam.r:500). For Gaussian-identity the solve `(X'X + S(λ))β =
+        // X'y` is the *global* penalised-LS minimum at the new λ — no
+        // step control is mathematically possible because the proposal
+        // is already optimal. Skipping the blending here matches mgcv
+        // exactly and avoids the floating-point chatter near the
+        // penalised-RSS minimum that strict-`>` halving would otherwise
+        // catch (Gaussian's pdev at convergence sits in the 1e-6
+        // relative-noise band of the LS solve, while our `config.tol`
+        // is 1e-7 — there is no slack that satisfies both, so the
+        // mathematical answer is "don't compare").
+        let additive_gaussian = matches!(family, Family::Gaussian);
+        beta = if outer >= 2 && !additive_gaussian {
+            let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
+            let pen_at = |b: &Array1<f64>| -> f64 {
+                sl.iter()
+                    .zip(lambdas.iter())
+                    .map(|(sk, &lam)| lam * sk.quadratic_form(b))
+                    .sum()
+            };
+            let pdev_at = |b: &Array1<f64>| -> f64 {
+                let eta_b = fastreml_compute_eta(x, discrete, b);
+                let mu_b: Array1<f64> =
+                    eta_b.iter().map(|&e| family.inverse_link(e)).collect();
+                let dev = match prior_weights {
+                    Some(pw) => compute_weighted_deviance(y, &mu_b, family, pw),
+                    None => compute_deviance(y, &mu_b, family),
+                };
+                dev + pen_at(b)
+            };
+            let pdev_old = pdev_at(&beta_iter_start);
+            let mut beta_blend = candidate_beta.clone();
+            let mut pdev_new = pdev_at(&beta_blend);
+            let mut halvings = 0usize;
+            const MAX_HALVINGS: usize = 30; // mgcv bam.r:594 `kk < 30`
+            while (!pdev_new.is_finite() || pdev_new > pdev_old)
+                && halvings < MAX_HALVINGS
+            {
+                // β ← (β₀ + β)/2   (mgcv's istepr=0.5, stepr=2 case)
+                for j in 0..beta_blend.len() {
+                    beta_blend[j] = 0.5 * (beta_iter_start[j] + beta_blend[j]);
+                }
+                pdev_new = pdev_at(&beta_blend);
+                halvings += 1;
+            }
+            if halvings >= MAX_HALVINGS && (!pdev_new.is_finite() || pdev_new > pdev_old) {
+                // Halving exhausted without improvement — revert to
+                // iter-start β. The (ρ, log φ) step is still applied,
+                // so the next outer iter rebuilds (w, z) at the new
+                // smoothing and re-tries.
+                beta_iter_start.clone()
+            } else {
+                beta_blend
+            }
+        } else {
+            candidate_beta
+        };
         let _ = (w, z); // IRLS pair consumed via xx/f; final pass recomputes.
 
         // ─── C15: refresh family-shape params via callback (scat θ Newton). ─

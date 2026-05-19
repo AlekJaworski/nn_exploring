@@ -53,20 +53,18 @@ def _load_case(seed: int) -> tuple[np.ndarray, np.ndarray]:
     return x, y
 
 
-# Seeds where fREML lands in a degenerate region of β-space (over-shoots
-# the η > 20 plateau induced by the inverse-link clamp). The fit no longer
-# throws (the original bug), but converges to β with magnitude >> mgcv's,
-# and the wrapper's response-scale prediction (np.exp on a link-scale
-# value) overflows. Still a known gap — fREML needs better step control
-# in this flat-score regime (the same class of issue as the existing
-# bam-vs-gam divergence on flat fixtures).
-_FREML_CONVERGENCE_GAPS = {137}
-
-
 @pytest.mark.skipif(not EM_NB_DIR.exists(), reason="em_nb_cases data not checked out")
 @pytest.mark.parametrize("seed", SEEDS)
 def test_em_nb_freml_k4_no_crash(seed: int) -> None:
-    """Production-equivalent fit completes and returns finite link-scale predictions."""
+    """Production-equivalent fit completes and returns finite, in-range predictions.
+
+    Covers two failure modes that both used to bite this case at k=4:
+      1. Non-finite gradient at fit time (original crash, closed by the
+         [`crate::link`] conjugation fix).
+      2. Degenerate β converging on the η > eta_max saturation plateau
+         (closed by mgcv-style β init at link(mean(y)) + deviance-based
+         β-step blending in `fit_pirls_fastreml`).
+    """
     x, y = _load_case(seed)
     gam = mgcv_rust.Gam(
         predictors=["x1"],
@@ -77,38 +75,18 @@ def test_em_nb_freml_k4_no_crash(seed: int) -> None:
         min_k=3,
     )
     gam.fit(x, y)
-    # Check the link-scale prediction (Rust's clamped inverse_link is
-    # applied here directly via the native predict path, so it stays
-    # finite even when β over-shoots). The high-level wrapper's
-    # response-scale path uses np.exp without a clamp and can overflow
-    # on the degenerate seeds — see _FREML_CONVERGENCE_GAPS.
-    pred_link = np.asarray(gam.predict(x, scale="link"), dtype=float)
-    assert pred_link.shape == y.shape, (
-        f"link prediction shape {pred_link.shape} != y shape {y.shape}"
-    )
-    assert np.all(np.isfinite(pred_link)), (
-        f"seed={seed}: link-scale predictions contain non-finite values "
-        f"(min={pred_link.min()}, max={pred_link.max()})"
-    )
-
-    if seed in _FREML_CONVERGENCE_GAPS:
-        # Skip the response-scale check for known-degenerate seeds. The
-        # important regression invariant (no non-finite gradient at fit
-        # time) is covered above.
-        pytest.xfail(
-            f"seed={seed}: fREML over-shoots the η>20 inverse-link plateau "
-            f"and converges to a degenerate β. Tracked separately."
-        )
-
     pred = np.asarray(gam.predict(x), dtype=float)
+    assert pred.shape == y.shape, (
+        f"seed={seed}: prediction shape {pred.shape} != y shape {y.shape}"
+    )
     assert np.all(np.isfinite(pred)), (
-        f"seed={seed}: response predictions contain non-finite values "
+        f"seed={seed}: predictions contain non-finite values "
         f"(min={pred.min()}, max={pred.max()})"
     )
     assert pred.min() > 0.0, (
-        f"seed={seed}: response prediction has non-positive value {pred.min()}"
+        f"seed={seed}: prediction has non-positive value {pred.min()}"
     )
     y_max = float(y.max())
     assert pred.max() < 10.0 * y_max, (
-        f"seed={seed}: response prediction max {pred.max()} far exceeds y_max {y_max}"
+        f"seed={seed}: prediction max {pred.max()} far exceeds y_max {y_max}"
     )
